@@ -7,6 +7,9 @@
  * were when that block started; a block that never started keeps its settings
  * from the start of the run. Keys a block lists in `resultConfigKeys` hold its
  * own result and are read when the run is saved.
+ *
+ * A cancelled run is saved only when a block finished a generation in that
+ * run, as `partial`, and never holds a block result with status `running`.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
@@ -44,6 +47,44 @@ function GenBlock({ blockId, setOutput, registerExecute }: BlockComponentProps) 
       await new Promise<void>((resolve) => waiting.set(blockId, resolve))
       waiting.delete(blockId)
       setOutput('image', generatedRef(blockId))
+    })
+  })
+  return null
+}
+
+/** A generation block whose every call emits a new image, so repeated outputs can be told apart. */
+const genCalls = new Map<string, number>()
+function numberedRef(blockId: string, n: number) {
+  return { kind: 'image-ref', local: `/outputs/${blockId}-${n}.png`, meta: { job_id: `job-${blockId}-${n}`, provider: 'kie', model: 'm', cost: null } }
+}
+function NumberedGenBlock({ blockId, setOutput, registerExecute }: BlockComponentProps) {
+  useEffect(() => {
+    registerExecute(async () => {
+      await new Promise<void>((resolve) => waiting.set(blockId, resolve))
+      waiting.delete(blockId)
+      const n = (genCalls.get(blockId) ?? 0) + 1
+      genCalls.set(blockId, n)
+      setOutput('image', numberedRef(blockId, n))
+    })
+  })
+  return null
+}
+
+/** Stands in for a loader: emits an image no generation job made. */
+function PlainImageBlock({ blockId, setOutput, registerExecute }: BlockComponentProps) {
+  useEffect(() => {
+    registerExecute(async () => {
+      setOutput('image', { kind: 'image-ref', local: `/outputs/${blockId}.png` })
+    })
+  })
+  return null
+}
+
+/** An iterator: the rest of the chain runs once per item. */
+function IterBlock({ setOutput, registerExecute }: BlockComponentProps) {
+  useEffect(() => {
+    registerExecute(async () => {
+      setOutput('items', ['a', 'b', 'c'])
     })
   })
   return null
@@ -90,6 +131,18 @@ beforeAll(() => {
     inputs: [], outputs: [{ name: 'prompt', kind: PORT_TEXT }],
     configKeys: ['idea', 'output'], resultConfigKeys: ['output'], component: WriterBlock,
   })
+  registerBlockDef({
+    type: 'rs_gen_n', label: 'Numbered Gen', description: '', size: 'sm', canStart: true,
+    inputs: [], outputs: [{ name: 'image', kind: PORT_IMAGE }], configKeys: [], component: NumberedGenBlock,
+  })
+  registerBlockDef({
+    type: 'rs_plain', label: 'Plain Image', description: '', size: 'sm', canStart: true,
+    inputs: [], outputs: [{ name: 'image', kind: PORT_IMAGE }], configKeys: [], component: PlainImageBlock,
+  })
+  registerBlockDef({
+    type: 'rs_iter', label: 'Iter', description: '', size: 'sm', canStart: true, iterator: true,
+    inputs: [], outputs: [{ name: 'items', kind: PORT_TEXT }], configKeys: [], component: IterBlock,
+  })
 })
 
 const captured: { api: ReturnType<typeof usePipeline> | null } = { api: null }
@@ -123,10 +176,21 @@ const isWaiting = (blockId: string) => waitFor(() => expect(waiting.has(blockId)
 const release = (blockId: string) => act(async () => { waiting.get(blockId)!() })
 
 /** Start a run without waiting for it; `done` settles when the run has ended. */
-function startRun() {
+function startRun(opts?: { continueFromExisting?: boolean }) {
   let done!: Promise<{ hadError: boolean }>
-  act(() => { done = api().runPipeline() })
+  act(() => { done = api().runPipeline(opts) })
   return done
+}
+
+/** Cancel the run in flight and wait for it to end. Blocks left waiting never finish. */
+async function cancelRun(done: Promise<{ hadError: boolean }>) {
+  let result!: { hadError: boolean }
+  await act(async () => {
+    api().cancelPipeline()
+    result = await done
+  })
+  waiting.clear()
+  return result
 }
 
 type SavedBlock = { type: string; config?: Record<string, unknown> }
@@ -142,6 +206,7 @@ beforeEach(() => {
   sessionStorage.clear()
   localStorage.clear()
   waiting.clear()
+  genCalls.clear()
   vi.mocked(saveRun).mockClear()
 })
 afterEach(() => vi.unstubAllGlobals())
@@ -253,5 +318,176 @@ describe('the saved run', () => {
     await act(async () => { await done })
 
     expect(savedRun().flow_snapshot).toMatchObject({ name: 'Pipeline Run', schema_version: 6, version: 1 })
+  })
+})
+
+describe('a cancelled run', () => {
+  const statuses = () => savedRun().block_results.map((b) => b.status)
+
+  it('is not saved when it is cancelled during the first block', async () => {
+    const [gen] = renderFlow([{ type: 'rs_gen', config: { prompt: 'a cat' } }, { type: 'rs_view' }])
+    const done = startRun()
+    await isWaiting(gen)
+    expect(await cancelRun(done)).toEqual({ hadError: false })
+
+    expect(saveRun).not.toHaveBeenCalled()
+  })
+
+  it('is saved as partial, with the finished generation, when cancelled after a generation finished', async () => {
+    const [first, second] = renderFlow([
+      { type: 'rs_gen', config: { prompt: 'first' } }, { type: 'rs_gen', config: { prompt: 'second' } }, { type: 'rs_view' },
+    ])
+    const done = startRun()
+    await isWaiting(first)
+    await release(first)
+    await isWaiting(second)
+    expect(await cancelRun(done)).toEqual({ hadError: false })
+
+    const run = savedRun()
+    expect(run.status).toBe('partial')
+    expect(statuses()).toEqual(['completed', 'cancelled', 'idle'])
+    expect(run.block_results[0].outputs.image).toEqual({ kind: 'image', value: generatedRef(first) })
+    expect(run.block_results[1].outputs).toEqual({})
+    expect(snapshotTypes()).toEqual(['rs_gen', 'rs_gen', 'rs_view'])
+  })
+
+  it('is not saved when the only finished output was not made by a generation', async () => {
+    const [, gen] = renderFlow([{ type: 'rs_plain' }, { type: 'rs_gen', config: { prompt: 'a cat' } }])
+    const done = startRun()
+    await isWaiting(gen)
+    await cancelRun(done)
+
+    expect(saveRun).not.toHaveBeenCalled()
+  })
+
+  it('marks every branch that was running as cancelled', async () => {
+    const [root, left, right] = renderFlow([
+      { type: 'rs_gen', config: { prompt: 'root' }, branches: [[{ type: 'rs_gen' }], [{ type: 'rs_gen' }]] },
+    ])
+    const done = startRun()
+    await isWaiting(root)
+    await release(root)
+    await isWaiting(left)
+    await isWaiting(right)
+    await cancelRun(done)
+
+    expect(savedRun().status).toBe('partial')
+    expect(statuses()).toEqual(['completed', 'cancelled', 'cancelled'])
+  })
+
+  it('keeps a branch that finished before the cancel', async () => {
+    const [root, left, right] = renderFlow([
+      { type: 'rs_gen', config: { prompt: 'root' }, branches: [[{ type: 'rs_gen' }], [{ type: 'rs_gen' }]] },
+    ])
+    const done = startRun()
+    await isWaiting(root)
+    await release(root)
+    await isWaiting(left)
+    await isWaiting(right)
+    await release(left)
+    await cancelRun(done)
+
+    expect(statuses()).toEqual(['completed', 'completed', 'cancelled'])
+    expect(savedRun().block_results[1].outputs.image.value).toEqual(generatedRef(left))
+  })
+
+  it('cancelled mid-iteration keeps the finished items once and does not count the cancelled item', async () => {
+    const [iter, gen] = renderFlow([{ type: 'rs_iter' }, { type: 'rs_gen_n' }])
+    const done = startRun()
+    await isWaiting(gen)
+    await release(gen)
+    await waitFor(() => expect(genCalls.get(gen)).toBe(1))
+    await isWaiting(gen)
+    await cancelRun(done)
+
+    const run = savedRun()
+    expect(run.status).toBe('partial')
+    expect(statuses()).toEqual(['completed', 'cancelled'])
+    expect(run.block_results[1].outputs.image.value).toEqual(numberedRef(gen, 1))
+    expect(api().blockStates.get(iter)?.statusMessage).toBe('1/3 items completed')
+  })
+
+  it('cancelled mid-iteration keeps a generation that finished inside the cancelled item', async () => {
+    const [, first, second] = renderFlow([{ type: 'rs_iter' }, { type: 'rs_gen_n' }, { type: 'rs_gen_n' }])
+    const done = startRun()
+    await isWaiting(first)
+    await release(first)
+    await isWaiting(second)
+    await release(second)
+    await waitFor(() => expect(genCalls.get(second)).toBe(1))
+    await isWaiting(first)
+    await release(first)
+    await isWaiting(second)
+    await cancelRun(done)
+
+    const run = savedRun()
+    expect(statuses()).toEqual(['completed', 'completed', 'cancelled'])
+    expect(run.block_results[1].outputs.image.value).toEqual([numberedRef(first, 1), numberedRef(first, 2)])
+    expect(run.block_results[2].outputs.image.value).toEqual(numberedRef(second, 1))
+  })
+
+  it('is not saved when the first item of an iteration is cancelled', async () => {
+    const [, gen] = renderFlow([{ type: 'rs_iter' }, { type: 'rs_gen_n' }])
+    const done = startRun()
+    await isWaiting(gen)
+    await cancelRun(done)
+
+    expect(saveRun).not.toHaveBeenCalled()
+  })
+
+  it('a cancelled Continue run is not saved when it only holds output carried over from the earlier run', async () => {
+    const [first, second] = renderFlow([{ type: 'rs_gen', config: { prompt: 'first' } }, { type: 'rs_gen', config: { prompt: 'second' } }])
+    const done = startRun()
+    await isWaiting(first)
+    await release(first)
+    await isWaiting(second)
+    await cancelRun(done)
+    expect(saveRun).toHaveBeenCalledTimes(1)
+    vi.mocked(saveRun).mockClear()
+
+    const continued = startRun({ continueFromExisting: true })
+    await isWaiting(second)
+    expect(waiting.has(first)).toBe(false)
+    await cancelRun(continued)
+
+    expect(saveRun).not.toHaveBeenCalled()
+  })
+
+  it('a cancelled Continue run is saved when it finished a generation of its own', async () => {
+    const [first, second, third] = renderFlow([
+      { type: 'rs_gen', config: { prompt: 'first' } }, { type: 'rs_gen', config: { prompt: 'second' } }, { type: 'rs_gen', config: { prompt: 'third' } },
+    ])
+    const done = startRun()
+    await isWaiting(first)
+    await release(first)
+    await isWaiting(second)
+    await cancelRun(done)
+    vi.mocked(saveRun).mockClear()
+
+    const continued = startRun({ continueFromExisting: true })
+    await isWaiting(second)
+    await release(second)
+    await isWaiting(third)
+    await cancelRun(continued)
+
+    expect(savedRun().status).toBe('partial')
+    expect(statuses()).toEqual(['completed', 'completed', 'cancelled'])
+    expect(savedRun().block_results[1].outputs.image.value).toEqual(generatedRef(second))
+  })
+
+  it('a run that was not cancelled is saved as before, after an earlier run was cancelled', async () => {
+    const [gen] = renderFlow([{ type: 'rs_gen', config: { prompt: 'a cat' } }])
+    const cancelled = startRun()
+    await isWaiting(gen)
+    await cancelRun(cancelled)
+    expect(saveRun).not.toHaveBeenCalled()
+
+    const done = startRun()
+    await isWaiting(gen)
+    await release(gen)
+    await act(async () => { expect(await done).toEqual({ hadError: false }) })
+
+    expect(savedRun().status).toBe('completed')
+    expect(statuses()).toEqual(['completed'])
   })
 })

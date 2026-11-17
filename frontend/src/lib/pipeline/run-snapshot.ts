@@ -10,6 +10,8 @@
  * Keys a block writes itself while running (`resultConfigKeys`) are read when
  * the flow is exported, after the block wrote them.
  */
+import { readGenerationMeta } from '@/lib/image-ref'
+import type { BlockResult } from '@/lib/types'
 import { exportBlockConfig, exportFlow, type SavedFlow } from './flow-io'
 import { getBlockDef } from './registry'
 import { walkBlocks } from './tree-utils'
@@ -45,4 +47,22 @@ export function createRunSnapshot(pipeline: Pipeline): RunSnapshot {
     },
     exportFlow: (name) => exportFlow(pipeline, name, { configFor }),
   }
+}
+
+const GENERATED_KINDS = new Set(['image', 'video', 'audio'])
+const MAX_VALUE_DEPTH = 16
+
+function isGeneratedRef(value: unknown, depth = 0): boolean {
+  if (Array.isArray(value)) return depth < MAX_VALUE_DEPTH && value.some((v) => isGeneratedRef(v, depth + 1))
+  return readGenerationMeta(value) !== null
+}
+
+/**
+ * True if a block's saved outputs hold an image, video or audio made by a
+ * generation job (a reference with `meta.job_id`). Loader files, plain URLs and
+ * locally edited files do not count. The same rule as `_has_generated_output`
+ * in `backend/db.py`, which decides whether an unfinished run is listed.
+ */
+export function holdsGeneratedOutput(outputs: BlockResult['outputs']): boolean {
+  return Object.values(outputs).some((out) => GENERATED_KINDS.has(out.kind) && isGeneratedRef(out.value))
 }

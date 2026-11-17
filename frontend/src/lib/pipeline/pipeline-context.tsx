@@ -35,7 +35,7 @@ import {
   type FlowImportOutcome,
 } from './flow-io'
 import { findRunBlockingUnsupportedBlocks, formatUnsupportedRunMessage } from './legacy-blocks'
-import { createRunSnapshot } from './run-snapshot'
+import { createRunSnapshot, holdsGeneratedOutput } from './run-snapshot'
 import { selectedSourceIds } from './source-resolution'
 import { findRunBlockers, formatRunBlockerMessage } from './run-blockers'
 import {
@@ -1054,6 +1054,8 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     let hadError = false
     let hadPartialFailure = false
     let completedBlockExecutions = 0
+    // Blocks that finished an execution in this run; a Continue run carries the rest over.
+    const finishedThisRun = new Set<string>()
 
     const updateIterState = (state: IterationState | null) => {
       iterationStateRef.current = state
@@ -1153,6 +1155,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
             forwardOutputs(block, freshInputs)
             setBlockStatus(block.id, 'completed')
             completedBlockExecutions++
+            finishedThisRun.add(block.id)
             if (execResult?.partialFailure) {
               hadPartialFailure = true
             }
@@ -1170,6 +1173,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
             forwardOutputs(block, freshInputs)
             setBlockStatus(block.id, 'completed')
             completedBlockExecutions++
+            finishedThisRun.add(block.id)
             // Double rAF yield to let React paint forwarded outputs before next block starts
             await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
           }
@@ -1272,12 +1276,16 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
                 for (const branch of iterBranches) {
                   await executeChain(branch)
                 }
-                iterState.items[itemIdx].status = 'completed'
+                // executeChain ends quietly on a cancel, so ask the run's own signal.
+                const itemCancelled = runAbortController.signal.aborted
+                iterState.items[itemIdx].status = itemCancelled ? 'skipped' : 'completed'
 
                 // Collect downstream outputs from this iteration
                 for (const bId of downstreamBlockIds) {
                   const state = blockStatesRef.current.get(bId)
                   if (!state?.outputs) continue
+                  // A block the cancel interrupted still holds the previous item's output.
+                  if (itemCancelled && state.status !== 'completed') continue
                   let acc = accumulatedOutputs.get(bId)
                   if (!acc) { acc = {}; accumulatedOutputs.set(bId, acc) }
                   for (const [portName, value] of Object.entries(state.outputs)) {
@@ -1286,6 +1294,10 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
                     if (Array.isArray(value)) acc[portName].push(...value)
                     else acc[portName].push(value)
                   }
+                }
+                if (itemCancelled) {
+                  updateIterState(iterState)
+                  break
                 }
               } catch (e) {
                 if (e instanceof DOMException && e.name === 'AbortError') {
@@ -1339,11 +1351,14 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
 
       // ---- Auto-save run to history ----
       const durationMs = Date.now() - startTime
+      // This run's own signal: `cancelledRef` is shared with the next run, which resets it.
+      const wasCancelled = runAbortController.signal.aborted
       const runStatus: RunEntry['status'] = hadError
         ? (completedBlockExecutions === 0 ? 'failed' : 'partial')
-        : (hadPartialFailure ? 'partial' : 'completed')
+        : (hadPartialFailure || wasCancelled ? 'partial' : 'completed')
 
       let globalIdx = 0
+      let generatedThisRun = false
       const blockResults: BlockResult[] = []
       for (const block of walkBlocks(blocks)) {
         const state = blockStatesRef.current.get(block.id)
@@ -1359,10 +1374,15 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
           block_index: globalIdx++,
           block_type: block.type,
           block_label: block.label || def?.label || block.type,
-          status: state?.status ?? 'idle',
+          // Only a cancel leaves a block running when the run ends.
+          status: state?.status === 'running' ? 'cancelled' : state?.status ?? 'idle',
           outputs,
         })
+        if (finishedThisRun.has(block.id) && holdsGeneratedOutput(outputs)) generatedThisRun = true
       }
+
+      // A cancelled run is kept only for a generation it finished itself: that output was paid for.
+      if (wasCancelled && !generatedThisRun) return { hadError }
 
       const flowSnapshot = runSnapshot.exportFlow('Pipeline Run')
       const now = new Date()

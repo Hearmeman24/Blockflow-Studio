@@ -254,6 +254,16 @@ describe('runFailure', () => {
     expect(runFailure(run([], {}, 'partial'))).toBe('The run finished partly.')
     expect(runFailure(BYOK)).toBeNull()
   })
+
+  it('says which block a cancelled run stopped at', () => {
+    const gen = block(0, 'g', 'Text to Image', {})
+    const one = run([gen, block(1, 'v', 'Image to Video', {}, 'cancelled'), block(2, 'w', 'Video Viewer', {}, 'idle')], {}, 'partial')
+    expect(runFailure(one)).toBe('Cancelled while Image to Video was running.')
+    const two = run([gen, block(1, 'a', 'Left', {}, 'cancelled'), block(2, 'b', 'Right', {}, 'cancelled')], {}, 'partial')
+    expect(runFailure(two)).toBe('Cancelled while Left and Right were running.')
+    const both = run([block(0, 'a', 'Left', {}, 'error'), block(1, 'b', 'Right', {}, 'cancelled')], {}, 'partial')
+    expect(runFailure(both)).toBe('Left failed. Cancelled while Right was running.')
+  })
 })
 
 describe('runOutputs', () => {

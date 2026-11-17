@@ -240,8 +240,17 @@ export function runModelId(run: RunEntry, primary: PrimaryArtifact | null = find
 /** A one-line summary of what went wrong, for runs that did not complete. */
 export function runFailure(run: RunEntry): string | null {
   if (run.status === 'completed') return null
-  const failed = (run.block_results ?? []).filter((b) => b.status === 'error').map((b) => b.block_label)
-  if (failed.length > 0) return `${failed.join(', ')} failed.`
+  const labels = (status: string) => (run.block_results ?? []).filter((b) => b.status === status).map((b) => b.block_label)
+  const failed = labels('error')
+  // A block the user cancelled; the run was saved for the generation finished before it.
+  const cancelled = labels('cancelled')
+  const parts: string[] = []
+  if (failed.length > 0) parts.push(`${failed.join(', ')} failed.`)
+  if (cancelled.length > 0) {
+    const names = cancelled.length > 1 ? `${cancelled.slice(0, -1).join(', ')} and ${cancelled[cancelled.length - 1]}` : cancelled[0]
+    parts.push(`Cancelled while ${names} ${cancelled.length > 1 ? 'were' : 'was'} running.`)
+  }
+  if (parts.length > 0) return parts.join(' ')
   return run.status === 'partial' ? 'The run finished partly.' : 'The run failed.'
 }
 
