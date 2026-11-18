@@ -6,6 +6,7 @@ import {
   useState,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   type ReactNode,
 } from 'react'
@@ -13,6 +14,10 @@ import { fetchFlow, fetchFlows, saveFlowToDisk, type FlowEntry } from '@/lib/api
 import type { FlowImportOutcome, SavedFlow } from './flow-io'
 import { migrateSavedFlow, type FlowImportReport } from './flow-migrations'
 import { mergeImportReports, notifyFlowImport, notifyFlowImportFailure } from './flow-import-notice'
+import { LOOP_OFF, loopIteration, needsRestart, transitionLoop, type LoopEvent, type LoopState } from './loop-mode'
+import type { PublishedTabRun, RunOutcome, TabRunState } from './run-phase'
+
+export type { TabRunState } from './run-phase'
 
 // ---- Types ----
 
@@ -32,8 +37,6 @@ export interface TabActions {
   hasHitlBlocks: () => boolean
 }
 
-export type TabRunState = 'idle' | 'running' | 'done'
-
 /** Live runtime info pushed up from each PipelineProvider for the job manager. */
 export interface TabRuntimeInfo {
   runningBlockLabel?: string
@@ -43,7 +46,10 @@ export interface TabRuntimeInfo {
 interface PipelineTabsContextValue {
   tabs: PipelineTab[]
   activeTabId: string
+  /** Published by each tab's PipelineProvider from its run phase; nothing else writes it. */
   tabRunStates: Record<string, TabRunState>
+  /** How each tab's last run ended (`cancelled` while a cancelled run unwinds). */
+  tabRunOutcomes: Record<string, RunOutcome | null>
   isAnyRunning: boolean
   availableFlows: FlowEntry[]
   setActiveTabId: (id: string) => void
@@ -53,11 +59,15 @@ interface PipelineTabsContextValue {
   duplicateTab: (id: string) => string
   registerTabActions: (tabId: string, actions: TabActions) => void
   unregisterTabActions: (tabId: string) => void
-  setTabRunState: (tabId: string, state: TabRunState) => void
+  /** The one writer of `tabRunStates`: a tab's PipelineProvider publishing its run phase. */
+  publishTabRun: (tabId: string, run: PublishedTabRun) => void
   tabRuntimeInfos: Record<string, TabRuntimeInfo>
   setTabRuntimeInfo: (tabId: string, info: TabRuntimeInfo) => void
   cancelTabPipeline: (tabId: string) => void
+  loopStates: Record<string, LoopState>
+  /** Derived from `loopStates`: true for each looping tab. */
   loopingTabs: Record<string, boolean>
+  /** Derived from `loopStates`: the current iteration of each looping tab. */
   loopIterations: Record<string, number>
   startLoop: () => void
   stopLoop: (tabId?: string) => void
@@ -165,9 +175,39 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
   })
   const [availableFlows, setAvailableFlows] = useState<FlowEntry[]>([])
   const [tabRuntimeInfos, setTabRuntimeInfos] = useState<Record<string, TabRuntimeInfo>>({})
-  const [loopingTabs, setLoopingTabs] = useState<Record<string, boolean>>({})
-  const [loopIterations, setLoopIterations] = useState<Record<string, number>>({})
+  const [tabRunOutcomes, setTabRunOutcomes] = useState<Record<string, RunOutcome | null>>({})
+  const [loopStates, setLoopStates] = useState<Record<string, LoopState>>({})
+  const loopStatesRef = useRef<Record<string, LoopState>>({})
+  /** Tabs closed in this session: a run that unwinds after its tab closed publishes nothing. */
+  const removedTabsRef = useRef<Set<string>>(new Set())
   const tabActionsRef = useRef<Map<string, TabActions>>(new Map())
+
+  /** Apply a loop event to one tab; returns whether the tab's loop state changed. */
+  const dispatchLoop = useCallback((tabId: string, event: LoopEvent): boolean => {
+    const prev = loopStatesRef.current[tabId] ?? LOOP_OFF
+    const next = transitionLoop(prev, event)
+    if (next === prev) return false
+    const all = { ...loopStatesRef.current }
+    if (next.kind === 'off') delete all[tabId]
+    else all[tabId] = next
+    loopStatesRef.current = all
+    setLoopStates(all)
+    return true
+  }, [])
+
+  const loopingTabs = useMemo(() => {
+    const out: Record<string, boolean> = {}
+    for (const [id, state] of Object.entries(loopStates)) if (state.kind === 'looping') out[id] = true
+    return out
+  }, [loopStates])
+  const loopIterations = useMemo(() => {
+    const out: Record<string, number> = {}
+    for (const [id, state] of Object.entries(loopStates)) {
+      const iteration = loopIteration(state)
+      if (iteration !== null) out[id] = iteration
+    }
+    return out
+  }, [loopStates])
   const hydrated = useRef(false)
 
   const refreshAvailableFlows = useCallback(async () => {
@@ -194,9 +234,10 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
     const stored = loadTabsFromStorage()
     const state = stored ?? createDefaultTabs()
     saveTabs(state.tabs, state.activeTabId)
-    setTabRunStates(() => {
+    // Fills in a default only: a tab's provider may already have published its run state.
+    setTabRunStates((prev) => {
       const next: Record<string, TabRunState> = {}
-      for (const tab of state.tabs) next[tab.id] = 'idle'
+      for (const tab of state.tabs) next[tab.id] = prev[tab.id] ?? 'idle'
       return next
     })
     setTabState(state)
@@ -244,6 +285,7 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
 
   const removeTab = useCallback((id: string) => {
     // Cancel running pipeline before removing the tab
+    if (tabs.length > 1) dispatchLoop(id, { type: 'stop' })
     const actions = tabActionsRef.current.get(id)
     if (actions && (tabRunStates[id] === 'running')) {
       actions.cancelPipeline()
@@ -269,31 +311,26 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
 
       saveTabs(nextTabs, nextActive)
       tabActionsRef.current.delete(id)
+      removedTabsRef.current.add(id)
       setTabRunStates((prevStates) => {
         const nextStates = { ...prevStates }
         delete nextStates[id]
         return nextStates
+      })
+      setTabRunOutcomes((prevOutcomes) => {
+        if (!(id in prevOutcomes)) return prevOutcomes
+        const nextOutcomes = { ...prevOutcomes }
+        delete nextOutcomes[id]
+        return nextOutcomes
       })
       setTabRuntimeInfos((prevInfos) => {
         const nextInfos = { ...prevInfos }
         delete nextInfos[id]
         return nextInfos
       })
-      setLoopingTabs((prev) => {
-        if (!(id in prev)) return prev
-        const next = { ...prev }
-        delete next[id]
-        return next
-      })
-      setLoopIterations((prev) => {
-        if (!(id in prev)) return prev
-        const next = { ...prev }
-        delete next[id]
-        return next
-      })
       return { tabs: nextTabs, activeTabId: nextActive }
     })
-  }, [tabRunStates])
+  }, [dispatchLoop, tabRunStates, tabs.length])
 
   const renameTab = useCallback((id: string, label: string) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, label } : t)))
@@ -316,12 +353,13 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
     tabActionsRef.current.delete(tabId)
   }, [])
 
-  const setTabRunState = useCallback((tabId: string, state: TabRunState) => {
-    setTabRunStates((prev) => {
-      if (prev[tabId] === state) return prev
-      return { ...prev, [tabId]: state }
-    })
-  }, [])
+  const publishTabRun = useCallback((tabId: string, run: PublishedTabRun) => {
+    if (removedTabsRef.current.has(tabId)) return
+    setTabRunStates((prev) => (prev[tabId] === run.state ? prev : { ...prev, [tabId]: run.state }))
+    setTabRunOutcomes((prev) => (prev[tabId] === run.outcome ? prev : { ...prev, [tabId]: run.outcome }))
+    // Whoever cancelled the run (Stop, the job manager, closing the tab), the loop stops.
+    if (run.outcome === 'cancelled') dispatchLoop(tabId, { type: 'runCancelled' })
+  }, [dispatchLoop])
 
   const setTabRuntimeInfo = useCallback((tabId: string, info: TabRuntimeInfo) => {
     setTabRuntimeInfos((prev) => {
@@ -332,57 +370,50 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const cancelTabPipeline = useCallback((tabId: string) => {
-    setLoopingTabs((prev) => prev[tabId] ? { ...prev, [tabId]: false } : prev)
+    dispatchLoop(tabId, { type: 'stop' })
     const actions = tabActionsRef.current.get(tabId)
     if (!actions) return
     actions.cancelPipeline()
-  }, [])
+  }, [dispatchLoop])
 
   const isAnyRunning = Object.values(tabRunStates).some((state) => state === 'running')
 
   const stopLoop = useCallback((tabId?: string) => {
-    const id = tabId ?? activeTabId
-    setLoopingTabs((prev) => {
-      if (!prev[id]) return prev
-      return { ...prev, [id]: false }
-    })
-  }, [activeTabId])
+    dispatchLoop(tabId ?? activeTabId, { type: 'stop' })
+  }, [activeTabId, dispatchLoop])
+
+  /** Run one loop iteration and report how it ended; an error stops the loop. */
+  const runLoopIteration = useCallback(async (tabId: string, actions: TabActions) => {
+    const result = await actions.runPipeline()
+    dispatchLoop(tabId, { type: 'runEnded', hadError: result.hadError })
+  }, [dispatchLoop])
 
   const startLoop = useCallback(async () => {
     const actions = tabActionsRef.current.get(activeTabId)
     if (!actions) return
     if (actions.hasHitlBlocks()) return // HITL pipelines can't loop
     if ((tabRunStates[activeTabId] ?? 'idle') === 'running') return
+    if (!dispatchLoop(activeTabId, { type: 'start' })) return
+    await runLoopIteration(activeTabId, actions)
+  }, [activeTabId, dispatchLoop, runLoopIteration, tabRunStates])
 
-    setLoopingTabs((prev) => ({ ...prev, [activeTabId]: true }))
-    setLoopIterations((prev) => ({ ...prev, [activeTabId]: 1 }))
-    const result = await actions.runPipeline()
-    // If first run errors, stop looping immediately
-    if (result.hadError) {
-      setLoopingTabs((prev) => ({ ...prev, [activeTabId]: false }))
-    }
-  }, [activeTabId, tabRunStates])
-
-  // Auto-restart loop: when a looping tab finishes, start the next iteration
+  // Auto-restart: start the next iteration of every looping tab whose run has
+  // ended, unless another run occupies the tab.
   useEffect(() => {
-    for (const [tabId, isLooping] of Object.entries(loopingTabs)) {
-      if (!isLooping) continue
-      if (tabRunStates[tabId] !== 'done') continue
-
+    const timers: ReturnType<typeof setTimeout>[] = []
+    for (const [tabId, state] of Object.entries(loopStates)) {
+      if (!needsRestart(state)) continue
+      if (tabRunStates[tabId] === 'running') continue
       const actions = tabActionsRef.current.get(tabId)
       if (!actions) continue
-
-      // Use a microtask to avoid calling runPipeline during render
-      const timer = setTimeout(async () => {
-        setLoopIterations((prev) => ({ ...prev, [tabId]: (prev[tabId] ?? 1) + 1 }))
-        const result = await actions.runPipeline()
-        if (result.hadError) {
-          setLoopingTabs((prev) => ({ ...prev, [tabId]: false }))
-        }
-      }, 0)
-      return () => clearTimeout(timer)
+      // Outside render; the transition guards against a restart scheduled twice.
+      timers.push(setTimeout(() => {
+        if (!dispatchLoop(tabId, { type: 'restart' })) return
+        void runLoopIteration(tabId, actions)
+      }, 0))
     }
-  }, [tabRunStates, loopingTabs])
+    return () => timers.forEach(clearTimeout)
+  }, [dispatchLoop, loopStates, runLoopIteration, tabRunStates])
 
   const runActivePipeline = useCallback(async () => {
     if ((tabRunStates[activeTabId] ?? 'idle') === 'running') return
@@ -403,11 +434,11 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
   }, [activeTabId, tabRunStates])
 
   const cancelActivePipeline = useCallback(() => {
-    setLoopingTabs((prev) => prev[activeTabId] ? { ...prev, [activeTabId]: false } : prev)
+    dispatchLoop(activeTabId, { type: 'stop' })
     const actions = tabActionsRef.current.get(activeTabId)
     if (!actions) return
     actions.cancelPipeline()
-  }, [activeTabId])
+  }, [activeTabId, dispatchLoop])
 
   const saveActiveFlow = useCallback(async (name?: string) => {
     const actions = tabActionsRef.current.get(activeTabId)
@@ -573,6 +604,7 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
         tabs,
         activeTabId,
         tabRunStates,
+        tabRunOutcomes,
         isAnyRunning,
         availableFlows,
         setActiveTabId,
@@ -582,10 +614,11 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
         duplicateTab,
         registerTabActions,
         unregisterTabActions,
-        setTabRunState,
+        publishTabRun,
         tabRuntimeInfos,
         setTabRuntimeInfo,
         cancelTabPipeline,
+        loopStates,
         loopingTabs,
         loopIterations,
         startLoop,

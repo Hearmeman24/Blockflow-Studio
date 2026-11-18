@@ -102,11 +102,54 @@ interface StartPollParams<TJob, TArtifact> {
   onProgress?: (stats: FanoutStats, progress: PollingProgressEntry<TJob>[]) => void
 }
 
-const activePolls = new Map<string, Promise<FanoutPollResult<unknown>>>()
-const abortControllers = new Map<string, AbortController>()
+// ---- Poll registry ----
+//
+// One entry per block, owned by the jobs it polls. A request for the same jobs
+// joins the entry; a request for other jobs replaces it (the old poll is
+// aborted), so a new run never receives an old job's result. A poll that ends
+// removes only its own entry and clears the block's pending record only while
+// that record still names its own jobs, so a poll that settles late never
+// drops a newer job's record (which a reload needs to resume it).
+
+interface PollEntry {
+  /** The polled job ids, in submission order, joined: the entry's identity. */
+  jobIds: string
+  promise: Promise<FanoutPollResult<unknown>>
+  controller: AbortController
+}
+
+const polls = new Map<string, PollEntry>()
+const pollListeners = new Set<() => void>()
 
 function getPollKey(blockId: string): string {
   return `poll:${blockId}`
+}
+
+function jobIdsOf(pending: PendingJobRun | null): string {
+  return pending ? pending.submitted.map((entry) => entry.jobId).join('\n') : ''
+}
+
+function notifyPollListeners(): void {
+  for (const listener of [...pollListeners]) listener()
+}
+
+/** Whether a poll is in flight for this block. */
+export function hasActivePoll(blockId: string): boolean {
+  return polls.has(getPollKey(blockId))
+}
+
+/** Hear when any poll starts or ends. Returns the unsubscribe function. */
+export function subscribePolls(listener: () => void): () => void {
+  pollListeners.add(listener)
+  return () => {
+    pollListeners.delete(listener)
+  }
+}
+
+function removePollEntry(key: string, entry: PollEntry): void {
+  if (polls.get(key) !== entry) return
+  polls.delete(key)
+  notifyPollListeners()
 }
 
 export function setPersistedBlockStatus(blockId: string, value: string) {
@@ -120,46 +163,41 @@ export function setPersistedBlockStatus(blockId: string, value: string) {
 
 /** Abort all active polls (used by pipeline cancellation). */
 export function abortAllActivePolls(): void {
-  for (const [key, controller] of abortControllers) {
-    controller.abort()
-    abortControllers.delete(key)
-    activePolls.delete(key)
+  for (const [key, entry] of [...polls]) {
+    entry.controller.abort()
+    removePollEntry(key, entry)
   }
 }
 
 /** Abort a specific block's poll. */
 export function abortPoll(blockId: string): void {
   const key = getPollKey(blockId)
-  const controller = abortControllers.get(key)
-  if (controller) {
-    controller.abort()
-    abortControllers.delete(key)
-  }
-  activePolls.delete(key)
+  const entry = polls.get(key)
+  if (!entry) return
+  entry.controller.abort()
+  removePollEntry(key, entry)
 }
 
-async function runFanoutPoll<TJob, TArtifact>({
-  blockId,
-  pending,
-  pollIntervalMs = 3000,
-  maxPollMs = 30 * 60 * 1000,
-  fetchStatus,
-  getJob,
-  getStatus,
-  isActiveStatus,
-  isCompletedStatus,
-  getError,
-  getArtifact,
-  onProgress,
-}: StartPollParams<TJob, TArtifact>): Promise<FanoutPollResult<TArtifact>> {
+async function runFanoutPoll<TJob, TArtifact>(
+  {
+    pending,
+    pollIntervalMs = 3000,
+    maxPollMs = 30 * 60 * 1000,
+    fetchStatus,
+    getJob,
+    getStatus,
+    isActiveStatus,
+    isCompletedStatus,
+    getError,
+    getArtifact,
+    onProgress,
+  }: StartPollParams<TJob, TArtifact>,
+  abortController: AbortController,
+): Promise<FanoutPollResult<TArtifact>> {
   const submitted: PendingJobSubmission[] = pending.submitted.map((entry) => ({ idx: entry.idx, jobId: entry.jobId }))
   if (submitted.length === 0) {
     throw new Error('No submitted jobs to poll')
   }
-
-  const key = getPollKey(blockId)
-  const abortController = new AbortController()
-  abortControllers.set(key, abortController)
 
   const sleep = (ms: number) => new Promise<void>((resolve, reject) => {
     if (abortController.signal.aborted) {
@@ -261,20 +299,33 @@ export function startOrJoinPendingPoll<TJob, TArtifact>(
   params: StartPollParams<TJob, TArtifact>,
 ): Promise<FanoutPollResult<TArtifact>> {
   const key = getPollKey(params.blockId)
-  const existing = activePolls.get(key)
+  const jobIds = jobIdsOf(params.pending)
+  const existing = polls.get(key)
+  if (existing && existing.jobIds === jobIds) {
+    return existing.promise as Promise<FanoutPollResult<TArtifact>>
+  }
+  // Other jobs for this block: the old poll's caller has moved on (its run was
+  // cancelled or replaced), so stop it rather than hand its result to this one.
   if (existing) {
-    return existing as Promise<FanoutPollResult<TArtifact>>
+    existing.controller.abort()
+    removePollEntry(key, existing)
   }
 
-  const promise = runFanoutPoll(params)
+  const controller = new AbortController()
+  // The finally runs asynchronously, after `entry` is assigned.
+  const promise = runFanoutPoll(params, controller)
     .finally(() => {
-      activePolls.delete(key)
-      abortControllers.delete(key)
-      clearPendingJobRun(params.blockId)
+      // Clear the record first: listeners told the poll ended must see it gone.
+      if (jobIdsOf(loadPendingJobRun(params.blockId)) === jobIds) clearPendingJobRun(params.blockId)
+      if (polls.get(key) === entry) polls.delete(key)
+      // Also when an abort removed the entry earlier: the record is gone only now.
+      notifyPollListeners()
     }) as Promise<FanoutPollResult<unknown>>
+  const entry: PollEntry = { jobIds, controller, promise }
 
-  activePolls.set(key, promise)
-  return promise as Promise<FanoutPollResult<TArtifact>>
+  polls.set(key, entry)
+  notifyPollListeners()
+  return entry.promise as Promise<FanoutPollResult<TArtifact>>
 }
 
 export function startNewPendingPoll<TJob, TArtifact>(

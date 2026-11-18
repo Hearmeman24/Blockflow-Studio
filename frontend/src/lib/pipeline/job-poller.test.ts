@@ -5,8 +5,10 @@ import {
   JOB_SNAPSHOT_POLLING,
   abortPoll,
   fetchJobStatus,
+  hasActivePoll,
   resumePollingRun,
   startNewPollingRun,
+  subscribePolls,
 } from './job-poller'
 
 function snapshot(over: Partial<JobSnapshot> = {}): JobSnapshot {
@@ -166,5 +168,99 @@ describe('job polling', () => {
 
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
     expect(loadPendingJobRun('b5')).toBeNull()
+  })
+})
+
+describe('poll registry', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const record = (jobId: string): PendingJobRun => ({ ...pending, submitted: [{ idx: 0, jobId }] })
+  const params = (jobId: string, pollIntervalMs = 1) => ({
+    blockId: 'blk', pending: record(jobId), pollIntervalMs, ...JOB_SNAPSHOT_POLLING, getArtifact,
+  })
+  /** Answers by job id: each job completes with its own output after `pollsBefore` RUNNING answers. */
+  function jobsAnswer(pollsBefore: Record<string, number>) {
+    const seen = new Map<string, number>()
+    return vi.fn(async (url: string) => {
+      const jobId = decodeURIComponent(String(url).split('/').pop()!)
+      const n = (seen.get(jobId) ?? 0) + 1
+      seen.set(jobId, n)
+      if (n <= (pollsBefore[jobId] ?? 0)) return jsonResponse(200, { ok: true, job: snapshot({ job_id: jobId, status: 'RUNNING' }) })
+      return jsonResponse(200, {
+        ok: true,
+        job: snapshot({ job_id: jobId, status: 'COMPLETED', outputs: [{ kind: 'image', url: `https://x/${jobId}.png` }] }),
+      })
+    })
+  }
+
+  test('a different job for the same block replaces the poll instead of joining the old job', async () => {
+    vi.stubGlobal('fetch', jobsAnswer({ 'job-old': 3, 'job-new': 0 }))
+
+    const first = startNewPollingRun(params('job-old', 5))
+    const firstOutcome = first.then(() => 'resolved', (e: unknown) => (e as Error).name)
+    const second = startNewPollingRun(params('job-new'))
+
+    expect(second).not.toBe(first)
+    expect((await second).artifacts).toEqual(['https://x/job-new.png'])
+    expect(await firstOutcome).toBe('AbortError')
+    expect(hasActivePoll('blk')).toBe(false)
+  })
+
+  test('the same job joins the poll already in flight', async () => {
+    const fetchMock = jobsAnswer({ 'job-a': 1 })
+    vi.stubGlobal('fetch', fetchMock)
+    savePendingJobRun('blk', record('job-a'))
+
+    const first = resumePollingRun({ blockId: 'blk', pollIntervalMs: 1, ...JOB_SNAPSHOT_POLLING, getArtifact })
+    const second = resumePollingRun({ blockId: 'blk', pollIntervalMs: 1, ...JOB_SNAPSHOT_POLLING, getArtifact })
+
+    expect(second).toBe(first)
+    expect((await first)?.artifacts).toEqual(['https://x/job-a.png'])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  test('an aborted poll that settles late leaves a newer job\'s entry and pending record alone', async () => {
+    let answerOld!: (r: Response) => void
+    vi.stubGlobal('fetch', vi.fn((url: string) => {
+      if (String(url).endsWith('/job-old')) return new Promise<Response>((resolve) => { answerOld = resolve })
+      return Promise.resolve(jsonResponse(200, { ok: true, job: snapshot({ job_id: 'job-new', status: 'RUNNING' }) }))
+    }))
+
+    const old = startNewPollingRun(params('job-old'))
+    const oldOutcome = old.then(() => 'resolved', (e: unknown) => (e as Error).name)
+    await new Promise((r) => setTimeout(r, 0))
+    abortPoll('blk')
+    const fresh = startNewPollingRun(params('job-new', 20))
+    const freshOutcome = fresh.then(() => 'resolved', (e: unknown) => (e as Error).name)
+
+    // The old poll's status request was in flight; it answers only now.
+    answerOld(jsonResponse(200, { ok: true, job: snapshot({ job_id: 'job-old', status: 'RUNNING' }) }))
+    expect(await oldOutcome).toBe('AbortError')
+
+    expect(loadPendingJobRun('blk')).toEqual(record('job-new'))
+    expect(hasActivePoll('blk')).toBe(true)
+    // A resume after this joins the new job's poll, not a fresh one.
+    expect(resumePollingRun({ blockId: 'blk', ...JOB_SNAPSHOT_POLLING, getArtifact })).toBe(fresh)
+
+    abortPoll('blk')
+    expect(await freshOutcome).toBe('AbortError')
+    expect(loadPendingJobRun('blk')).toBeNull()
+  })
+
+  test('subscribers hear when a poll starts and when it ends', async () => {
+    vi.stubGlobal('fetch', jobsAnswer({ 'job-a': 0 }))
+    const seen: boolean[] = []
+    const unsubscribe = subscribePolls(() => seen.push(hasActivePoll('blk')))
+
+    await startNewPollingRun(params('job-a'))
+    unsubscribe()
+    await startNewPollingRun(params('job-b'))
+
+    expect(seen).toEqual([true, false])
   })
 })

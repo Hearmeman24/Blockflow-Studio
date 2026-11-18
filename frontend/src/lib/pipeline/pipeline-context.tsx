@@ -48,7 +48,17 @@ import { usePipelineTabs, type TabActions } from './tabs-context'
 import { saveRun } from '@/lib/api'
 import type { BlockResult, RunEntry } from '@/lib/types'
 import { hasPendingJobRunForBlock } from './job-pending'
-import { abortPoll } from './job-poller'
+import { abortPoll, hasActivePoll, subscribePolls } from './job-poller'
+import {
+  canStartRun,
+  initialRunPhase,
+  isCurrentRun,
+  runtimeOf,
+  tabRunOf,
+  transitionRun,
+  type RunEvent,
+  type RunPhase,
+} from './run-phase'
 
 // ---- Persistence (sessionStorage, keyed by tabId) ----
 
@@ -209,6 +219,29 @@ export interface UpstreamProducerValue extends UpstreamProducer {
 // ---- Context ----
 
 type ExecuteFn = (inputs: Record<string, unknown>, signal: AbortSignal) => Promise<void | BlockExecuteResult>
+
+/** Two animation frames, so React can paint forwarded outputs; a cancel ends the wait at once. */
+function waitForPaint(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    let frame = 0
+    function finish() {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }
+    function onAbort() {
+      cancelAnimationFrame(frame)
+      finish()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(finish)
+    })
+  })
+}
 
 function findLastEnabledIndex(blocks: PipelineBlock[], maxExclusive: number): number {
   for (let i = Math.min(maxExclusive, blocks.length) - 1; i >= 0; i--) {
@@ -387,11 +420,21 @@ interface PipelineProviderProps {
 }
 
 export function PipelineProvider({ tabId, flowJson, children }: PipelineProviderProps) {
-  const { registerTabActions, unregisterTabActions, setTabRunState, setTabRuntimeInfo, tabRunStates, loopingTabs } = usePipelineTabs()
+  const { registerTabActions, unregisterTabActions, publishTabRun, setTabRuntimeInfo, tabRunStates, loopingTabs } = usePipelineTabs()
   const tabMarkedRunning = (tabRunStates[tabId] ?? 'idle') === 'running'
-  const initialRuntime = useRef<PersistedPipelineRuntime>(
-    normalizeRecoveredRuntime(loadPipelineRuntime(tabId), tabMarkedRunning),
+  // Read once, on mount.
+  const [initialRuntime] = useState<PersistedPipelineRuntime>(
+    () => normalizeRecoveredRuntime(loadPipelineRuntime(tabId), tabMarkedRunning),
   )
+  // The tab's run lifecycle: one phase, changed only by `dispatchRun`. A
+  // recovered runtime that is still running resumes the jobs a reload found.
+  const [runPhase, setRunPhase] = useState<RunPhase>(() => initialRunPhase(
+    initialRuntime,
+    initialRuntime.blockStates.map(([id]) => id).filter(hasPendingJobRunForBlock),
+  ))
+  const runPhaseRef = useRef<RunPhase>(runPhase)
+  const lastRunIdRef = useRef(0)
+  const { isRunning, runningBlockId } = runtimeOf(runPhase)
   const [pipeline, setPipeline] = useState<Pipeline>(() => {
     // If flowJson provided, import it immediately. Callers that open flows
     // validate and report first (tabs-context); an unreadable flow here falls
@@ -406,10 +449,8 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     return loadPipeline(tabId)
   })
   const [blockStates, setBlockStates] = useState<Map<string, BlockState>>(
-    () => new Map(initialRuntime.current.blockStates),
+    () => new Map(initialRuntime.blockStates),
   )
-  const [isRunning, setIsRunning] = useState<boolean>(initialRuntime.current.isRunning)
-  const [runningBlockId, setRunningBlockId] = useState<string | null>(initialRuntime.current.runningBlockId)
   const [iterationState, setIterationState] = useState<IterationState | null>(null)
   // Per-tab block selection. Local state only — not persisted; clears
   // automatically when a block is removed from the tree.
@@ -420,29 +461,57 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
   const iterationStateRef = useRef<IterationState | null>(null)
   const pipelineRef = useRef(pipeline)
   const blockStatesRef = useRef(blockStates)
-  const isRunningRef = useRef(initialRuntime.current.isRunning)
-  const runningBlockIdRef = useRef<string | null>(initialRuntime.current.runningBlockId)
   const executeFns = useRef<Map<string, ExecuteFn>>(new Map())
   /** Map of blockId → active output port name (e.g. 'image'). Used to narrow add-block menu. */
   const [outputHints, setOutputHints] = useState<Record<string, string>>({})
-  const runLockRef = useRef(false)
-  const cancelledRef = useRef(false)
-  const runAbortControllerRef = useRef<AbortController | null>(null)
 
   const persistRuntimeSnapshot = useCallback(
-    (
-      nextBlockStates: Map<string, BlockState>,
-      nextIsRunning = isRunningRef.current,
-      nextRunningBlockId = runningBlockIdRef.current,
-    ) => {
+    (nextBlockStates: Map<string, BlockState>, phase: RunPhase = runPhaseRef.current) => {
       savePipelineRuntime(tabId, {
         blockStates: Array.from(nextBlockStates.entries()),
-        isRunning: nextIsRunning,
-        runningBlockId: nextRunningBlockId,
+        ...runtimeOf(phase),
       })
     },
     [tabId],
   )
+
+  /**
+   * The only writer of the run phase. Persists the derived runtime and
+   * publishes the tab bar's run state from the same phase, so they agree.
+   * Returns the phase after the event (unchanged when it did not apply).
+   */
+  const dispatchRun = useCallback((event: RunEvent): RunPhase => {
+    const prev = runPhaseRef.current
+    const next = transitionRun(prev, event)
+    if (next === prev) return prev
+    runPhaseRef.current = next
+    setRunPhase(next)
+    persistRuntimeSnapshot(blockStatesRef.current, next)
+    const before = tabRunOf(prev)
+    const after = tabRunOf(next)
+    if (before.state !== after.state || before.outcome !== after.outcome) publishTabRun(tabId, after)
+    return next
+  }, [persistRuntimeSnapshot, publishTabRun, tabId])
+
+  // Publish the phase the tab starts in (running when a reload resumed jobs).
+  useEffect(() => {
+    publishTabRun(tabId, tabRunOf(runPhaseRef.current))
+  }, [publishTabRun, tabId])
+
+  // A resume ends when none of the blocks it tracks still polls or holds a
+  // pending job: each poll ends on success, failure or cancel.
+  const resuming = runPhase.kind === 'resuming'
+  useEffect(() => {
+    if (!resuming) return
+    const settleIfDone = () => {
+      const phase = runPhaseRef.current
+      if (phase.kind !== 'resuming') return
+      if (phase.blockIds.some((id) => hasActivePoll(id) || hasPendingJobRunForBlock(id))) return
+      dispatchRun({ type: 'resumeSettled' })
+    }
+    settleIfDone()
+    return subscribePolls(settleIfDone)
+  }, [dispatchRun, resuming])
 
   // Wrapper that updates the ref + sessionStorage synchronously so callbacks
   // reading pipelineRef.current during the same render cycle see fresh data.
@@ -462,14 +531,6 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
   useEffect(() => {
     blockStatesRef.current = blockStates
   }, [blockStates])
-
-  useEffect(() => {
-    isRunningRef.current = isRunning
-  }, [isRunning])
-
-  useEffect(() => {
-    runningBlockIdRef.current = runningBlockId
-  }, [runningBlockId])
 
   useEffect(() => {
     savePipelineRuntime(tabId, {
@@ -989,24 +1050,19 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
   )
 
   const cancelPipeline = useCallback(() => {
-    cancelledRef.current = true
-    // Abort only polls belonging to this tab's pipeline blocks (not all tabs)
-    for (const block of walkBlocks(pipelineRef.current.blocks)) {
-      abortPoll(block.id)
-    }
-    runAbortControllerRef.current?.abort()
-    runLockRef.current = false
-    runningBlockIdRef.current = null
-    isRunningRef.current = false
-    setRunningBlockId(null)
-    setIsRunning(false)
-    persistRuntimeSnapshot(blockStatesRef.current, false, null)
-    setTabRunState(tabId, 'idle')
+    const phase = runPhaseRef.current
+    // Abort only polls belonging to this tab's blocks (not all tabs), including
+    // the blocks a reload resumed, which a flow import may have replaced.
+    const pollBlockIds = new Set([...walkBlocks(pipelineRef.current.blocks)].map((block) => block.id))
+    if (phase.kind === 'resuming') for (const id of phase.blockIds) pollBlockIds.add(id)
+    for (const id of pollBlockIds) abortPoll(id)
+    if (phase.kind === 'running') phase.controller.abort()
+    dispatchRun({ type: 'cancel' })
     setTabRuntimeInfo(tabId, {})
-  }, [persistRuntimeSnapshot, setTabRunState, setTabRuntimeInfo, tabId])
+  }, [dispatchRun, setTabRuntimeInfo, tabId])
 
   const runPipeline = useCallback(async (opts?: { continueFromExisting?: boolean }): Promise<{ hadError: boolean }> => {
-    if (runLockRef.current) return { hadError: false }
+    if (!canStartRun(runPhaseRef.current)) return { hadError: false }
     // A block with no registered type has no execute function; the runner
     // would silently pass through it. Refuse to start instead.
     const unsupportedBlockers = findRunBlockingUnsupportedBlocks(pipelineRef.current.blocks)
@@ -1020,20 +1076,16 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       toast.error(formatRunBlockerMessage(knownBlockers))
       return { hadError: true }
     }
-    runLockRef.current = true
-    cancelledRef.current = false
     const continueMode = opts?.continueFromExisting ?? false
+    const runId = ++lastRunIdRef.current
     const runAbortController = new AbortController()
-    runAbortControllerRef.current = runAbortController
+    // This run's own signal: every cancel check in this run reads it, never shared state.
+    const signal = runAbortController.signal
 
     const blocks = pipelineRef.current.blocks
     // The saved run describes these blocks, whatever is added, removed or edited mid-run.
     const runSnapshot = createRunSnapshot(pipelineRef.current)
-    setTabRunState(tabId, 'running')
-    isRunningRef.current = true
-    runningBlockIdRef.current = null
-    setIsRunning(true)
-    setRunningBlockId(null)
+    dispatchRun({ type: 'start', runId, controller: runAbortController })
     const startTime = Date.now()
 
     // In continue mode, preserve completed blocks; otherwise reset all
@@ -1049,7 +1101,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     }
     setBlockStates(freshStates)
     blockStatesRef.current = freshStates
-    persistRuntimeSnapshot(freshStates, true, null)
+    persistRuntimeSnapshot(freshStates)
 
     let hadError = false
     let hadPartialFailure = false
@@ -1108,7 +1160,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       }
 
       for (let idx = 0; idx < chain.length; idx++) {
-        if (cancelledRef.current) break
+        if (signal.aborted) break
 
         const block = chain[idx]
         if (block.disabled) {
@@ -1129,9 +1181,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
           continue
         }
 
-        runningBlockIdRef.current = block.id
-        setRunningBlockId(block.id)
-        persistRuntimeSnapshot(blockStatesRef.current, isRunningRef.current, block.id)
+        dispatchRun({ type: 'blockStarted', runId, blockId: block.id })
         setBlockStatus(block.id, 'running')
         const blockDef_ = getNodeType(block.type)
         setTabRuntimeInfo(tabId, { runningBlockLabel: block.label || blockDef_?.label || block.type })
@@ -1143,15 +1193,15 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
           validateBindingRequirements(block, freshInputs)
           if (executeFn) {
             const cancelRace = new Promise<never>((_, reject) => {
-              if (runAbortController.signal.aborted) {
+              if (signal.aborted) {
                 reject(new DOMException('Pipeline cancelled', 'AbortError'))
                 return
               }
-              runAbortController.signal.addEventListener('abort', () => {
+              signal.addEventListener('abort', () => {
                 reject(new DOMException('Pipeline cancelled', 'AbortError'))
               }, { once: true })
             })
-            const execResult = await Promise.race([executeFn(freshInputs, runAbortController.signal), cancelRace])
+            const execResult = await Promise.race([executeFn(freshInputs, signal), cancelRace])
             forwardOutputs(block, freshInputs)
             setBlockStatus(block.id, 'completed')
             completedBlockExecutions++
@@ -1174,8 +1224,8 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
             setBlockStatus(block.id, 'completed')
             completedBlockExecutions++
             finishedThisRun.add(block.id)
-            // Double rAF yield to let React paint forwarded outputs before next block starts
-            await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+            // Let React paint forwarded outputs before the next block starts.
+            await waitForPaint(signal)
           }
         } catch (e) {
           if (e instanceof DOMException && e.name === 'AbortError') {
@@ -1237,7 +1287,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
             const accumulatedOutputs = new Map<string, Record<string, unknown[]>>()
 
             for (let itemIdx = 0; itemIdx < iterOutput.length; itemIdx++) {
-              if (cancelledRef.current) break
+              if (signal.aborted) break
 
               iterState.currentIndex = itemIdx
               iterState.items[itemIdx].status = 'running'
@@ -1277,7 +1327,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
                   await executeChain(branch)
                 }
                 // executeChain ends quietly on a cancel, so ask the run's own signal.
-                const itemCancelled = runAbortController.signal.aborted
+                const itemCancelled = signal.aborted
                 iterState.items[itemIdx].status = itemCancelled ? 'skipped' : 'completed'
 
                 // Collect downstream outputs from this iteration
@@ -1351,8 +1401,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
 
       // ---- Auto-save run to history ----
       const durationMs = Date.now() - startTime
-      // This run's own signal: `cancelledRef` is shared with the next run, which resets it.
-      const wasCancelled = runAbortController.signal.aborted
+      const wasCancelled = signal.aborted
       const runStatus: RunEntry['status'] = hadError
         ? (completedBlockExecutions === 0 ? 'failed' : 'partial')
         : (hadPartialFailure || wasCancelled ? 'partial' : 'completed')
@@ -1404,19 +1453,15 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
 
       return { hadError }
     } finally {
-      runLockRef.current = false
-      runAbortControllerRef.current = null
-      runningBlockIdRef.current = null
-      isRunningRef.current = false
-      iterationStateRef.current = null
-      setIterationState(null)
-      setRunningBlockId(null)
-      setIsRunning(false)
-      persistRuntimeSnapshot(blockStatesRef.current, false, null)
-      setTabRunState(tabId, 'done')
-      setTabRuntimeInfo(tabId, {})
+      // A run cancelled and replaced by a newer one leaves that run's state alone.
+      if (isCurrentRun(runPhaseRef.current, runId)) {
+        iterationStateRef.current = null
+        setIterationState(null)
+        setTabRuntimeInfo(tabId, {})
+      }
+      dispatchRun({ type: 'finished', runId, outcome: hadError ? 'failed' : 'completed' })
     }
-  }, [persistRuntimeSnapshot, resolveInputs, setBlockOutput, setBlockStatus, setBlockStatusMessage, setTabRunState, setTabRuntimeInfo, tabId])
+  }, [dispatchRun, persistRuntimeSnapshot, resolveInputs, setBlockOutput, setBlockStatus, setBlockStatusMessage, setTabRuntimeInfo, tabId])
 
   const getAddableTypes = useCallback((atIndex?: number): NodeTypeDef[] => {
     const blocks = pipeline.blocks
@@ -1559,11 +1604,9 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     const emptyStates = new Map<string, BlockState>()
     setBlockStates(emptyStates)
     blockStatesRef.current = emptyStates
-    isRunningRef.current = false
-    runningBlockIdRef.current = null
-    setIsRunning(false)
-    setRunningBlockId(null)
-    persistRuntimeSnapshot(emptyStates, false, null)
+    // The run phase is left as it is: a run in flight keeps the tab running
+    // until it ends or is stopped, and the tab bar keeps agreeing with it.
+    persistRuntimeSnapshot(emptyStates)
     executeFns.current.clear()
     setOutputHints({})
     return outcome
