@@ -171,6 +171,7 @@ README.md, AGENTS.md        the only documentation shipped with the repository
 - Take model facts (limits, modes, formats, identifiers) from the capability
   ledger, and add new ones there only.
 - Mock providers at the HTTP transport in tests.
+- Declare a new lifecycle as described in [State machines](#state-machines).
 - Keep the shipped documentation to `README.md` and `AGENTS.md`, and update
   them when a change affects what they say. Private notes go in the git-ignored
   `internal_docs/` folder; nothing the app or the tests depend on lives there.
@@ -180,8 +181,8 @@ README.md, AGENTS.md        the only documentation shipped with the repository
 - Anything that spends provider credits, including MCP `generate`, the
   generation submit route and a pipeline run with a generation block.
 - Adding or upgrading a dependency (Python or npm).
-- Changing the saved-flow schema (`schema_version`), database tables or stored
-  preference names.
+- Changing the saved-flow schema (`schema_version`), database tables, stored
+  preference names or a stored or public status string.
 - Changing a provider request shape or adapter.
 - Deleting user data, or files in the output folder or user data folder.
 - Pushing, tagging, releasing or publishing anything, or opening a pull request.
@@ -415,6 +416,64 @@ if (state.missingOutput) {
 }
 useHeaderWarnings(setHeaderWarnings, warnings)
 ```
+
+## State machines
+
+Each lifecycle is declared once, as a typed state and one pure transition
+function or table. Readers handle every state, so adding one fails the build or
+a test instead of falling through. A stored or public status string never
+changes without asking.
+
+| Machine | Where | States |
+|---|---|---|
+| Status vocabularies shared with the frontend, and the job lifecycle (`JOB_TRANSITIONS`, `can_transition`, enforced by the job store); the generated contract is `frontend/src/lib/status/__fixtures__/status-contract.json` | `backend/statuses.py` | `JobStatus` (`QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`), `ErrorKind`, `RunStatus`, `BlockResultStatus`, `UpdateState`, `StepStatus`, `StorageMode`, `BalanceStatus`, `PriceRefreshStatus`, `ReferenceCheckStatus`, `JobPhase` |
+| Same vocabularies, frontend side | `frontend/src/lib/status/index.ts` | one `as const` list per backend enum, plus the generation run statuses |
+| Job store (applies `can_transition`) | `backend/job_store.py` | terminal job statuses are final |
+| Job phase of an active job (memory only) | `backend/byok/service.py` | `preparing`, `submitting`, `polling`, `downloading` |
+| Retry policy per error kind (`RETRY_POLICY`) | `backend/byok/errors.py` | one entry per `ErrorKind` |
+| Provider task status (`task_status`) | `backend/byok/providers/kie.py` | `ProviderTaskStatus`: `QUEUED`, `RUNNING`, `COMPLETED`, `FAILED` |
+| Provider task status (`task_status`) | `backend/byok/providers/piapi.py` | same four |
+| MCP run recording (`RUN_FOR_JOB_STATUS`) | `backend/mcp_runs.py` | the saved run for each job status, or none |
+| MCP `generate` stages (`GenerateStage`) | `blockflow_mcp/tools_generation.py` | `validate`, `estimate`, `submit`, `wait` |
+| Update engine (`UPDATE_TRANSITIONS`, `STEP_TRANSITIONS`) | `backend/app_update/engine.py` | update states and step statuses |
+| Launcher outcome (`LaunchOutcome`, `EXIT_CODES`) | `app.py` | `stopped`, `server_exited`, `setup_failed`, `setup_interrupted`, `bad_port`, `port_in_use` |
+| Launcher control files, request order, launch mode | `backend/app_update/launcher_protocol.py` | `ControlFile`, `REQUEST_ORDER`, `LaunchMode` (`dev`, `packaged`, `unknown`) |
+| Install plan | `scripts/install_steps.py` | `StepReason`, `FastMCP` outcomes |
+| Doctor checks | `scripts/doctor.py` | `STATUSES` (`ok`, `warn`, `fail`, `skip`), `CHECK_IDS` |
+| Pipeline run per tab (`transitionRun`) | `frontend/src/lib/pipeline/run-phase.ts` | `idle`, `running`, `cancelling`, `resuming` |
+| Loop mode (`transitionLoop`) | `frontend/src/lib/pipeline/loop-mode.ts` | `off`, `looping` (awaiting a run or a restart) |
+| Run outcome (`deriveRunStatus`) | `frontend/src/lib/pipeline/run-outcome.ts` | `completed`, `partial`, `failed` |
+| Block state | `frontend/src/lib/pipeline/block-state.ts` | `BlockStatus`: `idle`, `running`, `completed`, `error`, `skipped`, `cancelled` |
+| Job poll registry | `frontend/src/lib/pipeline/job-poller.ts` | active polls per block |
+| Generation block run | `frontend/src/lib/byok/generation-run-state.ts` | `idle`, active statuses, `completed`, `failed`, `timed_out`, `cancelled` |
+| Generation block readiness | `frontend/src/lib/byok/generation-readiness.ts` | `loading`, `catalog_error`, `no_keys`, `no_model`, `unavailable`, `blocked`, `ready` |
+| Upstream prompt switch | `frontend/src/lib/byok/upstream-prompt-choice.ts` | on or off, changed on source edges only |
+| Cost estimate | `frontend/src/lib/byok/use-cost-estimate.ts` | `disabled`, `loading`, `ready`, `unavailable`, `error` |
+| Provider catalog load | `frontend/src/lib/byok/use-provider-catalog.ts` | `loading`, `error`, `ready` |
+| Loader item display | `frontend/src/lib/byok/loader-item-display.ts` | `saving`, `not_saved`, `broken`, `flagged`, `unverified`, `ok` |
+| Transfer restore | `frontend/src/lib/byok/transfer-status.ts` | `ready`, `error`, `interrupted` |
+| Reference health check | `frontend/src/lib/byok/use-reference-health.ts` | `idle`, `checking`, `checked`, `failed` |
+| Viewer history | `frontend/src/lib/use-viewer-history.ts` | `viewerHistoryReducer` |
+| Async read (`useResource`) | `frontend/src/lib/resource.ts` | `loading`, `error`, `ready` |
+| Async write (`useMutation`) | `frontend/src/lib/mutation.ts` | `idle`, `pending`, `error` |
+| Updater dialog | `frontend/src/components/app-update/update-view.ts` | `closed`, `confirm`, `progress` |
+| Character wizard | `frontend/src/components/characters/wizard-phase.ts` | `editing`, `creating`, `uploading`, `partial`, `retrying`, `done` |
+| Character mutation queue | `frontend/src/lib/characters/mutation-queue.ts` | serial queue |
+
+Adding or changing a lifecycle:
+
+- Declare the states once: a `StrEnum` in `backend/statuses.py` when the value
+  crosses the API, otherwise a TypeScript union next to the feature (or in
+  `frontend/src/lib/status` when several features share it).
+- Write one pure transition function or table, and unit-test every state and
+  event pair.
+- Read the state with an exhaustive `switch` or `Record`, so a new state fails
+  the build.
+- A vocabulary that crosses a boundary goes into `statuses.contract()`; then run
+  `uv run python tests/test_status_contract_fixture.py` and commit the fixture.
+- Components load and write asynchronously with `useResource` and
+  `useMutation`, not ad hoc loading flags.
+- Changing a stored or public status string is an "Ask first" item.
 
 ## Engineering rules
 
