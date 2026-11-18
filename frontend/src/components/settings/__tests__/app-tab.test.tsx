@@ -13,7 +13,7 @@
  *   - Falls back to documented defaults when unset
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { render as rtlRender, screen, waitFor, within } from '@testing-library/react'
 import { SWRConfig } from 'swr'
 import userEvent from '@testing-library/user-event'
 
@@ -113,6 +113,55 @@ describe('AppTab', () => {
     await waitFor(() => {
       expect(client.setAppPref).toHaveBeenCalledWith('run_history_retention_days', '365')
     })
+  })
+
+  test('retention shows a loading state, not the default, until the stored value arrives', async () => {
+    let answer!: (value: string | null) => void
+    vi.mocked(client.getAppPref).mockImplementation(() => new Promise((resolve) => { answer = resolve }))
+    render(<AppTab />)
+
+    expect(screen.queryByLabelText(/Run history retention/i)).not.toBeInTheDocument()
+    expect(screen.getByTestId('retention-loading')).toBeInTheDocument()
+    answer('365')
+    const select = (await screen.findByLabelText(/Run history retention/i)) as HTMLSelectElement
+    expect(select.value).toBe('365')
+  })
+
+  test('a retention load error says so and Retry reads it again', async () => {
+    vi.mocked(client.getAppPref)
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce('30')
+    const user = userEvent.setup()
+    render(<AppTab />)
+
+    const message = await screen.findByText('Could not read the retention setting.')
+    await user.click(within(message.parentElement!).getByRole('button', { name: 'Retry' }))
+    const select = (await screen.findByLabelText(/Run history retention/i)) as HTMLSelectElement
+    expect(select.value).toBe('30')
+  })
+
+  test('a failed retention save says so and shows the stored value again', async () => {
+    vi.mocked(client.getAppPref).mockResolvedValue(null)
+    vi.mocked(client.setAppPref).mockRejectedValue(new Error('HTTP 500'))
+    const user = userEvent.setup()
+    render(<AppTab />)
+
+    const select = (await screen.findByLabelText(/Run history retention/i)) as HTMLSelectElement
+    await user.selectOptions(select, '30')
+    expect(await screen.findByText('Could not save this setting. Try again.')).toBeInTheDocument()
+    expect(select.value).toBe('90')
+  })
+
+  test('retention cannot be changed again while a change is being saved', async () => {
+    vi.mocked(client.getAppPref).mockResolvedValue(null)
+    vi.mocked(client.setAppPref).mockImplementation(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    render(<AppTab />)
+
+    const select = (await screen.findByLabelText(/Run history retention/i)) as HTMLSelectElement
+    await user.selectOptions(select, '30')
+    expect(select.value).toBe('30')
+    expect(select).toBeDisabled()
   })
 
   test('retention dropdown offers 30 / 90 / 365 / forever options', async () => {

@@ -106,6 +106,30 @@ describe('PriceUpdatesSetting', () => {
     expect(await screen.findByRole('switch', { name: 'Keep cost estimates current' })).toBeChecked()
   })
 
+  test('a retry shows the loading state again instead of the old error', async () => {
+    let answer!: (res: Response) => void
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({}, 500))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { answer = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    const { container } = render(<PriceUpdatesSetting />)
+    await user.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(screen.queryByText(/could not read the price list status/i)).not.toBeInTheDocument()
+    expect(container.querySelector('[data-slot="skeleton"]')).not.toBeNull()
+    answer(json(status()))
+    expect(await screen.findByRole('switch', { name: 'Keep cost estimates current' })).toBeChecked()
+  })
+
+  test('the switch is disabled while the change is being saved', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(status())))
+    vi.mocked(client.setAppPref).mockImplementationOnce(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    render(<PriceUpdatesSetting />)
+    await user.click(await screen.findByRole('switch', { name: 'Keep cost estimates current' }))
+    expect(screen.getByRole('switch')).toBeDisabled()
+  })
+
   test('a failed save keeps the previous state and says so', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(status())))
     vi.mocked(client.setAppPref).mockRejectedValueOnce(new Error('HTTP 500'))

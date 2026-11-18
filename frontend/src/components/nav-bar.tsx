@@ -2,7 +2,7 @@
 
 import Image from 'next/image'
 import Link from 'next/link'
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { FileDown, FilePlus2, ChevronDown, Files, FileUp, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -39,7 +39,10 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { usePipelineTabs } from '@/lib/pipeline/tabs-context'
+import { FlowNameRequiredError } from '@/lib/pipeline/flow-errors'
 import { deleteFlow, renameFlow } from '@/lib/api'
+import { useMutation } from '@/lib/mutation'
+import { errorMessage } from '@/lib/resource'
 import { SettingsNavIcon } from '@/components/settings/settings-nav-icon'
 import { UpdateIndicator } from '@/components/app-update/update-indicator'
 import { NAV_ITEMS } from '@/lib/nav-items'
@@ -69,6 +72,18 @@ const CLOSED_NAME_DIALOG: NameDialogState = {
 
 const CLOSED_DELETE_DIALOG: DeleteDialogState = { open: false, flowName: '' }
 
+/** The flow routes answer `{ok: false, error}` on a refusal instead of throwing. */
+function throwIfRefused(response: unknown, fallback: string) {
+  const body = response as { ok?: boolean; error?: string } | null | undefined
+  if (body && body.ok === false) throw new Error(body.error || fallback)
+}
+
+const FAILURE_TITLE: Record<NameDialogPurpose, string> = {
+  'save-as': 'Failed to save flow',
+  rename: 'Could not rename the flow',
+  workspace: 'Could not save the workspace',
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function NavBar() {
@@ -90,25 +105,23 @@ export function NavBar() {
   // Controlled input value for the name dialog
   const [inputValue, setInputValue] = useState('')
 
-  // Track save-failure context: when save throws because no name, we open the
-  // dialog in "save-as" mode. On second failure we show a toast.
-  const saveAsIsFromSave = useRef(false)
-
   // ── handlers ──────────────────────────────────────────────────────────────
 
   const handleSave = async () => {
     try {
       await saveActiveFlow()
-    } catch {
-      // No name yet — open the save-as dialog so the user can provide one
-      saveAsIsFromSave.current = true
-      setInputValue('My Pipeline')
-      setNameDialog({ open: true, purpose: 'save-as', defaultValue: 'My Pipeline' })
+    } catch (err) {
+      if (err instanceof FlowNameRequiredError) {
+        // No name yet: open the save-as dialog so the user can provide one.
+        setInputValue('My Pipeline')
+        setNameDialog({ open: true, purpose: 'save-as', defaultValue: 'My Pipeline' })
+      } else {
+        toast.error('Failed to save flow', { description: errorMessage(err) })
+      }
     }
   }
 
   const handleSaveAs = () => {
-    saveAsIsFromSave.current = false
     setInputValue('My Pipeline')
     setNameDialog({ open: true, purpose: 'save-as', defaultValue: 'My Pipeline' })
   }
@@ -138,24 +151,33 @@ export function NavBar() {
 
   // ── name dialog submit ────────────────────────────────────────────────────
 
+  // The dialog stays open until the action succeeds, so a failure keeps the
+  // typed name; the error is a toast. A second submit while one is pending is
+  // ignored.
+  const submitName = useMutation(async (purpose: NameDialogPurpose, name: string, targetFlow?: string) => {
+    if (purpose === 'save-as') {
+      await saveActiveFlow(name)
+    } else if (purpose === 'rename' && targetFlow) {
+      throwIfRefused(await renameFlow(targetFlow, name), 'Failed to rename flow')
+      await refreshAvailableFlows()
+    } else if (purpose === 'workspace') {
+      await saveWorkspace(name)
+    }
+  })
+
   const handleNameDialogSubmit = async () => {
     const name = inputValue.trim()
     if (!name) return
 
     const { purpose, targetFlow } = nameDialog
-    setNameDialog(CLOSED_NAME_DIALOG)
-
-    if (purpose === 'save-as') {
-      try {
-        await saveActiveFlow(name)
-      } catch {
-        toast.error('Failed to save flow')
-      }
-    } else if (purpose === 'rename' && targetFlow) {
-      await renameFlow(targetFlow, name)
-      await refreshAvailableFlows()
-    } else if (purpose === 'workspace') {
-      await saveWorkspace(name).catch(() => {})
+    const outcome = await submitName.run(purpose, name, targetFlow)
+    if (outcome.status === 'done') {
+      // Close only the dialog this submit came from (it may have been cancelled).
+      setNameDialog((current) => (current.open && current.purpose === purpose && current.targetFlow === targetFlow
+        ? CLOSED_NAME_DIALOG
+        : current))
+    } else if (outcome.status === 'failed') {
+      toast.error(FAILURE_TITLE[purpose], { description: outcome.message })
     }
   }
 
@@ -173,11 +195,18 @@ export function NavBar() {
 
   // ── delete dialog confirm ─────────────────────────────────────────────────
 
+  const removeFlow = useMutation(async (flowName: string) => {
+    throwIfRefused(await deleteFlow(flowName), 'Failed to delete flow')
+    await refreshAvailableFlows()
+  })
+
   const handleDeleteConfirm = async () => {
     const { flowName } = deleteDialog
     setDeleteDialog(CLOSED_DELETE_DIALOG)
-    await deleteFlow(flowName)
-    await refreshAvailableFlows()
+    const outcome = await removeFlow.run(flowName)
+    if (outcome.status === 'failed') {
+      toast.error(`Could not delete “${flowName}”`, { description: outcome.message })
+    }
   }
 
   const visibleFlows = availableFlows.filter((f) => !f.name.startsWith('_workspace_'))
@@ -371,7 +400,7 @@ export function NavBar() {
             >
               Cancel
             </Button>
-            <Button onClick={() => void handleNameDialogSubmit()}>
+            <Button onClick={() => void handleNameDialogSubmit()} disabled={submitName.pending}>
               {dialogSubmitLabel()}
             </Button>
           </DialogFooter>

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 
 import { OutputFolderField } from '@/components/settings/output-folder-field'
@@ -25,7 +25,8 @@ import {
   validateProviderKey,
   type KeyProvider,
 } from '@/lib/settings/client'
-import { getOutputFolder, saveOutputFolder, type OutputFolderStatus } from '@/lib/settings/output-folder'
+import { errorMessage, useResource } from '@/lib/resource'
+import { getOutputFolder, saveOutputFolder } from '@/lib/settings/output-folder'
 
 interface Props {
   open: boolean
@@ -33,10 +34,17 @@ interface Props {
   onFinished: () => void
 }
 
-type Busy = null | 'saving' | 'skipping'
+/** idle (with the last error, if any), or the action in progress. */
+type Phase =
+  | { kind: 'idle'; error: string | null }
+  | { kind: 'saving' }
+  | { kind: 'skipping' }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+/** What this dialog already stored, and the value it stored. A retry after a
+ * partial failure skips a step whose value has not changed since. */
+interface Stored {
+  folder?: string
+  keys: Partial<Record<KeyProvider, string>>
 }
 
 /** Fire-and-forget key checks after saving; results arrive as toasts. */
@@ -60,42 +68,26 @@ function checkKeysInBackground(providers: KeyProvider[]) {
   }
 }
 
-type FolderLoad =
-  | { kind: 'loading' }
-  | { kind: 'error' }
-  | { kind: 'ready'; status: OutputFolderStatus }
-
 /** First-start dialog: explains BYOK, collects a Kie and/or PiAPI key and
  * the output folder (pre-filled with the folder in use). */
 export function OnboardingDialog({ open, onFinished }: Props) {
   const ids = { kie: useId(), piapi: useId() }
   const [values, setValues] = useState<Record<KeyProvider, string>>({ kie: '', piapi: '' })
-  const [busy, setBusy] = useState<Busy>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [phase, setPhase] = useState<Phase>({ kind: 'idle', error: null })
   const [statusText, setStatusText] = useState('')
-  const [folderLoad, setFolderLoad] = useState<FolderLoad>({ kind: 'loading' })
-  const [folder, setFolder] = useState('')
+  const [stored, setStored] = useState<Stored>({ keys: {} })
+  // The folder in use, read when the dialog opens. A failed read leaves the
+  // field empty (the default folder); it is not an error for onboarding.
+  const { resource: folderLoad } = useResource(() => getOutputFolder(), [open], { enabled: open })
+  // What the user typed or chose; null follows the folder loaded at open.
+  const [folderDraft, setFolderDraft] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    getOutputFolder()
-      .then((status) => {
-        if (cancelled) return
-        setFolderLoad({ kind: 'ready', status })
-        setFolder(status.configured ?? status.in_use)
-      })
-      .catch(() => {
-        if (!cancelled) setFolderLoad({ kind: 'error' })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [open])
-
+  const busy = phase.kind === 'saving' ? 'saving' : phase.kind === 'skipping' ? 'skipping' : null
+  const error = phase.kind === 'idle' ? phase.error : null
   const initialFolder = folderLoad.kind === 'ready'
-    ? folderLoad.status.configured ?? folderLoad.status.in_use
+    ? folderLoad.data.configured ?? folderLoad.data.in_use
     : ''
+  const folder = folderDraft ?? initialFolder
   const folderChanged = folderLoad.kind !== 'loading' && folder.trim() !== '' && folder.trim() !== initialFolder
   const entered = PROVIDER_KEY_SPECS.filter((s) => values[s.provider].trim())
   const canSave = (entered.length > 0 || folderChanged) && busy === null
@@ -108,58 +100,65 @@ export function OnboardingDialog({ open, onFinished }: Props) {
   const handleSave = async (event?: FormEvent) => {
     event?.preventDefault()
     if (!canSave) return
-    setBusy('saving')
-    setError(null)
+    setPhase({ kind: 'saving' })
     setStatusText('Saving…')
-    const saved: KeyProvider[] = []
+    // Record each step as it succeeds, so a retry only does what is left.
+    const done: Stored = { folder: stored.folder, keys: { ...stored.keys } }
+    const savedNow: KeyProvider[] = []
+    const targetFolder = folderChanged ? folder.trim() : undefined
     try {
-      if (folderChanged) {
+      if (targetFolder !== undefined && done.folder !== targetFolder) {
         try {
-          await saveOutputFolder(folder.trim())
+          await saveOutputFolder(targetFolder)
         } catch (err) {
           throw new Error(`Could not use that folder: ${errorMessage(err)}`)
         }
+        done.folder = targetFolder
       }
       for (const spec of entered) {
+        const value = values[spec.provider]
+        if (done.keys[spec.provider] === value) continue
         try {
-          await setCredential(spec.credential, values[spec.provider])
-          saved.push(spec.provider)
+          await setCredential(spec.credential, value)
         } catch (err) {
           throw new Error(`Could not save the ${spec.label} key: ${errorMessage(err)}`)
         }
+        done.keys[spec.provider] = value
+        savedNow.push(spec.provider)
       }
-      if (saved.length) refreshProviderCatalog()
+      if (savedNow.length) refreshProviderCatalog()
       await finish()
     } catch (err) {
-      if (saved.length) refreshProviderCatalog()
-      setError(errorMessage(err))
+      if (savedNow.length) refreshProviderCatalog()
+      setStored(done)
       setStatusText('')
-      setBusy(null)
+      setPhase({ kind: 'idle', error: errorMessage(err) })
       return
     }
+    setStored(done)
+    // Report what this dialog stored, including steps saved by an earlier attempt.
+    const keysSaved = entered.map((spec) => spec.provider).filter((p) => done.keys[p] === values[p])
     setStatusText('Saved.')
-    if (saved.length) toast.success('Keys saved. You can change them any time in Settings → API keys.')
-    if (folderChanged) {
-      toast.info(`New files are saved to ${folder.trim()}. You can change it in Settings → App.`)
+    if (keysSaved.length) toast.success('Keys saved. You can change them any time in Settings → API keys.')
+    if (targetFolder !== undefined) {
+      toast.info(`New files are saved to ${targetFolder}. You can change it in Settings → App.`)
     }
-    checkKeysInBackground(saved)
-    setBusy(null)
+    checkKeysInBackground(keysSaved)
+    setPhase({ kind: 'idle', error: null })
     onFinished()
   }
 
   const handleSkip = async () => {
     if (busy) return
-    setBusy('skipping')
-    setError(null)
+    setPhase({ kind: 'skipping' })
     try {
       await finish()
     } catch (err) {
-      setError(`Could not finish setup: ${errorMessage(err)}`)
-      setBusy(null)
+      setPhase({ kind: 'idle', error: `Could not finish setup: ${errorMessage(err)}` })
       return
     }
     toast.info('You can add your Kie or PiAPI key later in Settings → API keys.')
-    setBusy(null)
+    setPhase({ kind: 'idle', error: null })
     onFinished()
   }
 
@@ -215,8 +214,8 @@ export function OnboardingDialog({ open, onFinished }: Props) {
             ) : (
               <OutputFolderField
                 value={folder}
-                onChange={setFolder}
-                picker={folderLoad.kind === 'ready' ? folderLoad.status.picker : null}
+                onChange={setFolderDraft}
+                picker={folderLoad.kind === 'ready' ? folderLoad.data.picker : null}
                 disabled={busy !== null}
                 note={folderLoad.kind === 'error'
                   ? "Couldn't read the default folder. Leave it empty to use the default folder."

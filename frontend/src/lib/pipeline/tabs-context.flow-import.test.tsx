@@ -19,6 +19,7 @@ import { PipelineProvider, usePipeline } from './pipeline-context'
 import { registerBlockDef } from './registry'
 import type { Pipeline } from './types'
 import { NEWER_SCHEMA_ERROR } from './flow-migrations'
+import { FlowNameRequiredError } from './flow-errors'
 
 beforeAll(() => {
   registerBlockDef({
@@ -291,5 +292,25 @@ describe('loadWorkspace', () => {
     })
     expect(latest.tabs.tabs).toHaveLength(1)
     expect(toastMock.error).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('saveActiveFlow', () => {
+  it('a tab with no flow name rejects with FlowNameRequiredError and saves nothing', async () => {
+    await mount()
+    apiMock.saveFlowToDisk.mockReset()
+    await waitFor(() => expect(pipelineOf(0)).toBeDefined())
+    await expect(latest.tabs.saveActiveFlow()).rejects.toBeInstanceOf(FlowNameRequiredError)
+    expect(apiMock.saveFlowToDisk).not.toHaveBeenCalled()
+  })
+
+  it('a refused save is a plain error, not a missing name', async () => {
+    await mount()
+    apiMock.saveFlowToDisk.mockReset().mockResolvedValue({ ok: false, error: 'disk full' })
+    await waitFor(() => expect(pipelineOf(0)).toBeDefined())
+    const err = await latest.tabs.saveActiveFlow('Named').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(FlowNameRequiredError)
+    expect((err as Error).message).toBe('disk full')
   })
 })

@@ -12,6 +12,7 @@ import { OnboardingDialog } from '@/components/onboarding-dialog'
 import { CreditsPanel } from '@/components/credits-panel'
 import { AppUpdateProvider } from '@/components/app-update/app-update-provider'
 import { setAdvancedMode } from '@/lib/pipeline/registry'
+import { useResource } from '@/lib/resource'
 import { getOnboardingCompleted } from '@/lib/settings/client'
 import '@/components/pipeline/custom_blocks/_register'
 
@@ -29,23 +30,19 @@ function useFeatureFlags() {
   return ready
 }
 
-/** Opens first-start onboarding when `onboarding_completed` is not set.
- * If the pref can't be read (backend not up yet) nothing is shown. */
+/** Whether first-start onboarding shows. It shows only when the
+ * `onboarding_completed` pref was read and is not set. A pref that cannot be
+ * read (backend not up yet) means "not shown" on purpose, never an error. */
+type OnboardingGate = 'checking' | 'show' | 'hidden-completed' | 'hidden-unreadable' | 'hidden-finished'
+
 function useOnboarding(mounted: boolean) {
-  const [open, setOpen] = useState(false)
-  useEffect(() => {
-    if (!mounted) return
-    let cancelled = false
-    getOnboardingCompleted()
-      .then((completed) => {
-        if (!cancelled) setOpen(!completed)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [mounted])
-  return { open, close: () => setOpen(false) }
+  const { resource } = useResource(() => getOnboardingCompleted(), [mounted], { enabled: mounted })
+  const [finished, setFinished] = useState(false)
+  const gate: OnboardingGate = finished ? 'hidden-finished'
+    : resource.kind === 'loading' ? 'checking'
+      : resource.kind === 'error' ? 'hidden-unreadable'
+        : resource.data ? 'hidden-completed' : 'show'
+  return { open: gate === 'show', close: () => setFinished(true) }
 }
 
 export function AppShell({ children }: { children: ReactNode }) {

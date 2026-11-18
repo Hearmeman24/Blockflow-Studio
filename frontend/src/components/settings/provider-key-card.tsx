@@ -30,6 +30,7 @@ import {
   type KeyProvider,
 } from '@/lib/settings/client'
 
+import { createRequestGate, errorMessage } from '@/lib/resource'
 import { cn } from '@/lib/utils'
 
 import { ProviderSignUpLink } from './provider-keys'
@@ -58,9 +59,13 @@ type Check =
   | { kind: 'result'; result: KeyCheckResult }
   | { kind: 'error' }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
+/** What the card is doing. The form is open while editing or saving; a failed
+ * save returns to editing with the reason. */
+type Mode =
+  | { kind: 'view' }
+  | { kind: 'editing'; error: string | null }
+  | { kind: 'saving' }
+  | { kind: 'removing' }
 
 function formatBalance(result: KeyCheckResult): string | null {
   if (result.balance === undefined || result.balance === null) return null
@@ -74,74 +79,86 @@ export function ProviderKeyCard({
   const titleId = useId()
   const inputId = useId()
   const helperId = useId()
-  const [editing, setEditing] = useState(false)
+  const [mode, setMode] = useState<Mode>({ kind: 'view' })
   const [draft, setDraft] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [removing, setRemoving] = useState(false)
-  const [saveError, setSaveError] = useState<string | null>(null)
   const [check, setCheck] = useState<Check>({ kind: 'idle' })
+  // A check answers for the key that was saved when it started: saving or
+  // removing a key makes a check still in flight stale, so its late answer is
+  // dropped instead of showing "Valid" or a balance for a key that is gone.
+  const [checkGate] = useState(createRequestGate)
   const inputRef = useRef<HTMLInputElement>(null)
   const actionRef = useRef<HTMLButtonElement>(null)
   const restoreFocus = useRef(false)
 
+  const formOpen = mode.kind === 'editing' || mode.kind === 'saving'
+  const saving = mode.kind === 'saving'
+  const removing = mode.kind === 'removing'
+  const saveError = mode.kind === 'editing' ? mode.error : null
+
   useEffect(() => {
-    if (editing) inputRef.current?.focus()
+    if (formOpen) inputRef.current?.focus()
     else if (restoreFocus.current) {
       restoreFocus.current = false
       actionRef.current?.focus()
     }
-  }, [editing, status.configured])
+  }, [formOpen, status.configured])
+
+  useEffect(() => () => checkGate.invalidate(), [checkGate])
 
   const closeForm = () => {
     restoreFocus.current = true
-    setEditing(false)
+    setMode({ kind: 'view' })
     setDraft('')
-    setSaveError(null)
+  }
+
+  const forgetCheck = () => {
+    checkGate.invalidate()
+    setCheck({ kind: 'idle' })
   }
 
   const handleSave = async (event: FormEvent) => {
     event.preventDefault()
-    if (!draft.trim() || saving) return
-    setSaving(true)
-    setSaveError(null)
+    if (!draft.trim() || mode.kind !== 'editing') return
+    setMode({ kind: 'saving' })
     try {
       const next = await setCredential(status.name, draft)
       onStatusChange(next)
-      setCheck({ kind: 'idle' })
+      forgetCheck()
       closeForm()
       if (provider) refreshProviderCatalog()
       onKeyChange?.()
       toast.success(`${keyLabel} key saved.`)
     } catch (err) {
-      setSaveError(errorMessage(err))
-    } finally {
-      setSaving(false)
+      setMode({ kind: 'editing', error: errorMessage(err) })
     }
   }
 
   const handleRemove = async () => {
-    setRemoving(true)
+    if (mode.kind !== 'view') return
+    setMode({ kind: 'removing' })
     try {
       await deleteCredential(status.name)
       onStatusChange({ ...status, configured: false, last4: null, updated_at: null })
-      setCheck({ kind: 'idle' })
+      forgetCheck()
       if (provider) refreshProviderCatalog()
       onKeyChange?.()
       toast.success(`${keyLabel} key removed.`)
     } catch (err) {
       toast.error(`Could not remove the ${keyLabel} key: ${errorMessage(err)}`)
     } finally {
-      setRemoving(false)
+      setMode({ kind: 'view' })
     }
   }
 
   const handleCheck = async () => {
     if (!runCheck) return
+    const token = checkGate.begin()
     setCheck({ kind: 'checking' })
     try {
-      setCheck({ kind: 'result', result: await runCheck() })
+      const result = await runCheck()
+      if (checkGate.isCurrent(token)) setCheck({ kind: 'result', result })
     } catch {
-      setCheck({ kind: 'error' })
+      if (checkGate.isCurrent(token)) setCheck({ kind: 'error' })
     }
   }
 
@@ -171,7 +188,7 @@ export function ProviderKeyCard({
           </p>
         )}
 
-        {editing ? (
+        {formOpen ? (
           <form className="space-y-2" onSubmit={handleSave} onKeyDown={onFormKeyDown} noValidate>
             <Label htmlFor={inputId}>
               {status.configured ? `New ${keyLabel} API key` : `${keyLabel} API key`}
@@ -203,7 +220,14 @@ export function ProviderKeyCard({
           </form>
         ) : (
           <div className="flex flex-wrap gap-2">
-            <Button ref={actionRef} type="button" size="sm" variant="outline" onClick={() => setEditing(true)}>
+            <Button
+              ref={actionRef}
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setMode({ kind: 'editing', error: null })}
+              disabled={removing}
+            >
               {status.configured ? 'Replace key' : 'Add key'}
             </Button>
             {status.configured && runCheck && (
@@ -212,7 +236,7 @@ export function ProviderKeyCard({
                 size="sm"
                 variant="outline"
                 onClick={() => void handleCheck()}
-                disabled={check.kind === 'checking'}
+                disabled={check.kind === 'checking' || removing}
               >
                 {check.kind === 'checking' ? 'Checking…' : 'Check key'}
               </Button>

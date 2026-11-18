@@ -153,6 +153,78 @@ describe('OnboardingDialog saving', () => {
     expect(save()).toBeEnabled()
   })
 
+  test('a retry after a partial failure saves only the steps that are left', async () => {
+    let piapiFails = true
+    const { user, dialog, kieInput, piapiInput, folderInput, save } = setup((b) => {
+      b.override('PUT /api/settings/credentials/piapi_api_key', () => (piapiFails
+        ? json({ detail: 'database is locked' }, 500)
+        : json({ name: 'piapi_api_key', configured: true, last4: 'QRST', updated_at: null })))
+    })
+    await waitFor(() => expect(folderInput()).toHaveValue(DEFAULT_FOLDER))
+    await user.type(kieInput(), KIE_KEY)
+    await user.type(piapiInput(), PIAPI_KEY)
+    await user.clear(folderInput())
+    await user.type(folderInput(), '/Users/ana/Out')
+    await user.click(save())
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/database is locked/i)
+    expect(folderPuts()).toEqual(['/Users/ana/Out'])
+
+    piapiFails = false
+    await user.click(save())
+    await waitFor(() => expect(onFinished).toHaveBeenCalledTimes(1))
+    expect(folderPuts()).toEqual(['/Users/ana/Out'])
+    expect(putCalls()).toEqual([
+      'PUT /api/settings/credentials/kie_api_key',
+      'PUT /api/settings/credentials/piapi_api_key',
+      'PUT /api/settings/credentials/piapi_api_key',
+    ])
+    // Everything saved in this dialog is reported once it finishes.
+    expect(toastMocks.success).toHaveBeenCalledWith(expect.stringMatching(/keys saved/i))
+    expect(toastMocks.info).toHaveBeenCalledWith(expect.stringMatching(/\/Users\/ana\/Out/))
+    expect(backend.calls()).toContain('POST /api/providers/kie/validate-key')
+    expect(backend.calls()).toContain('POST /api/providers/piapi/validate-key')
+  })
+
+  test('a key changed after it was saved is saved again on retry', async () => {
+    let piapiFails = true
+    const { user, dialog, kieInput, piapiInput, save } = setup((b) => {
+      b.override('PUT /api/settings/credentials/piapi_api_key', () => (piapiFails
+        ? json({ detail: 'database is locked' }, 500)
+        : json({ name: 'piapi_api_key', configured: true, last4: 'QRST', updated_at: null })))
+    })
+    await user.type(kieInput(), KIE_KEY)
+    await user.type(piapiInput(), PIAPI_KEY)
+    await user.click(save())
+    await within(dialog).findByRole('alert')
+
+    piapiFails = false
+    await user.clear(kieInput())
+    await user.type(kieInput(), 'kie-OTHER-0123456789ABCD')
+    await user.click(save())
+    await waitFor(() => expect(onFinished).toHaveBeenCalled())
+    expect(putCalls().filter((c) => c.endsWith('kie_api_key'))).toHaveLength(2)
+    expect(backend.keys.get('kie_api_key')).toBe('kie-OTHER-0123456789ABCD')
+  })
+
+  test('a retry after the completion step failed does not save the key again', async () => {
+    let fail = true
+    const { user, dialog, kieInput, save } = setup((b) => {
+      b.override('PUT /api/settings/app-prefs/onboarding_completed', () => {
+        if (fail) return json({ detail: 'disk full' }, 500)
+        b.prefs.set('onboarding_completed', 'true')
+        return json({ name: 'onboarding_completed', saved: true })
+      })
+    })
+    await user.type(kieInput(), KIE_KEY)
+    await user.click(save())
+    await within(dialog).findByRole('alert')
+
+    fail = false
+    await user.click(save())
+    await waitFor(() => expect(onFinished).toHaveBeenCalled())
+    expect(putCalls()).toEqual(['PUT /api/settings/credentials/kie_api_key'])
+  })
+
   test('a failure to mark onboarding complete keeps the dialog open', async () => {
     const { user, dialog, kieInput, save } = setup()
     backend.override('PUT /api/settings/app-prefs/onboarding_completed', () => json({ detail: 'disk full' }, 500))
@@ -309,15 +381,19 @@ describe('OnboardingDialog output folder', () => {
     expect(chooseButton()).toBeEnabled()
   })
 
-  test('an unavailable dialog disables the button with a reason; typing still works', async () => {
+  test('an unavailable dialog shows the reason and can be tried again; typing still works', async () => {
     const { user, dialog, folderInput, chooseButton } = setup((b) => {
       b.folder.choose = { status: 'unavailable', message: 'There is no desktop display for a folder dialog.' }
     })
     await waitFor(() => expect(folderInput()).toHaveValue(DEFAULT_FOLDER))
     await user.click(chooseButton())
 
-    await waitFor(() => expect(chooseButton()).toBeDisabled())
-    expect(dialog).toHaveTextContent(/no desktop display/i)
+    await waitFor(() => expect(dialog).toHaveTextContent(/no desktop display/i))
+    expect(chooseButton()).toBeEnabled()
+    backend.folder.choose = { status: 'chosen', path: '/Users/ana/Picked' }
+    await user.click(chooseButton())
+    await waitFor(() => expect(folderInput()).toHaveValue('/Users/ana/Picked'))
+    expect(dialog).not.toHaveTextContent(/no desktop display/i)
     await user.clear(folderInput())
     await user.type(folderInput(), '/Users/ana/Typed')
     expect(folderInput()).toHaveValue('/Users/ana/Typed')

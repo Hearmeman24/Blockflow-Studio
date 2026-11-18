@@ -58,6 +58,7 @@ vi.mock('sonner', () => ({
 
 // ── NAV_ITEMS constant ───────────────────────────────────────────────────────
 // Import after mocks
+import { FlowNameRequiredError } from '@/lib/pipeline/flow-errors'
 import { NavBar } from '../nav-bar'
 import { NAV_ITEMS } from '@/lib/nav-items'
 
@@ -136,7 +137,7 @@ describe('NavBar', () => {
 
   // ── Save (fallback to Save-As) ─────────────────────────────────────────────
   test('Save Flow opens save-as dialog when saveActiveFlow throws (no existing name)', async () => {
-    saveActiveFlowMock.mockRejectedValue(new Error('no name'))
+    saveActiveFlowMock.mockRejectedValue(new FlowNameRequiredError())
     const user = userEvent.setup()
     render(<NavBar />)
 
@@ -147,7 +148,7 @@ describe('NavBar', () => {
   })
 
   test('Save Flow surfaces a toast on save failure', async () => {
-    saveActiveFlowMock.mockRejectedValue(new Error('no name'))
+    saveActiveFlowMock.mockRejectedValue(new FlowNameRequiredError())
     const user = userEvent.setup()
     render(<NavBar />)
 
@@ -162,6 +163,60 @@ describe('NavBar', () => {
     await user.click(screen.getByRole('button', { name: /^save$/i }))
 
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled())
+  })
+
+  test('Save Flow with a network error shows the error and does not ask for a name', async () => {
+    saveActiveFlowMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('menuitem', { name: /^save flow$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Failed to save flow', { description: 'Failed to fetch' }))
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+
+  test('a failed Save As keeps the dialog open with the typed name', async () => {
+    saveActiveFlowMock.mockRejectedValue(new Error('disk full'))
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('menuitem', { name: /save flow as/i }))
+    const input = await screen.findByRole('textbox')
+    await user.clear(input)
+    await user.type(input, 'Kept Name')
+    await user.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Failed to save flow', { description: 'disk full' }))
+    expect(screen.getByRole('textbox')).toHaveValue('Kept Name')
+  })
+
+  test('Save As is sent once even when submitted twice', async () => {
+    saveActiveFlowMock.mockImplementation(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('menuitem', { name: /save flow as/i }))
+    const input = await screen.findByRole('textbox')
+    await user.type(input, '{Enter}{Enter}')
+
+    expect(saveActiveFlowMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /^save$/i })).toBeDisabled()
+  })
+
+  test('a successful Save As closes the dialog', async () => {
+    saveActiveFlowMock.mockResolvedValue(undefined)
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('menuitem', { name: /save flow as/i }))
+    await user.click(await screen.findByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(screen.queryByRole('textbox')).not.toBeInTheDocument())
   })
 
   // ── Rename Dialog ──────────────────────────────────────────────────────────
@@ -194,6 +249,37 @@ describe('NavBar', () => {
 
     await waitFor(() => expect(renameFlowMock).toHaveBeenCalledWith('AlphaFlow', 'BetaFlow'))
     await waitFor(() => expect(refreshAvailableFlowsMock).toHaveBeenCalled())
+  })
+
+  test('a failed rename shows the reason and keeps the dialog open with the typed name', async () => {
+    mockAvailableFlows.push({ name: 'AlphaFlow' })
+    renameFlowMock.mockResolvedValue({ ok: false, error: 'flow not found' })
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('button', { name: /rename flow AlphaFlow/i }))
+    const input = await screen.findByRole('textbox')
+    await user.clear(input)
+    await user.type(input, 'BetaFlow')
+    await user.click(screen.getByRole('button', { name: /^rename$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Could not rename the flow', { description: 'flow not found' }))
+    expect(screen.getByRole('textbox')).toHaveValue('BetaFlow')
+  })
+
+  test('a rename that cannot reach BlockFlow shows the error', async () => {
+    mockAvailableFlows.push({ name: 'AlphaFlow' })
+    renameFlowMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('button', { name: /rename flow AlphaFlow/i }))
+    await user.click(await screen.findByRole('button', { name: /^rename$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Could not rename the flow', { description: 'Failed to fetch' }))
+    expect(screen.getByRole('textbox')).toHaveValue('AlphaFlow')
   })
 
   test('Rename cancel is a no-op', async () => {
@@ -238,6 +324,34 @@ describe('NavBar', () => {
     await waitFor(() => expect(refreshAvailableFlowsMock).toHaveBeenCalled())
   })
 
+  test('a failed delete shows the reason', async () => {
+    mockAvailableFlows.push({ name: 'AlphaFlow' })
+    deleteFlowMock.mockResolvedValue({ ok: false, error: 'flow not found' })
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('button', { name: /delete flow AlphaFlow/i }))
+    await screen.findByRole('alertdialog')
+    await user.click(screen.getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Could not delete “AlphaFlow”', { description: 'flow not found' }))
+  })
+
+  test('a delete that cannot reach BlockFlow shows the error', async () => {
+    mockAvailableFlows.push({ name: 'AlphaFlow' })
+    deleteFlowMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('button', { name: /delete flow AlphaFlow/i }))
+    await screen.findByRole('alertdialog')
+    await user.click(screen.getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Could not delete “AlphaFlow”', { description: 'Failed to fetch' }))
+  })
+
   test('Delete cancel is a no-op', async () => {
     mockAvailableFlows.push({ name: 'AlphaFlow' })
     const user = userEvent.setup()
@@ -277,5 +391,18 @@ describe('NavBar', () => {
     await user.click(screen.getByRole('button', { name: /^save$/i }))
 
     await waitFor(() => expect(saveWorkspaceMock).toHaveBeenCalledWith('Weekend Work'))
+  })
+
+  test('a failed workspace save shows the error and keeps the dialog open', async () => {
+    saveWorkspaceMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    const user = userEvent.setup()
+    render(<NavBar />)
+
+    await user.click(screen.getByRole('button', { name: /file/i }))
+    await user.click(await screen.findByRole('menuitem', { name: /save all tabs/i }))
+    await user.click(await screen.findByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(toastErrorMock).toHaveBeenCalledWith('Could not save the workspace', { description: 'Failed to fetch' }))
+    expect(screen.getByRole('textbox')).toHaveValue('My Workspace')
   })
 })

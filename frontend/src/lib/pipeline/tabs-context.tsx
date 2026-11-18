@@ -16,6 +16,7 @@ import { migrateSavedFlow, type FlowImportReport } from './flow-migrations'
 import { mergeImportReports, notifyFlowImport, notifyFlowImportFailure } from './flow-import-notice'
 import { LOOP_OFF, loopIteration, needsRestart, transitionLoop, type LoopEvent, type LoopState } from './loop-mode'
 import type { PublishedTabRun, RunOutcome, TabRunState } from './run-phase'
+import { FlowNameRequiredError } from './flow-errors'
 
 export type { TabRunState } from './run-phase'
 
@@ -447,7 +448,7 @@ export function PipelineTabsProvider({ children }: { children: ReactNode }) {
     const currentTab = tabs.find((tab) => tab.id === activeTabId)
     const resolvedName = (name?.trim() || currentTab?.flowName || '').trim()
     if (!resolvedName) {
-      throw new Error('Flow name is required')
+      throw new FlowNameRequiredError()
     }
 
     const flowJson = actions.exportFlowJson(resolvedName)

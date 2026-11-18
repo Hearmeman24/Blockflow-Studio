@@ -31,21 +31,23 @@ export function OutputFolderField({ value, onChange, picker, disabled, placehold
   const inputId = useId()
   const helpId = useId()
   const [picking, setPicking] = useState(false)
-  const [unavailable, setUnavailable] = useState<string | null>(null)
+  // The last dialog attempt's message ("busy", or "unavailable" when the
+  // backend could not open one). It never disables the button: the next
+  // attempt may work. Only the picker status from the backend disables it.
   const [message, setMessage] = useState<string | null>(null)
 
-  const reason = unavailable ?? (picker && !picker.available ? picker.reason : null)
+  const reason = picker && !picker.available ? picker.reason : null
   const canPick = !disabled && !picking && reason === null
 
   const handleChoose = async () => {
+    if (picking) return
     setPicking(true)
     setMessage(null)
     const trimmed = value.trim()
     const result = await chooseFolder(trimmed || undefined)
     setPicking(false)
     if (result.status === 'chosen') onChange(result.path)
-    else if (result.status === 'unavailable') setUnavailable(result.message)
-    else if (result.status === 'busy') setMessage(result.message)
+    else if (result.status === 'unavailable' || result.status === 'busy') setMessage(result.message)
   }
 
   return (

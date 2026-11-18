@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import { toast } from 'sonner'
 
 import { AlertPanel } from '@/components/alert-panel'
@@ -9,16 +9,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { refreshWriterProviders } from '@/lib/prompt-writer/api'
+import { errorMessage, useResource } from '@/lib/resource'
 import { LOCAL_LLM_SERVERS, getAppPref, setAppPref, type LocalLlmServer } from '@/lib/settings/client'
-
-type Load =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; values: Record<string, string> }
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
 
 /**
  * Base URLs of the local Ollama and LM Studio servers used by the Prompt
@@ -27,23 +19,10 @@ function errorMessage(err: unknown): string {
  */
 export function LocalLlmServers() {
   const headingId = useId()
-  const [load, setLoad] = useState<Load>({ kind: 'loading' })
-  const [attempt, setAttempt] = useState(0)
-
-  useEffect(() => {
-    let cancelled = false
-    Promise.all(LOCAL_LLM_SERVERS.map((s) => getAppPref(s.pref)))
-      .then((values) => {
-        if (cancelled) return
-        setLoad({ kind: 'ready', values: Object.fromEntries(LOCAL_LLM_SERVERS.map((s, i) => [s.pref, values[i] ?? ''])) })
-      })
-      .catch((err) => {
-        if (!cancelled) setLoad({ kind: 'error', message: errorMessage(err) })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [attempt])
+  const { resource: load, retry } = useResource(async () => {
+    const values = await Promise.all(LOCAL_LLM_SERVERS.map((s) => getAppPref(s.pref)))
+    return Object.fromEntries(LOCAL_LLM_SERVERS.map((s, i) => [s.pref, values[i] ?? ''])) as Record<string, string>
+  }, [])
 
   return (
     <section aria-labelledby={headingId} className="space-y-3 rounded-xl border p-5">
@@ -69,14 +48,14 @@ export function LocalLlmServers() {
         <AlertPanel variant="error" title="Could not load the local server settings">
           <p>{load.message}</p>
           <Button type="button" size="sm" variant="outline" className="mt-2"
-            onClick={() => { setLoad({ kind: 'loading' }); setAttempt((n) => n + 1) }}>
+            onClick={retry}>
             Retry
           </Button>
         </AlertPanel>
       )}
 
       {load.kind === 'ready' && LOCAL_LLM_SERVERS.map((server) => (
-        <ServerUrlField key={server.id} server={server} saved={load.values[server.pref] ?? ''} />
+        <ServerUrlField key={server.id} server={server} saved={load.data[server.pref] ?? ''} />
       ))}
     </section>
   )

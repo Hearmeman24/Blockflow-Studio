@@ -477,7 +477,9 @@ is allowed only when labelled as one, with follow-up work tracked.
   block, which the body makes a flex column), `BlockRoleTile`,
   `pipeline/collapsible-section`, `ChipTooltip`,
   `byok/media-thumb`, and the `lib/` helpers. Add to a shared module before
-  pasting a second copy.
+  pasting a second copy. Async state uses `useResource` / `fromSWR`
+  (`lib/resource.ts`) for reads and `useMutation` (`lib/mutation.ts`) for
+  writes, not hand-rolled `loading` / `error` / `saving` flags.
 - **Three states:** every data-driven surface has a `Skeleton` loading state,
   an `EmptyState` with one action, and a readable error with one recovery
   action; transient feedback uses `sonner` toasts.

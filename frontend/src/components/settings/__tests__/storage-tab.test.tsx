@@ -74,6 +74,29 @@ describe('StorageTab', () => {
     expect(save()).toBeEnabled()
   })
 
+  test('a load error says so and offers a Retry that loads the setting', async () => {
+    vi.mocked(getAssetStorageMode)
+      .mockRejectedValueOnce(new Error('Settings store unavailable'))
+      .mockResolvedValueOnce('local_only')
+    const user = userEvent.setup()
+    render(<StorageTab />)
+
+    expect(await screen.findByText(/settings store unavailable/i)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByRole('radio', { name: /local only/i })).toBeChecked())
+    expect(screen.queryByText(/settings store unavailable/i)).not.toBeInTheDocument()
+    expect(getAssetStorageMode).toHaveBeenCalledTimes(2)
+  })
+
+  test('no mode is shown as selected while the saved mode is loading', async () => {
+    vi.mocked(getAssetStorageMode).mockImplementation(() => new Promise(() => {}))
+    render(<StorageTab />)
+
+    expect(screen.getByRole('radio', { name: /local only/i })).not.toBeChecked()
+    expect(screen.getByRole('radio', { name: /temporary public urls/i })).not.toBeChecked()
+    expect(save()).toBeDisabled()
+  })
+
   test('copy says local files go to the provider only when a generation needs them', async () => {
     const { container } = render(<StorageTab />)
     await screen.findByRole('radio', { name: /local only/i })

@@ -143,6 +143,77 @@ describe('OutputFolderSetting', () => {
       .not.toHaveTextContent('/Volumes/Old/Out'))
   })
 
+  test('a failed re-read after a save keeps the section and the saved folder in the field', async () => {
+    const chosen = '/Users/ana/New Out'
+    let reads = 0
+    const { user, input, save } = setup((b) => {
+      b.folder.choose = { status: 'chosen', path: chosen }
+      b.override('GET /api/settings/output-folder', () => {
+        reads += 1
+        if (reads > 1) return json({ detail: 'database is locked' }, 500)
+        return json({ in_use: DEFAULT_FOLDER, default: DEFAULT_FOLDER, configured: null,
+          configured_unavailable: false, previous: [], picker: { available: true, reason: null } })
+      })
+    })
+    await waitFor(() => expect(input()).toHaveValue(DEFAULT_FOLDER))
+    await user.clear(input())
+    await user.type(input(), chosen)
+    await user.click(save())
+    await waitFor(() => expect(folderPuts()).toEqual([chosen]))
+    await waitFor(() => expect(reads).toBe(2))
+    await new Promise((r) => setTimeout(r, 0))
+    expect(screen.queryByText(/could not load the output folder/i)).not.toBeInTheDocument()
+    expect(input()).toHaveValue(chosen)
+  })
+
+  test('typing while the folder is re-read after a save is not overwritten', async () => {
+    let release: (() => void) | null = null
+    let reads = 0
+    const status = (inUse: string) => json({ in_use: inUse, default: DEFAULT_FOLDER, configured: inUse,
+      configured_unavailable: false, previous: [], picker: { available: true, reason: null } })
+    const { user, input, save } = setup((b) => {
+      b.override('GET /api/settings/output-folder', () => {
+        reads += 1
+        if (reads === 1) return status(DEFAULT_FOLDER)
+        return new Promise<Response>((resolve) => { release = () => resolve(status('/Users/ana/A')) })
+      })
+    })
+    await waitFor(() => expect(input()).toHaveValue(DEFAULT_FOLDER))
+    await user.clear(input())
+    await user.type(input(), '/Users/ana/A')
+    await user.click(save())
+    await waitFor(() => expect(release).not.toBeNull())
+    await user.clear(input())
+    await user.type(input(), '/Users/ana/B')
+    release!()
+    await waitFor(() => expect(screen.getByText(/in use now/i)).toHaveTextContent('/Users/ana/A'))
+    expect(input()).toHaveValue('/Users/ana/B')
+  })
+
+  test('the choose button can be tried again after the dialog was unavailable', async () => {
+    const { user, input, choose } = setup((b) => {
+      b.folder.choose = { status: 'unavailable', message: 'Could not reach BlockFlow to open a folder dialog.' }
+    })
+    await waitFor(() => expect(input()).toHaveValue(DEFAULT_FOLDER))
+    await user.click(choose())
+    expect(await screen.findByText(/could not reach blockflow/i)).toBeInTheDocument()
+    expect(choose()).toBeEnabled()
+    backend.folder.choose = { status: 'chosen', path: '/Users/ana/Picked' }
+    await user.click(choose())
+    await waitFor(() => expect(input()).toHaveValue('/Users/ana/Picked'))
+  })
+
+  test('stop reading is disabled while the change is being sent', async () => {
+    const { user } = setup((b) => {
+      b.folder.previous = ['/Volumes/Old/Out']
+      b.override('POST /api/settings/output-folder/forget', () => new Promise<Response>(() => {}))
+    })
+    const trigger = await screen.findByRole('button', { name: /stop reading \/volumes\/old\/out/i })
+    await user.click(trigger)
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /stop reading/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /stop reading \/volumes\/old\/out/i })).toBeDisabled())
+  })
+
   test('no earlier folders: no list', async () => {
     const { input } = setup()
     await waitFor(() => expect(input()).toHaveValue(DEFAULT_FOLDER))

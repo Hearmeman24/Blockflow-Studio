@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { toast } from 'sonner'
 
 import { AlertPanel } from '@/components/alert-panel'
@@ -18,6 +18,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useMutation } from '@/lib/mutation'
+import { errorMessage, useResource } from '@/lib/resource'
 import {
   forgetOutputFolder,
   getOutputFolder,
@@ -27,70 +29,49 @@ import {
 
 import { OutputFolderField } from './output-folder-field'
 
-type Load =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; status: OutputFolderStatus }
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+function savedFolder(status: OutputFolderStatus): string {
+  return status.configured ?? status.in_use
 }
 
 /** Settings → App: the output folder in use, a field to change it (with the
  * native folder dialog), and the earlier folders BlockFlow still reads. A
  * change applies immediately; nothing is moved or deleted. */
 export function OutputFolderSetting() {
-  const [load, setLoad] = useState<Load>({ kind: 'loading' })
-  const [attempt, setAttempt] = useState(0)
-  const [draft, setDraft] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { resource: load, retry, refresh, setData } = useResource(() => getOutputFolder(), [])
+  // What the user typed; null follows the saved folder.
+  const [draft, setDraft] = useState<string | null>(null)
+  const saved = load.kind === 'ready' ? savedFolder(load.data) : ''
+  const value = draft ?? saved
 
-  useEffect(() => {
-    let cancelled = false
-    getOutputFolder()
-      .then((status) => {
-        if (cancelled) return
-        setLoad({ kind: 'ready', status })
-        setDraft(status.configured ?? status.in_use)
-      })
-      .catch((err) => {
-        if (!cancelled) setLoad({ kind: 'error', message: errorMessage(err) })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [attempt])
-
-  const reload = () => setAttempt((n) => n + 1)
-  const saved = load.kind === 'ready' ? load.status.configured ?? load.status.in_use : ''
-  const canSave = load.kind === 'ready' && !saving && draft.trim() !== '' && draft.trim() !== saved
-
-  const persist = async (value: string) => {
-    setSaving(true)
-    setError(null)
+  const save = useMutation((next: string) => saveOutputFolder(next))
+  const persist = async (next: string) => {
+    const submitted = draft
+    if ((await save.run(next)).status !== 'done') return
+    toast.success(next
+      ? `New files are saved to ${next}. Earlier files stay where they are and remain available.`
+      : 'New files are saved to the default folder. Earlier files stay where they are and remain available.')
+    // Re-read quietly: a failed read keeps the section (the change already
+    // applies), and the field follows the saved folder only if the user has
+    // not typed since.
     try {
-      await saveOutputFolder(value)
-      toast.success(value
-        ? `New files are saved to ${value}. Earlier files stay where they are and remain available.`
-        : 'New files are saved to the default folder. Earlier files stay where they are and remain available.')
-      reload()
-    } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      setSaving(false)
+      await refresh()
+    } catch {
+      setData((prev) => ({ ...prev, configured: next || null, in_use: next || prev.default, configured_unavailable: false }))
     }
+    setDraft((current) => (current === submitted ? null : current))
   }
-
-  const stopReading = async (path: string) => {
+  const forget = useMutation(async (path: string) => {
     try {
       const status = await forgetOutputFolder(path)
-      setLoad({ kind: 'ready', status })
+      setData(() => status)
       toast.success(`BlockFlow no longer reads ${path}. Its files were not touched.`)
     } catch (err) {
       toast.error(`Could not update the list: ${errorMessage(err)}`)
     }
-  }
+  })
+
+  const saving = save.pending
+  const canSave = load.kind === 'ready' && !saving && value.trim() !== '' && value.trim() !== saved
 
   return (
     <section className="space-y-3">
@@ -107,10 +88,7 @@ export function OutputFolderSetting() {
       {load.kind === 'error' && (
         <AlertPanel variant="error" title="Could not load the output folder">
           <p>{load.message}</p>
-          <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => {
-            setLoad({ kind: 'loading' })
-            reload()
-          }}>
+          <Button type="button" size="sm" variant="outline" className="mt-2" onClick={retry}>
             Retry
           </Button>
         </AlertPanel>
@@ -119,13 +97,13 @@ export function OutputFolderSetting() {
       {load.kind === 'ready' && (
         <>
           <p className="text-xs text-muted-foreground">
-            In use now: <span className="break-all font-mono text-foreground">{load.status.in_use}</span>
+            In use now: <span className="break-all font-mono text-foreground">{load.data.in_use}</span>
           </p>
 
-          {load.status.configured_unavailable && load.status.configured && (
+          {load.data.configured_unavailable && load.data.configured && (
             <AlertPanel variant="warning">
               <p>
-                The saved folder <span className="break-all font-mono">{load.status.configured}</span> isn&apos;t
+                The saved folder <span className="break-all font-mono">{load.data.configured}</span> isn&apos;t
                 available (for example, an unplugged drive), so new files go to the folder shown above until it
                 is back.
               </p>
@@ -137,24 +115,26 @@ export function OutputFolderSetting() {
             noValidate
             onSubmit={(e) => {
               e.preventDefault()
-              if (canSave) void persist(draft.trim())
+              if (canSave) void persist(value.trim())
             }}
           >
             <OutputFolderField
-              value={draft}
+              value={value}
               onChange={(v) => {
                 setDraft(v)
-                setError(null)
+                save.reset()
               }}
-              picker={load.status.picker}
+              picker={load.data.picker}
               disabled={saving}
             />
-            {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+            {save.state.kind === 'error' && (
+              <p role="alert" className="text-xs text-destructive">{save.state.message}</p>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button type="submit" size="sm" variant="outline" disabled={!canSave}>
                 {saving ? 'Saving…' : 'Save folder'}
               </Button>
-              {load.status.configured && (
+              {load.data.configured && (
                 <Button type="button" size="sm" variant="ghost" disabled={saving} onClick={() => void persist('')}>
                   Use default folder
                 </Button>
@@ -162,20 +142,26 @@ export function OutputFolderSetting() {
             </div>
           </form>
 
-          {load.status.previous.length > 0 && (
+          {load.data.previous.length > 0 && (
             <div className="space-y-2 pt-2">
               <h3 className="text-sm font-medium">Earlier output folders</h3>
               <p className="text-xs text-muted-foreground">
                 BlockFlow still reads files from these folders, so runs and flows that use them keep working.
               </p>
               <ul aria-label="Earlier output folders" className="space-y-1.5">
-                {load.status.previous.map((item) => (
+                {load.data.previous.map((item) => (
                   <li key={item.path} className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="min-w-0 flex-1 break-all font-mono">{item.path}</span>
                     {!item.available && <StatusBadge variant="warning">Not found</StatusBadge>}
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
-                        <Button type="button" size="xs" variant="ghost" aria-label={`Stop reading ${item.path}`}>
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="ghost"
+                          aria-label={`Stop reading ${item.path}`}
+                          disabled={forget.pending}
+                        >
                           Stop reading
                         </Button>
                       </AlertDialogTrigger>
@@ -190,7 +176,7 @@ export function OutputFolderSetting() {
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                           <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction onClick={() => void stopReading(item.path)}>
+                          <AlertDialogAction onClick={() => void forget.run(item.path)}>
                             Stop reading
                           </AlertDialogAction>
                         </AlertDialogFooter>

@@ -301,6 +301,60 @@ describe('check key', () => {
     expect(status).toHaveTextContent(/not checked/i)
   })
 
+  function holdCheck() {
+    let release!: () => void
+    backend.override('POST /api/providers/kie/validate-key', () => new Promise<Response>((resolve) => {
+      release = () => resolve(json({ ok: true, valid: true, message: 'Key accepted.', balance: 42.5, balance_unit: 'credits' }))
+    }))
+    return () => release()
+  }
+
+  test('a check still running when the key is removed shows no result for the removed key', async () => {
+    const { user } = setup({ kie_api_key: KIE_KEY })
+    const release = holdCheck()
+    const kie = await card(/^kie$/i)
+
+    await user.click(within(kie).getByRole('button', { name: /check key/i }))
+    await user.click(within(kie).getByRole('button', { name: /remove/i }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /remove key/i }))
+    await waitFor(() => expect(within(kie).getByText('Not configured')).toBeInTheDocument())
+
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    const status = within(kie).getByRole('status')
+    expect(status).not.toHaveTextContent(/valid/i)
+    expect(status).not.toHaveTextContent(/42\.5/)
+  })
+
+  test('a check still running when the key is replaced shows no result for the old key', async () => {
+    const { user } = setup({ kie_api_key: KIE_KEY })
+    const release = holdCheck()
+    const kie = await card(/^kie$/i)
+
+    await user.click(within(kie).getByRole('button', { name: /check key/i }))
+    await user.click(within(kie).getByRole('button', { name: /replace key/i }))
+    await user.type(within(kie).getByLabelText(/new kie api key/i), 'kie-NEW-0123456789abNEWK')
+    await user.click(within(kie).getByRole('button', { name: /save key/i }))
+    await waitFor(() => expect(within(kie).getByText(/NEWK/)).toBeInTheDocument())
+
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(within(kie).getByRole('status')).not.toHaveTextContent(/valid|42\.5/i)
+  })
+
+  test('Replace and Check are disabled while the key is being removed', async () => {
+    const { user } = setup({ kie_api_key: KIE_KEY })
+    backend.override('DELETE /api/settings/credentials/kie_api_key', () => new Promise<Response>(() => {}))
+    const kie = await card(/^kie$/i)
+
+    await user.click(within(kie).getByRole('button', { name: /remove/i }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /remove key/i }))
+
+    expect(await within(kie).findByRole('button', { name: /removing/i })).toBeDisabled()
+    expect(within(kie).getByRole('button', { name: /replace key/i })).toBeDisabled()
+    expect(within(kie).getByRole('button', { name: /check key/i })).toBeDisabled()
+  })
+
   test('network error shows a recoverable message', async () => {
     const { user } = setup({ kie_api_key: KIE_KEY })
     backend.override('POST /api/providers/kie/validate-key', () => {

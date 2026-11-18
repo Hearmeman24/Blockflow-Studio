@@ -1,10 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-
 import { AlertPanel } from '@/components/alert-panel'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useResource } from '@/lib/resource'
 import {
   listCredentials,
   type CredentialName,
@@ -16,11 +15,6 @@ import { checkOpenRouterKey, refreshWriterProviders } from '@/lib/prompt-writer/
 import { LocalLlmServers } from './local-llm-servers'
 import { ProviderKeyCard } from './provider-key-card'
 import { PROVIDER_KEY_SPECS } from './provider-keys'
-
-type Load =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ready'; statuses: Record<CredentialName, CredentialStatus> }
 
 function unconfigured(name: CredentialName): CredentialStatus {
   return { name, configured: false, last4: null, updated_at: null }
@@ -39,32 +33,10 @@ function toRecord(list: CredentialStatus[]): Record<CredentialName, CredentialSt
 }
 
 export function ApiKeysTab() {
-  const [load, setLoad] = useState<Load>({ kind: 'loading' })
-  const [attempt, setAttempt] = useState(0)
-
-  useEffect(() => {
-    let cancelled = false
-    listCredentials()
-      .then((list) => {
-        if (!cancelled) setLoad({ kind: 'ready', statuses: toRecord(list) })
-      })
-      .catch((err) => {
-        if (!cancelled) setLoad({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [attempt])
-
-  const retry = () => {
-    setLoad({ kind: 'loading' })
-    setAttempt((n) => n + 1)
-  }
+  const { resource: load, retry, setData } = useResource(async () => toRecord(await listCredentials()), [])
 
   const update = (next: CredentialStatus) => {
-    setLoad((prev) => (prev.kind === 'ready'
-      ? { kind: 'ready', statuses: { ...prev.statuses, [next.name]: next } }
-      : prev))
+    setData((statuses) => ({ ...statuses, [next.name]: next }))
   }
 
   return (
@@ -110,7 +82,7 @@ export function ApiKeysTab() {
           {PROVIDER_KEY_SPECS.map((spec) => (
             <ProviderKeyCard
               key={spec.credential}
-              status={load.statuses[spec.credential]}
+              status={load.data[spec.credential]}
               title={spec.label}
               keyLabel={spec.label}
               provider={spec.provider}
@@ -131,7 +103,7 @@ export function ApiKeysTab() {
         </div>
         {load.kind === 'ready' && (
           <ProviderKeyCard
-            status={load.statuses.openrouter_api_key}
+            status={load.data.openrouter_api_key}
             title="OpenRouter (optional)"
             keyLabel="OpenRouter"
             description="Used by the Prompt Writer block only."

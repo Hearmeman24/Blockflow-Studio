@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, type ComponentType } from 'react'
+import { useState, type ComponentType } from 'react'
 import { Cloud, HardDrive } from 'lucide-react'
 
 import {
@@ -9,7 +9,10 @@ import {
   type AssetStorageMode,
 } from '@/lib/settings/client'
 
+import { AlertPanel } from '@/components/alert-panel'
 import { Button } from '@/components/ui/button'
+import { useMutation } from '@/lib/mutation'
+import { useResource } from '@/lib/resource'
 
 const OPTIONS: Array<{
   value: AssetStorageMode
@@ -32,47 +35,20 @@ const OPTIONS: Array<{
 ]
 
 export function StorageTab() {
-  // savedMode = what's persisted; mode = the staged selection (persisted on Save).
-  const [savedMode, setSavedMode] = useState<AssetStorageMode | null>(null)
-  const [mode, setMode] = useState<AssetStorageMode>('local_only')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // The saved mode is what is persisted; the staged choice (null = none yet)
+  // is persisted on Save.
+  const load = useResource(() => getAssetStorageMode(), [])
+  const [staged, setStaged] = useState<AssetStorageMode | null>(null)
+  const save = useMutation(async (next: AssetStorageMode) => {
+    await setAssetStorageMode(next)
+    load.setData(() => next)
+  })
 
-  useEffect(() => {
-    let cancelled = false
-    getAssetStorageMode()
-      .then((value) => {
-        if (cancelled) return
-        setSavedMode(value)
-        setMode(value)
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  const handleSave = async () => {
-    setSaving(true)
-    setError(null)
-    try {
-      await setAssetStorageMode(mode)
-      setSavedMode(mode)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
+  const savedMode = load.resource.kind === 'ready' ? load.resource.data : null
+  const mode = staged ?? savedMode
+  const saving = save.pending
   const dirty = savedMode !== null && mode !== savedMode
-  const canSave = !loading && !saving && dirty
+  const canSave = savedMode !== null && !saving && dirty
 
   return (
     <div className="space-y-6">
@@ -83,7 +59,16 @@ export function StorageTab() {
         </p>
       </section>
 
-      <fieldset className="grid gap-3 md:grid-cols-2" disabled={loading || saving}>
+      {load.resource.kind === 'error' && (
+        <AlertPanel variant="error" title="Could not load the storage setting">
+          <p>{load.resource.message}</p>
+          <Button type="button" size="sm" variant="outline" onClick={load.retry} className="mt-2">
+            Retry
+          </Button>
+        </AlertPanel>
+      )}
+
+      <fieldset className="grid gap-3 md:grid-cols-2" disabled={savedMode === null || saving}>
         <legend className="sr-only">Uploaded file storage mode</legend>
         {OPTIONS.map((option) => {
           const Icon = option.icon
@@ -100,7 +85,7 @@ export function StorageTab() {
                 name="asset_storage_mode"
                 value={option.value}
                 checked={checked}
-                onChange={() => setMode(option.value)}
+                onChange={() => setStaged(option.value)}
                 className="sr-only"
               />
               <div className="mb-3 flex items-center justify-between">
@@ -118,7 +103,9 @@ export function StorageTab() {
       <div className="flex items-center gap-3">
         <Button
           type="button"
-          onClick={() => void handleSave()}
+          onClick={() => {
+            if (mode) void save.run(mode)
+          }}
           disabled={!canSave}
         >
           Save
@@ -127,7 +114,7 @@ export function StorageTab() {
         {!saving && dirty && (
           <span className="text-xs text-muted-foreground">Unsaved changes.</span>
         )}
-        {error && <span className="text-xs text-destructive">{error}</span>}
+        {save.state.kind === 'error' && <span className="text-xs text-destructive">{save.state.message}</span>}
       </div>
     </div>
   )
