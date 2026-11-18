@@ -11,6 +11,30 @@ export const BALANCE_DEBOUNCE_MS = 1500
 /** A second cache-bypassing refresh after a finished job, for providers that settle the charge late. */
 export const BALANCE_SETTLE_MS = 10_000
 
+/**
+ * Job ids already counted as submitted, so a repeated `QUEUED` event does not
+ * refresh twice. An id is forgotten when its job finishes, and the set never
+ * holds more than `cap` ids (oldest dropped first), so it cannot grow without
+ * bound over a long session.
+ */
+export class SeenJobIds {
+  private readonly ids = new Set<string>()
+  constructor(private readonly cap = 500) {}
+  /** True when the id was not seen yet (and is now remembered). */
+  add(id: string): boolean {
+    if (this.ids.has(id)) return false
+    this.ids.add(id)
+    if (this.ids.size > this.cap) this.ids.delete(this.ids.values().next().value as string)
+    return true
+  }
+  forget(id: string): void {
+    this.ids.delete(id)
+  }
+  get size(): number {
+    return this.ids.size
+  }
+}
+
 export async function fetchBalances(refresh = false): Promise<ProviderBalance[]> {
   const res = await fetch(refresh ? `${BALANCES_URL}?refresh=1` : BALANCES_URL, { method: 'GET' })
   let body: unknown
@@ -112,7 +136,7 @@ export function useProviderBalances(options: { debounceMs?: number; settleMs?: n
     scheduleRef.current = schedule
     settleRef.current = scheduleSettle
   }, [schedule, scheduleSettle])
-  const submitted = useRef(new Set<string>())
+  const submitted = useRef(new SeenJobIds())
   useEffect(() => {
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') return
     const es = new EventSource('/api/jobs/events')
@@ -120,10 +144,11 @@ export function useProviderBalances(options: { debounceMs?: number; settleMs?: n
       const job = parseJobEvent(event.data)
       if (!job) return
       if (TERMINAL_STATUSES.includes(job.status as JobStatus)) {
+        // A finished job is never queued again, so its id is no longer needed.
+        submitted.current.forget(job.job_id)
         scheduleRef.current(true)
         settleRef.current()
-      } else if (job.status === 'QUEUED' && !submitted.current.has(job.job_id)) {
-        submitted.current.add(job.job_id)
+      } else if (job.status === 'QUEUED' && submitted.current.add(job.job_id)) {
         scheduleRef.current(true)
       }
     }

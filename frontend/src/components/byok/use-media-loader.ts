@@ -34,8 +34,9 @@ import {
   type LoaderItem,
   type LoaderKind,
 } from '@/lib/byok/loader-items'
+import { itemDisplayState, type ItemDisplayState } from '@/lib/byok/loader-item-display'
 import { probeMedia } from '@/lib/byok/probe-media'
-import { HEALTH_LABEL, isBrokenStatus, type ReferenceHealth } from '@/lib/byok/reference-health'
+import { HEALTH_LABEL, type ReferenceHealth } from '@/lib/byok/reference-health'
 import { fileLabel } from '@/lib/byok/references'
 import { useDownstreamLimits } from '@/lib/byok/use-downstream-limits'
 import { useReferenceHealth } from '@/lib/byok/use-reference-health'
@@ -74,6 +75,9 @@ export interface LoaderRow {
   item: LoaderItem
   flag: ItemFlag
   health: ReferenceHealth | undefined
+  /** What the tile shows: the save, the check and the flag combined by priority. */
+  display: ItemDisplayState
+  /** `display.kind === 'broken'`. */
   broken: boolean
   /** "First frame" / "Last frame" when the list feeds Image to Video. */
   role: string | null
@@ -143,11 +147,13 @@ export function useLoaderItemsState(blockId: string, setOutput: BlockComponentPr
   const frameSlots = limits.consumers.find((c) => c.frameSlots !== null)?.frameSlots ?? null
   const rows: LoaderRow[] = items.map((item, i) => {
     const result = item.status === 'ready' ? health.get(item) : undefined
+    const display = itemDisplayState(item, result, flags[i])
     return {
       item,
       flag: flags[i],
       health: result,
-      broken: isBrokenStatus(result?.status),
+      display,
+      broken: display.kind === 'broken',
       role: frameSlots !== null && i < frameSlots ? ROLE_NAMES[i] : null,
     }
   })
@@ -167,12 +173,15 @@ export function useLoaderItemsState(blockId: string, setOutput: BlockComponentPr
   // ---- Problems that would fail the run ----
   const blockers: string[] = []
   if (!skipped) {
-    const brokenRows = rows.filter((r) => r.broken)
-    if (brokenRows.length > 0) {
-      const names = brokenRows.map((r) => `${r.item.label} (${HEALTH_LABEL[r.health!.status]})`).join(', ')
-      blockers.push(`has ${brokenRows.length === 1 ? 'a broken reference' : `${brokenRows.length} broken references`}: ${names}`)
+    const brokenNames: string[] = []
+    const failed: LoaderRow[] = []
+    for (const row of rows) {
+      if (row.display.kind === 'broken') brokenNames.push(`${row.item.label} (${HEALTH_LABEL[row.display.health.status]})`)
+      if (row.display.kind === 'not_saved') failed.push(row)
     }
-    const failed = rows.filter((r) => r.item.status === 'error')
+    if (brokenNames.length > 0) {
+      blockers.push(`has ${brokenNames.length === 1 ? 'a broken reference' : `${brokenNames.length} broken references`}: ${brokenNames.join(', ')}`)
+    }
     if (failed.length > 0) blockers.push(`could not save ${failed.map((r) => r.item.label).join(', ')}`)
     if (strictest && items.length > 0) {
       if (!strictest.accepted) {
@@ -193,12 +202,13 @@ export function useLoaderItemsState(blockId: string, setOutput: BlockComponentPr
     if (beforeRun) await beforeRun()
     const current = latest ? latest() : items
     if (skipped) return emit(current)
-    const failedItem = current.find((i) => i.status === 'error')
+    const states = current.map((item) => ({ item, display: itemDisplayState(item, health.get(item)) }))
+    const failedItem = states.find((s) => s.display.kind === 'not_saved')?.item
     if (failedItem) throw new Error(`${failedItem.label}: ${failedItem.error ?? 'could not be saved.'} Replace or remove it.`)
-    const broken = current.find((i) => isBrokenStatus(health.get(i)?.status))
-    if (broken) {
-      const result = health.get(broken)!
-      throw new Error(`${broken.label}: ${result.detail || HEALTH_LABEL[result.status]} Replace or remove it.`)
+    for (const { item, display } of states) {
+      if (display.kind === 'broken') {
+        throw new Error(`${item.label}: ${display.health.detail || HEALTH_LABEL[display.health.status]} Replace or remove it.`)
+      }
     }
     return emit(current)
   }, [beforeRun, latest, items, skipped, emit, health])
@@ -231,7 +241,12 @@ export function useLoaderList(blockId: string, setOutput: BlockComponentProps['s
   useEffect(() => {
     itemsRef.current = items
   }, [items])
-  const inFlight = useRef(new Map<string, Promise<void>>())
+  // Saves in flight, keyed by a token per save (not by item id), so a second
+  // save of one item never drops the first from the set; `latestSave` names the
+  // save whose answer an item takes, so an older save answering last is ignored.
+  const inFlight = useRef(new Map<number, Promise<void>>())
+  const latestSave = useRef(new Map<string, number>())
+  const saveCounter = useRef(0)
   const [addMessages, setAddMessages] = useState<string[]>([])
 
   const update = useCallback((fn: (prev: LoaderItem[]) => LoaderItem[]) => {
@@ -256,21 +271,29 @@ export function useLoaderList(blockId: string, setOutput: BlockComponentProps['s
   const { limits } = core
 
   // ---- Adding, replacing ----
+  /** Save `file` as item `id`. Call it right after the update that put the item in `saving`. */
   const save = useCallback((id: string, file: File, meta: Partial<LoaderItem>) => {
+    const token = ++saveCounter.current
+    latestSave.current.set(id, token)
+    const settle = (patch: (item: LoaderItem) => LoaderItem) => {
+      if (latestSave.current.get(id) !== token) return
+      latestSave.current.delete(id)
+      update((prev) => prev.map((i) => (i.id === id ? patch(i) : i)))
+    }
     const task = (async () => {
       try {
         const body = await postFile(saveEndpoint, file)
         const path = typeof body[responseField] === 'string' ? String(body[responseField]).trim() : ''
         if (!body.ok || !path) throw new Error(body.error || 'The file could not be saved.')
-        update((prev) => prev.map((i) => (i.id === id ? { ...i, ...meta, local: path, url: undefined, status: 'ready', error: undefined } : i)))
+        settle((i) => ({ ...i, ...meta, local: path, url: undefined, status: 'ready', error: undefined }))
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
-        update((prev) => prev.map((i) => (i.id === id ? { ...i, status: 'error', error: `Could not save the file: ${message}` } : i)))
+        settle((i) => ({ ...i, status: 'error', error: `Could not save the file: ${message}` }))
       } finally {
-        inFlight.current.delete(id)
+        inFlight.current.delete(token)
       }
     })()
-    inFlight.current.set(id, task)
+    inFlight.current.set(token, task)
     return task
   }, [saveEndpoint, responseField, update])
 

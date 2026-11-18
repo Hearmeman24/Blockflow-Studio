@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo } from 'react'
 import {
   type BlockDef,
   type BlockComponentProps,
 } from '@/lib/pipeline/registry'
+import { useViewerHistory } from '@/lib/use-viewer-history'
 
 const PORT_AUDIO = 'audio'
 
@@ -30,25 +31,7 @@ function filenameOf(url: string): string {
 
 function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
   const currentUrls = toAudioUrls(inputs.audio)
-  const [accumulated, setAccumulated] = useState<string[]>([])
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const prevKey = useRef('')
-
-  useEffect(() => {
-    const key = currentUrls.join('\n')
-    if (key && key !== prevKey.current) {
-      prevKey.current = key
-      setAccumulated((prev) => {
-        const fresh = currentUrls.filter((u) => !prev.includes(u))
-        if (fresh.length === 0) return prev
-        const merged = [...prev, ...fresh]
-        setSelectedIndex(merged.length - 1)
-        return merged
-      })
-    }
-  }, [currentUrls])
-
-  const displayUrls = accumulated.length > 0 ? accumulated : currentUrls
+  const { history: accumulated, displayUrls, selectedIndex, select: setSelectedIndex, clear } = useViewerHistory(currentUrls)
   const selected = useMemo(() => {
     if (displayUrls.length === 0) return ''
     return displayUrls[Math.min(selectedIndex, displayUrls.length - 1)]
@@ -105,7 +88,7 @@ function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
           {accumulated.length > 0 && (
             <button
               type="button"
-              onClick={() => { setAccumulated([]); setSelectedIndex(0); prevKey.current = '' }}
+              onClick={clear}
               className="text-[10px] text-muted-foreground hover:text-foreground underline"
             >
               clear history

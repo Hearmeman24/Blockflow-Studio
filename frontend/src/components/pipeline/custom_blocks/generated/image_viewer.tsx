@@ -2,7 +2,7 @@
 // Source: custom_blocks/image_viewer/frontend.block.tsx
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { AdaptiveImageFrame } from '@/components/adaptive-media'
 import {
   PORT_IMAGE,
@@ -10,6 +10,7 @@ import {
   type BlockComponentProps,
 } from '@/lib/pipeline/registry'
 import { usePipeline } from '@/lib/pipeline/pipeline-context'
+import { useViewerHistory } from '@/lib/use-viewer-history'
 
 import { toDisplayUrls } from '@/lib/image-ref'
 import { BlockFooter } from '@/components/pipeline/block-footer'
@@ -29,40 +30,9 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
   // Which job made each image and what it cost, from the refs (generation blocks only).
   const metaByUrl = useOutputMeta([inputs.image, blockStates.get(blockId)?.outputs.image])
 
-  const [accumulatedUrls, setAccumulatedUrls] = useState<string[]>([])
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const [cleared, setCleared] = useState(false)
-  const prevKeyRef = useRef('')
-
   const currentUrls = imageUrls.length > 0 ? imageUrls : ownOutputUrls
-  const displayUrls = cleared ? [] : (accumulatedUrls.length > 0 ? accumulatedUrls : currentUrls)
+  const { history: accumulatedUrls, displayUrls, selectedIndex, select: setSelectedIndex, clear } = useViewerHistory(currentUrls)
   const isStale = !isLooping && currentUrls.length === 0 && accumulatedUrls.length > 0
-
-  useEffect(() => {
-    const key = currentUrls.join('\n')
-    if (key && key !== prevKeyRef.current) {
-      const isNew = prevKeyRef.current !== ''
-      prevKeyRef.current = key
-      setAccumulatedUrls((prev) => {
-        const newUrls = currentUrls.filter((u) => !prev.includes(u))
-        if (newUrls.length === 0) return prev
-        if (isNew) setCleared(false)
-        const merged = [...prev, ...newUrls]
-        setSelectedIndex(merged.length - 1)
-        return merged
-      })
-    }
-  }, [currentUrls])
-
-  useEffect(() => {
-    if (displayUrls.length === 0) {
-      setSelectedIndex(0)
-      return
-    }
-    if (selectedIndex >= displayUrls.length) {
-      setSelectedIndex(displayUrls.length - 1)
-    }
-  }, [displayUrls.length, selectedIndex])
 
   const selectedImage = useMemo(() => {
     if (displayUrls.length === 0) return ''
@@ -96,7 +66,7 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
           {accumulatedUrls.length > 1 && (
             <button
               type="button"
-              onClick={() => { setAccumulatedUrls([]); setSelectedIndex(0); setCleared(true) }}
+              onClick={clear}
               className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
             >
               Clear

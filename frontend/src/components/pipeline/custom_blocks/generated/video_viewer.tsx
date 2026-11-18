@@ -2,7 +2,7 @@
 // Source: custom_blocks/video_viewer/frontend.block.tsx
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { AdaptiveVideoFrame } from '@/components/adaptive-media'
 import {
   PORT_VIDEO,
@@ -10,6 +10,7 @@ import {
   type BlockComponentProps,
 } from '@/lib/pipeline/registry'
 import { usePipeline } from '@/lib/pipeline/pipeline-context'
+import { useViewerHistory } from '@/lib/use-viewer-history'
 import { toDisplayUrls } from '@/lib/video-ref'
 import { BlockFooter } from '@/components/pipeline/block-footer'
 import { OutputCostLabel, PriceMismatchBadge, useOutputMeta } from '@/components/byok/output-cost'
@@ -21,37 +22,10 @@ function VideoViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
   const ownOutputUrls = toDisplayUrls(blockStates.get(blockId)?.outputs.video)
   // Which job made each video and what it cost, from the refs (generation blocks only).
   const metaByUrl = useOutputMeta([inputs.video, blockStates.get(blockId)?.outputs.video])
-  const [accumulatedUrls, setAccumulatedUrls] = useState<string[]>([])
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const prevKeyRef = useRef('')
 
   const currentUrls = videoUrls.length > 0 ? videoUrls : ownOutputUrls
-  const displayUrls = accumulatedUrls.length > 0 ? accumulatedUrls : currentUrls
+  const { history: accumulatedUrls, displayUrls, selectedIndex, select: setSelectedIndex, clear } = useViewerHistory(currentUrls)
   const isStale = !isLooping && currentUrls.length === 0 && accumulatedUrls.length > 0
-
-  useEffect(() => {
-    const key = currentUrls.join('\n')
-    if (key && key !== prevKeyRef.current) {
-      prevKeyRef.current = key
-      setAccumulatedUrls((prev) => {
-        const newUrls = currentUrls.filter((u) => !prev.includes(u))
-        if (newUrls.length === 0) return prev
-        const merged = [...prev, ...newUrls]
-        setSelectedIndex(merged.length - 1)
-        return merged
-      })
-    }
-  }, [currentUrls])
-
-  useEffect(() => {
-    if (displayUrls.length === 0) {
-      setSelectedIndex(0)
-      return
-    }
-    if (selectedIndex >= displayUrls.length) {
-      setSelectedIndex(displayUrls.length - 1)
-    }
-  }, [displayUrls.length, selectedIndex])
 
   const selectedVideo = useMemo(() => {
     if (displayUrls.length === 0) return ''
@@ -85,7 +59,7 @@ function VideoViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
           {accumulatedUrls.length > 1 && (
             <button
               type="button"
-              onClick={() => { setAccumulatedUrls([]); prevKeyRef.current = ''; setSelectedIndex(0) }}
+              onClick={clear}
               className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
             >
               Clear

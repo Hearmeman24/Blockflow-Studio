@@ -338,22 +338,27 @@ export function useGenerationBlock(
 
   // A charge the provider reports after the job finished: look again a few times
   // and re-emit the output with the cost on its metadata, so viewers update.
+  // Stopping (a new run, unmount) also bumps the watch number, so a check
+  // already in flight when it stopped is ignored when it answers.
   const lateCost = useRef<ReturnType<typeof setTimeout>[]>([])
+  const lateCostWatch = useRef(0)
   const stopLateCost = useCallback(() => {
     lateCost.current.forEach(clearTimeout)
     lateCost.current = []
+    lateCostWatch.current += 1
   }, [])
   useEffect(() => stopLateCost, [stopLateCost])
   const watchLateCost = useCallback((job: JobSnapshot) => {
     stopLateCost()
     if (readJobCost(job.cost)) return
+    const watch = lateCostWatch.current
     let found = false
     lateCost.current = LATE_COST_CHECKS_MS.map((delay) => setTimeout(async () => {
-      if (found) return
+      if (found || lateCostWatch.current !== watch) return
       try {
         const res = await fetch(`/api/jobs/${encodeURIComponent(job.job_id)}`)
         const body = (await res.json()) as { job?: JobSnapshot }
-        if (found || !body?.job || !readJobCost(body.job.cost)) return
+        if (found || lateCostWatch.current !== watch || !body?.job || !readJobCost(body.job.cost)) return
         found = true
         stopLateCost()
         setOutput(output, jobOutputValue({ ...job, cost: body.job.cost, price_check: body.job.price_check }, output))

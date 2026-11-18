@@ -38,11 +38,17 @@ interface FxPayload {
   lut_path: string | null
 }
 
-async function callFx(payload: FxPayload) {
+/** What a cancelled run rejects with; the runner shows the block as cancelled. */
+function cancelled(): DOMException {
+  return new DOMException('Cancelled', 'AbortError')
+}
+
+async function callFx(payload: FxPayload, signal?: AbortSignal) {
   const res = await fetch(RUN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   })
   // FastAPI returns JSON on success and on handled errors. Anything else
   // (proxy hang-ups, mid-stream socket closes) lands here as text — surface
@@ -112,13 +118,17 @@ function VideoFxBlock({
   }, [])
 
   const runFx = useCallback(
-    async (videos: string[]): Promise<string[]> => {
+    // `signal` is the run's: after a cancel nothing here writes a status or an
+    // output, so the runner's `cancelled` stays. (The server finishes the
+    // ffmpeg work it started; there is no route to stop it.)
+    async (videos: string[], signal?: AbortSignal): Promise<string[]> => {
       if (videos.length === 0) throw new Error('No input videos')
       setIsRunning(true)
       setExecutionStatus?.('running')
       setStatusMessage(`Processing ${videos.length} video${videos.length === 1 ? '' : 's'}…`)
       try {
-        const res = await callFx(buildPayload(videos))
+        const res = await callFx(buildPayload(videos), signal)
+        if (signal?.aborted) throw cancelled()
         if (!res?.ok) throw new Error(res?.error ?? 'FX failed')
         const out: string[] = Array.isArray(res.videos)
           ? res.videos.filter((v: unknown): v is string => typeof v === 'string')
@@ -129,6 +139,7 @@ function VideoFxBlock({
         setExecutionStatus?.('completed')
         return out
       } catch (err) {
+        if (signal?.aborted) throw cancelled()
         const msg = err instanceof Error ? err.message : String(err)
         setStatusMessage(msg)
         setExecutionStatus?.('error', msg)
@@ -141,13 +152,13 @@ function VideoFxBlock({
   )
 
   useEffect(() => {
-    registerExecute(async (freshInputs) => {
+    registerExecute(async (freshInputs, signal) => {
       const videos = toVideoUrls(freshInputs.video)
       if (videos.length === 0) throw new Error('Video input is required')
       lastInputsRef.current = videos
       setLastInputs(videos)
       processedKeyRef.current = videos.join('\n')
-      await runFx(videos)
+      await runFx(videos, signal)
     })
   })
 

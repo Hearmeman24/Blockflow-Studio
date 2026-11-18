@@ -7,7 +7,7 @@
  * local output folder and the generation service uploads them to the
  * provider when a run needs them.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { History } from 'lucide-react'
 import { AlertPanel } from '@/components/alert-panel'
 import { EmptyState } from '@/components/empty-state'
@@ -140,22 +140,37 @@ function PastGenerations({ onAdd }: { onAdd: (local: string) => void }) {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // Only the latest request may write: paging aborts the one before it, so a
+  // late answer for an earlier page never replaces the page asked for.
+  const request = useRef<AbortController | null>(null)
 
   const load = useCallback((p: number) => {
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    const current = () => request.current === controller && !controller.signal.aborted
     setLoading(true)
     setError('')
-    fetch(`/api/images?limit=${GALLERY_PAGE_SIZE}&offset=${p * GALLERY_PAGE_SIZE}`)
+    fetch(`/api/images?limit=${GALLERY_PAGE_SIZE}&offset=${p * GALLERY_PAGE_SIZE}`, { signal: controller.signal })
       .then((r) => r.json())
       .then((d) => {
+        if (!current()) return
         if (!d.ok) throw new Error(d.error || 'Failed to load images')
         setImages(d.images || [])
         setTotal(d.total || 0)
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
-      .finally(() => setLoading(false))
+      .catch((e) => {
+        if (current()) setError(e instanceof Error ? e.message : String(e))
+      })
+      .finally(() => {
+        if (current()) setLoading(false)
+      })
   }, [])
 
-  useEffect(() => { load(page) }, [page, load])
+  useEffect(() => {
+    load(page)
+    return () => request.current?.abort()
+  }, [page, load])
 
   const totalPages = Math.max(1, Math.ceil(total / GALLERY_PAGE_SIZE))
 

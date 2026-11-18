@@ -11,9 +11,15 @@ import type { VideoRef } from '@/lib/video-ref'
 import { kindPlural, referenceFormat } from './check-references'
 import { limitSource, strictestLimit, type DownstreamLimit } from './downstream-limits'
 import { fileLabel } from './references'
+import { restoreTransferStatus } from './transfer-status'
 import type { MediaLimit } from './types'
 
 export type LoaderKind = 'image' | 'video' | 'audio'
+/**
+ * The save of one item (stored as is in session storage and saved flows): see
+ * `transfer-status.ts`. What the item shows also depends on its reference check
+ * and limit flag; `itemDisplayState` (`loader-item-display.ts`) combines them.
+ */
 export type LoaderItemStatus = 'saving' | 'ready' | 'error'
 
 /** One loaded file. Persisted under the loader's `items` config key, in order. */
@@ -32,6 +38,10 @@ export interface LoaderItem {
   format?: string
   /** The character the file belongs to (Load Character block), shown on the generation block's badge. */
   character?: string
+  /**
+   * `ready` with neither `local` nor `url` can be stored (a hand-edited or
+   * damaged flow); such an item is listed but sends nothing (`itemsToOutput`).
+   */
   status: LoaderItemStatus
   error?: string
 }
@@ -82,17 +92,16 @@ export function restoreLoaderItems(raw: unknown): LoaderItem[] {
     if (!row || typeof row !== 'object') continue
     const r = row as Record<string, unknown>
     if (typeof r.id !== 'string' || !r.id) continue
+    // A missing or unknown status reads as ready.
+    const status = restoreTransferStatus(r.status, 'saving') ?? 'ready'
     const item: LoaderItem = {
       id: r.id,
       label: typeof r.label === 'string' && r.label ? r.label : fileLabel(String(r.local ?? r.url ?? '')) ?? r.id,
-      status: r.status === 'error' ? 'error' : r.status === 'saving' ? 'saving' : 'ready',
+      status: status === 'interrupted' ? 'error' : status,
     }
     for (const key of STRING_FIELDS) if (typeof r[key] === 'string' && r[key]) item[key] = r[key] as string
     for (const key of NUMBER_FIELDS) if (typeof r[key] === 'number' && Number.isFinite(r[key])) item[key] = r[key] as number
-    if (item.status === 'saving') {
-      item.status = 'error'
-      item.error = 'Saving this file was interrupted. Replace it or add it again.'
-    }
+    if (status === 'interrupted') item.error = 'Saving this file was interrupted. Replace it or add it again.'
     out.push(item)
   }
   return out
@@ -364,7 +373,11 @@ export type LoaderRef = ImageRef | VideoRef | SoundRef
 
 const REF_KIND = { image: 'image-ref', video: 'video-ref', audio: 'audio-ref' } as const
 
-/** Refs for the output port: saved items only, in order, with their metadata. */
+/**
+ * Refs for the output port: saved items only, in order, with their metadata.
+ * An item still saving, not saved, or `ready` without a file is left out, on
+ * purpose and silently: the run blockers and `prepareRun` report the first two.
+ */
 export function itemsToOutput(kind: LoaderKind, items: readonly LoaderItem[]): LoaderRef[] {
   const out: LoaderRef[] = []
   for (const item of items) {

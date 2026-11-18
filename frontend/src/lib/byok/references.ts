@@ -2,8 +2,10 @@
  * The reference model used by the generation blocks: upstream references from
  * the block's input ports plus references added in the block, in order.
  */
+import { restoreTransferStatus } from './transfer-status'
 import { MEDIA_KINDS, type GenerationMode, type MediaKind, type ReferenceRole, type RequestReference } from './types'
 
+/** Stored as is (old flows, the legacy session key); the lifecycle is in `transfer-status.ts`. */
 export type ReferenceUploadStatus = 'uploading' | 'ready' | 'error'
 
 export interface GenerationReference {
@@ -198,10 +200,13 @@ export function restoreReferences(raw: unknown): GenerationReference[] {
     }
     for (const key of STRING_FIELDS) if (typeof row[key] === 'string') ref[key] = row[key] as string
     for (const key of NUMBER_FIELDS) if (typeof row[key] === 'number' && Number.isFinite(row[key])) ref[key] = row[key] as number
-    if (row.status === 'ready' || row.status === 'error' || row.status === 'uploading') ref.status = row.status
-    if (ref.status === 'uploading') {
+    // A missing or unknown status stays unset.
+    const status = restoreTransferStatus(row.status, 'uploading')
+    if (status === 'interrupted') {
       ref.status = 'error'
       ref.error = 'The upload was interrupted. Remove this reference and add the file again.'
+    } else if (status) {
+      ref.status = status
     }
     out.push(ref)
   }

@@ -30,11 +30,17 @@ const TRANSITIONS = [
   { value: 'pixelize', label: 'Pixelize' },
 ] as const
 
-async function callStitch(payload: { videos: string[]; transition: string; duration: number }) {
+/** What a cancelled run rejects with; the runner shows the block as cancelled. */
+function cancelled(): DOMException {
+  return new DOMException('Cancelled', 'AbortError')
+}
+
+async function callStitch(payload: { videos: string[]; transition: string; duration: number }, signal?: AbortSignal) {
   const res = await fetch(RUN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    signal,
   })
   return res.json()
 }
@@ -56,7 +62,10 @@ function VideoStitcherBlock({
   const processedKeyRef = useRef<string>('')
 
   const runStitch = useCallback(
-    async (videos: string[]): Promise<string> => {
+    // `signal` is the run's: after a cancel nothing here writes a status or an
+    // output, so the runner's `cancelled` stays. (The server finishes the
+    // ffmpeg work it started; there is no route to stop it.)
+    async (videos: string[], signal?: AbortSignal): Promise<string> => {
       if (videos.length === 0) throw new Error('No input videos')
       setIsStitching(true)
       setExecutionStatus?.('running')
@@ -66,7 +75,8 @@ function VideoStitcherBlock({
           videos,
           transition,
           duration: transition === 'none' ? 0 : duration,
-        })
+        }, signal)
+        if (signal?.aborted) throw cancelled()
         if (!res?.ok) throw new Error(res?.error ?? 'Stitch failed')
         const url = String(res.local_video_url || res.video_url || '').trim()
         if (!url) throw new Error('No output URL returned')
@@ -76,6 +86,7 @@ function VideoStitcherBlock({
         setExecutionStatus?.('completed')
         return url
       } catch (err) {
+        if (signal?.aborted) throw cancelled()
         const msg = err instanceof Error ? err.message : String(err)
         setStatusMessage(msg)
         setExecutionStatus?.('error', msg)
@@ -88,13 +99,13 @@ function VideoStitcherBlock({
   )
 
   useEffect(() => {
-    registerExecute(async (freshInputs) => {
+    registerExecute(async (freshInputs, signal) => {
       const videos = toVideoUrls(freshInputs.video)
       if (videos.length === 0) throw new Error('Video input is required')
       lastInputsRef.current = videos
       setLastInputs(videos)
       processedKeyRef.current = videos.join('\n')
-      await runStitch(videos)
+      await runStitch(videos, signal)
     })
   })
 

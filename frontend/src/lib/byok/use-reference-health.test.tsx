@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { checkReferenceHealth, isBrokenStatus, type HealthTarget } from './reference-health'
-import { useReferenceHealth } from './use-reference-health'
+import { healthCheckReducer, INITIAL_HEALTH_CHECK, useReferenceHealth } from './use-reference-health'
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -98,5 +98,64 @@ describe('useReferenceHealth', () => {
     act(() => result.current.recheck())
     await waitFor(() => expect(result.current.get(a)?.status).toBe('expired'))
     expect(result.current.status).toBe('checked')
+  })
+
+  it('does not stay failed when the references shrink to ones already checked', async () => {
+    const a: HealthTarget = { kind: 'image', local: '/outputs/a.png' }
+    const b: HealthTarget = { kind: 'image', local: '/outputs/b.png' }
+    answer(() => 'ok')
+    const { result, rerender } = renderHook(({ targets }) => useReferenceHealth(targets, 0), { initialProps: { targets: [a] } })
+    await waitFor(() => expect(result.current.status).toBe('checked'))
+
+    fetchMock.mockRejectedValueOnce(new TypeError('network'))
+    rerender({ targets: [a, b] })
+    await waitFor(() => expect(result.current.status).toBe('failed'))
+    expect(result.current.get(a)?.status).toBe('ok')
+    expect(result.current.get(b)).toBeUndefined()
+
+    rerender({ targets: [a] })
+    await waitFor(() => expect(result.current.status).toBe('checked'))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failure while a later check is pending does not end that check', async () => {
+    const a: HealthTarget = { kind: 'image', local: '/outputs/a.png' }
+    let rejectFirst!: (e: Error) => void
+    fetchMock.mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject }))
+    const { result, rerender } = renderHook(({ targets }) => useReferenceHealth(targets, 0), { initialProps: { targets: [a] } })
+    await waitFor(() => expect(result.current.status).toBe('checking'))
+    // The set changes: the first request is aborted and a second one starts.
+    answer(() => 'ok')
+    const b: HealthTarget = { kind: 'image', local: '/outputs/b.png' }
+    rerender({ targets: [a, b] })
+    act(() => rejectFirst(new TypeError('aborted')))
+    await waitFor(() => expect(result.current.get(b)?.status).toBe('ok'))
+    expect(result.current.status).toBe('checked')
+  })
+})
+
+describe('healthCheckReducer', () => {
+  const ok = { status: 'ok' as const, detail: '' }
+  it('moves idle -> checking -> checked, merging results', () => {
+    let s = healthCheckReducer(INITIAL_HEALTH_CHECK, { type: 'started' })
+    expect(s.phase).toBe('checking')
+    s = healthCheckReducer(s, { type: 'answered', results: [['a', ok]] })
+    expect(s.phase).toBe('checked')
+    expect(s.results.get('a')).toEqual(ok)
+    s = healthCheckReducer(s, { type: 'answered', results: [['b', ok]] })
+    expect([...s.results.keys()]).toEqual(['a', 'b'])
+  })
+
+  it('a failed check keeps the earlier results, and settles to checked once nothing is pending', () => {
+    let s = healthCheckReducer(INITIAL_HEALTH_CHECK, { type: 'answered', results: [['a', ok]] })
+    s = healthCheckReducer(healthCheckReducer(s, { type: 'started' }), { type: 'failed' })
+    expect(s.phase).toBe('failed')
+    expect(s.results.get('a')).toEqual(ok)
+    expect(healthCheckReducer(s, { type: 'settled' }).phase).toBe('checked')
+  })
+
+  it('reset forgets every result', () => {
+    const s = healthCheckReducer(healthCheckReducer(INITIAL_HEALTH_CHECK, { type: 'answered', results: [['a', ok]] }), { type: 'reset' })
+    expect(s.results.size).toBe(0)
   })
 })

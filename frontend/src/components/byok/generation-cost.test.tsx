@@ -293,4 +293,35 @@ describe('actual cost is not shown in the generation block', () => {
       meta: expect.objectContaining({ cost: { amount: 12, unit: 'credits', usd_equivalent: null }, price_check: LATE_CHECK }),
     })), { timeout: 3000 })
   })
+
+  it('drops a late-cost answer that arrives after a new run started', async () => {
+    const done = jobSnapshot({ job_id: 'job-11', provider: 'kie', model: 'seedance-2', status: 'COMPLETED', outputs: [{ kind: 'video', url: 'https://cdn/o.mp4' }], cost: null })
+    const harness = stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [done] })
+    seed('j3', { provider: 'kie', model: 'seedance-2', prompt: 'a' })
+    const props = blockProps('j3')
+    renderGenerationBlock(getBlockDef('textToVideo')!.component, props)
+    await screen.findAllByRole('combobox', { name: 'Model' })
+    await act(async () => { await latestExecute(props)({}, new AbortController().signal) })
+    // The first late-cost check is held in flight.
+    const original = harness.fetchMock.getMockImplementation()!
+    let release: (() => void) | undefined
+    harness.fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === '/api/jobs/job-11' && !release) {
+        await new Promise<void>((resolve) => { release = resolve })
+        return new Response(JSON.stringify({ ok: true, job: { ...done, cost: { amount: 12, unit: 'credits', usd_equivalent: null } } }))
+      }
+      return original(input, init)
+    })
+    await waitFor(() => expect(release).toBeDefined(), { timeout: 3000 })
+    props.setOutput.mockClear()
+    let second!: Promise<unknown>
+    act(() => { second = latestExecute(props)({}, new AbortController().signal) })
+    await act(async () => {
+      release!()
+      await second
+    })
+    expect(props.setOutput).not.toHaveBeenCalledWith('video', expect.objectContaining({
+      meta: expect.objectContaining({ cost: { amount: 12, unit: 'credits', usd_equivalent: null } }),
+    }))
+  })
 })

@@ -223,43 +223,53 @@ export function LoaderFooter({ list }: { list: Pick<LoaderSectionState, 'kind' |
  * file cannot be replaced here (`onRemove`, the Load Character block).
  */
 export function TileStatus({ row, onReplace, onRemove }: { row: LoaderRow; onReplace?: () => void; onRemove?: () => void }) {
-  const { item, flag, broken, health } = row
-  let icon: ReactNode = null
-  let text: string | null = null
+  const { item, display } = row
+  let icon: ReactNode
+  let text: string
   let detail: string | null = null
-  if (item.status === 'saving') {
-    icon = <Loader2 aria-hidden className="size-3 animate-spin motion-reduce:animate-none" />
-    text = 'Saving'
-  } else if (item.status === 'error') {
-    icon = <XCircle aria-hidden className="text-destructive size-3" />
-    text = 'Not saved'
-    detail = item.error ?? null
-  } else if (broken && health) {
-    icon = <XCircle aria-hidden className="text-destructive size-3" />
-    text = HEALTH_LABEL[health.status]
-    detail = health.detail
-  } else if (flag.status !== 'ok') {
-    icon = flag.status === 'unsupported'
-      ? <CircleSlash aria-hidden className="text-warning size-3" />
-      : <AlertTriangle aria-hidden className="text-warning size-3" />
-    text = FLAG_SHORT[flag.status]
-    detail = flag.reason
-  } else if (health?.status === 'unchecked') {
-    icon = <Info aria-hidden className="size-3" />
-    text = 'Not verified'
-    detail = health.detail
+  switch (display.kind) {
+    case 'saving':
+      icon = <Loader2 aria-hidden className="size-3 animate-spin motion-reduce:animate-none" />
+      text = 'Saving'
+      break
+    case 'not_saved':
+      icon = <XCircle aria-hidden className="text-destructive size-3" />
+      text = 'Not saved'
+      detail = display.detail
+      break
+    case 'broken':
+      icon = <XCircle aria-hidden className="text-destructive size-3" />
+      text = HEALTH_LABEL[display.health.status]
+      detail = display.health.detail
+      break
+    case 'flagged': {
+      const { status } = display.flag
+      icon = status === 'unsupported'
+        ? <CircleSlash aria-hidden className="text-warning size-3" />
+        : <AlertTriangle aria-hidden className="text-warning size-3" />
+      text = FLAG_SHORT[status]
+      detail = display.flag.reason
+      break
+    }
+    case 'unverified':
+      icon = <Info aria-hidden className="size-3" />
+      text = 'Not verified'
+      detail = display.detail
+      break
+    case 'ok':
+      return null
   }
-  if (!text) return null
+  const removable = display.kind === 'broken' || display.kind === 'not_saved'
   return (
     <div data-testid="item-status" className="bg-background/90 flex min-w-0 items-center gap-1 px-1.5 py-1 text-3xs" title={detail ?? undefined}>
       {icon}
       <span className="min-w-0 flex-1 truncate font-medium">{text}</span>
-      {(broken || item.status === 'error') && onRemove && (
+      {removable && onRemove && (
         <Button type="button" variant="outline" size="xs" className="h-5 px-1.5" aria-label={`Remove ${item.label}`} onClick={onRemove}>
           <X aria-hidden />Remove
         </Button>
       )}
-      {(broken || item.status === 'error') && !onRemove && onReplace && (
+      {removable && !onRemove && onReplace && (
         <Button type="button" variant="outline" size="xs" className="h-5 px-1.5" aria-label={`Replace ${item.label}`} onClick={onReplace}>
           <Replace aria-hidden />Replace
         </Button>

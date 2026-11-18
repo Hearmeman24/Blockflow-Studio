@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { SWRConfig, useSWRConfig } from 'swr'
 import type { ReactNode } from 'react'
 import { CATALOG_BOTH, CATALOG_KIE } from './__fixtures__'
-import { useProviderBalances } from './use-provider-balances'
+import { SeenJobIds, useProviderBalances } from './use-provider-balances'
 import type { ProviderBalance } from './cost'
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -184,4 +184,42 @@ describe('useProviderBalances', () => {
     unmount()
     expect(FakeEventSource.instances[0].closed).toBe(true)
   })
+})
+
+describe('SeenJobIds', () => {
+  it('says a job id is new once, and forgets it when asked', () => {
+    const seen = new SeenJobIds(10)
+    expect(seen.add('a')).toBe(true)
+    expect(seen.add('a')).toBe(false)
+    seen.forget('a')
+    expect(seen.size).toBe(0)
+    expect(seen.add('a')).toBe(true)
+  })
+
+  it('never holds more than its cap, dropping the oldest first', () => {
+    const seen = new SeenJobIds(3)
+    for (const id of ['a', 'b', 'c', 'd', 'e']) seen.add(id)
+    expect(seen.size).toBe(3)
+    expect(seen.add('e')).toBe(false)
+    expect(seen.add('c')).toBe(false)
+    expect(seen.add('a')).toBe(true)
+  })
+})
+
+it('forgets a submitted job once it finishes, so the memory does not grow', async () => {
+  const r = routes([100, 95, 90, 85])
+  vi.stubGlobal('fetch', r.fn)
+  const { result } = renderHook(() => useProviderBalances({ debounceMs: 5, settleMs: 5 }), { wrapper })
+  await waitFor(() => expect(result.current.balances?.[0].amount).toBe(100))
+  const es = FakeEventSource.instances[0]
+  const add = vi.spyOn(SeenJobIds.prototype, 'add')
+  const forget = vi.spyOn(SeenJobIds.prototype, 'forget')
+  act(() => {
+    es.emit({ type: 'job', job: { job_id: 'n', status: 'QUEUED' } })
+    es.emit({ type: 'job', job: { job_id: 'n', status: 'COMPLETED' } })
+  })
+  expect(add).toHaveBeenCalledWith('n')
+  expect(forget).toHaveBeenCalledWith('n')
+  add.mockRestore()
+  forget.mockRestore()
 })
