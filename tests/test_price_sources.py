@@ -282,3 +282,125 @@ def test_status_reports_layers_and_last_result(env):
     assert st["ledger"]["generated_at"] == "2099-01-01T00:00:00Z"
     assert st["bundled"]["generated_at"] != st["ledger"]["generated_at"]
     assert st["last_refresh"]["status"] == "updated"
+
+
+# ------------------------------------------------------------------ refresh state machine
+
+
+def test_a_failed_refresh_is_retried_after_the_short_interval(env):
+    transport, now, monkeypatch, _ = env
+    configure(monkeypatch)
+    transport.responses = [ProviderError("network", "down"), ok(ledger_body(amount=50))]
+    assert price_sources.refresh()["status"] == "error"
+    assert price_sources.RETRY_AFTER_FAILURE_S < price_sources.REFRESH_INTERVAL_S
+    assert price_sources.RETRY_AFTER_FAILURE_S <= 30 * 60
+    now[0] += price_sources.RETRY_AFTER_FAILURE_S - 1
+    assert price_sources.refresh()["status"] == "skipped"
+    now[0] += 1
+    assert price_sources.refresh()["status"] == "updated"
+    assert len(transport.calls) == 2
+    # after a success the long interval applies again
+    now[0] += price_sources.RETRY_AFTER_FAILURE_S
+    assert price_sources.refresh()["status"] == "skipped"
+
+
+@pytest.mark.parametrize("response", [HttpResponse(500, b"oops", {}), HttpResponse(200, b"{nope", {}),
+                                      HttpResponse(200, b"x" * (price_sources.MAX_BYTES + 1), {})])
+def test_every_failed_download_uses_the_short_interval(env, response):
+    transport, now, monkeypatch, _ = env
+    configure(monkeypatch)
+    transport.responses = [response, HttpResponse(304, b"", {})]
+    assert price_sources.refresh()["ok"] is False
+    now[0] += price_sources.RETRY_AFTER_FAILURE_S
+    assert price_sources.refresh()["status"] == "not_modified"
+
+
+@pytest.mark.parametrize("response", [HttpResponse(404, b"", {}), HttpResponse(304, b"", {})])
+def test_an_answer_that_is_not_a_failure_keeps_the_long_interval(env, response):
+    transport, now, monkeypatch, _ = env
+    configure(monkeypatch)
+    transport.responses = [response]
+    price_sources.refresh()
+    now[0] += price_sources.RETRY_AFTER_FAILURE_S
+    assert price_sources.refresh()["status"] == "skipped"
+    assert len(transport.calls) == 1
+
+
+def test_the_background_refresh_follows_the_same_rule(env):
+    transport, now, monkeypatch, _ = env
+    configure(monkeypatch)
+    monkeypatch.setattr(price_sources, "AUTO_REFRESH", True)
+    transport.responses = [HttpResponse(500, b"", {}), HttpResponse(304, b"", {})]
+    price_sources.active_ledger()
+    price_sources.join_background(5)
+    assert len(transport.calls) == 1
+    price_sources.active_ledger()
+    price_sources.join_background(5)
+    assert len(transport.calls) == 1  # not due yet
+    now[0] += price_sources.RETRY_AFTER_FAILURE_S
+    price_sources.active_ledger()
+    price_sources.join_background(5)
+    assert len(transport.calls) == 2
+
+
+def test_forced_and_background_refreshes_never_overlap(env):
+    import threading
+
+    transport, _, monkeypatch, _ = env
+    configure(monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    active, peak = [0], [0]
+    lock = threading.Lock()
+
+    def slow(method, url, headers, body, timeout):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        entered.set()
+        release.wait(5)
+        with lock:
+            active[0] -= 1
+        return HttpResponse(304, b"", {})
+
+    monkeypatch.setattr(price_sources, "transport", slow)
+    first = threading.Thread(target=price_sources.refresh, kwargs={"force": True})
+    first.start()
+    assert entered.wait(5)
+    second = threading.Thread(target=price_sources.refresh, kwargs={"force": True})
+    second.start()
+    second.join(0.3)
+    assert second.is_alive()  # waiting for the first refresh, not fetching beside it
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert peak[0] == 1
+
+
+def test_a_mismatched_cache_pair_is_ignored(env):
+    """A crash between replacing prices.json and meta.json leaves a pair that
+    does not belong together; the reader ignores it instead of trusting it."""
+    transport, _, monkeypatch, tmp = env
+    configure(monkeypatch)
+    transport.responses = [ok(ledger_body(amount=50))]
+    price_sources.refresh(force=True)
+    cache = tmp / "price_ledger"
+    (cache / "prices.json").write_text(json.dumps(ledger_body(generated_at="2099-06-01T00:00:00Z", amount=77)))
+    price_sources.reset_state()
+    assert price_sources.active_ledger()[1] == "bundled"
+
+
+def test_both_cache_files_are_written_before_either_replaces(env):
+    transport, _, monkeypatch, tmp = env
+    configure(monkeypatch)
+    transport.responses = [ok(ledger_body(amount=50))]
+    seen: list[set[str]] = []
+    real_replace = price_sources.os.replace
+
+    def replace(src, dst):
+        seen.append({p.name for p in Path(tmp / "price_ledger").iterdir()})
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(price_sources.os, "replace", replace)
+    assert price_sources.refresh(force=True)["status"] == "updated"
+    assert len(seen) == 2
+    assert {".prices.json.tmp", ".meta.json.tmp"} <= seen[0]

@@ -7,17 +7,19 @@ read provider error bodies. Only connection failures and timeouts raise.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import socket
 import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, TypeVar
 
-from backend.byok.errors import ProviderError, redact
+from backend.byok.errors import ProviderError, kinds_where, redact
 
 # PiAPI sits behind Cloudflare, which blocks the default python-urllib agent.
 USER_AGENT = (
@@ -25,8 +27,28 @@ USER_AGENT = (
     "Chrome/130.0 Safari/537.36"
 )
 
-# Automatic retry happens only for these kinds, and only on idempotent calls.
-RETRY_KINDS = frozenset({"rate_limited", "network", "provider_failure"})
+# Automatic retry happens only for these kinds, and only on idempotent calls
+# (declared in ``errors.RETRY_POLICY``).
+RETRY_KINDS = kinds_where("http_retry")
+
+# While a stop check is set (``stop_retrying_when``), a backoff sleep is taken
+# in slices of at most this long and ends early once the check is true.
+RETRY_CANCEL_CHECK_S = 0.5
+_stop_check: contextvars.ContextVar[Callable[[], bool] | None] = contextvars.ContextVar(
+    "byok_retry_stop_check", default=None)
+
+
+@contextlib.contextmanager
+def stop_retrying_when(check: Callable[[], bool]) -> Iterator[None]:
+    """Within the block, ``with_retry`` gives up (re-raising the last error)
+    as soon as ``check()`` is true, also in the middle of a backoff sleep.
+    The generation service passes "the job was cancelled" around each poll.
+    Context-local, so each worker thread has its own."""
+    token = _stop_check.set(check)
+    try:
+        yield
+    finally:
+        _stop_check.reset(token)
 
 
 @dataclass(frozen=True)
@@ -81,6 +103,27 @@ NO_RETRY = RetryPolicy(max_attempts=1, base_delay_s=0)
 T = TypeVar("T")
 
 
+def _backoff(policy: RetryPolicy, seconds: float, stop: Callable[[], bool] | None) -> bool:
+    """Sleep ``seconds`` with ``policy.sleep``. With a stop check: in slices,
+    returning False as soon as the check is true (before sleeping, too)."""
+    if stop is None:
+        policy.sleep(seconds)
+        return True
+    if stop():
+        return False
+    if seconds <= 0:
+        policy.sleep(seconds)
+        return not stop()
+    remaining = seconds
+    while remaining > 0:
+        step = min(remaining, RETRY_CANCEL_CHECK_S)
+        policy.sleep(step)
+        remaining -= step
+        if stop():
+            return False
+    return True
+
+
 def with_retry(fn: Callable[[], T], policy: RetryPolicy) -> T:
     attempt = 1
     while True:
@@ -89,7 +132,8 @@ def with_retry(fn: Callable[[], T], policy: RetryPolicy) -> T:
         except ProviderError as err:
             if attempt >= policy.max_attempts or not err.retryable or err.kind not in RETRY_KINDS:
                 raise
-            policy.sleep(policy.delay(attempt))
+            if not _backoff(policy, policy.delay(attempt), _stop_check.get()):
+                raise
             attempt += 1
 
 

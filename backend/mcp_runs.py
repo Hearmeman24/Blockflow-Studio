@@ -5,9 +5,13 @@ The Artifacts page lists runs, which the frontend pipeline runner saves for
 its own runs. MCP jobs never pass through the frontend, so the backend saves
 their run here when the job ends:
 
-- COMPLETED -> a ``completed`` run holding the outputs.
+- COMPLETED -> a ``completed`` run holding the outputs (a ``failed`` one when
+  the job holds no output of the mode's kind).
 - FAILED / TIMED_OUT -> a ``failed`` run (the pipeline records failed runs too).
 - CANCELLED -> no run (a cancelled pipeline run records no failure either).
+
+``RUN_FOR_JOB_STATUS`` declares this for every job status; a new job status
+fails at import until it is given a row.
 
 Each run has the id ``run-mcp-<job_id>`` (the prefix the Artifacts MCP filter
 matches), the same ``block_results`` shape the pipeline produces, and a
@@ -18,7 +22,12 @@ prompt and settings, and the matching viewer.
 Exactly once per job, also across restarts: a row in ``mcp_job_runs`` is
 written in the same transaction as the run. A run the user later deletes is
 not brought back. ``sweep()`` at startup saves runs for MCP jobs that ended
-while no hook was listening.
+while no hook was listening; it pages through every finished MCP job.
+
+Startup order (``backend/main.py``) is load-bearing: ``install()`` first, so
+a job that the next steps settle is seen by the hook; then ``sweep()``; then
+the generation service's ``resume_pending()``, whose resumed jobs may end at
+once. ``tests/test_mcp_runs.py`` checks that order.
 
 Public API: ``build_flow_snapshot(job)``, ``build_run(job)``,
 ``save_run_for_job(job)``, ``on_job_event(event)``, ``install(store)``,
@@ -44,14 +53,29 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "mcp"
 RUN_PREFIX = db._MCP_RUN_PREFIX
-# Job statuses that get a run (CANCELLED gets none). blockflow_mcp/tools_jobs.py
-# keeps a copy (RUN_RECORDED); tests/test_mcp_status_contract.py keeps them equal.
-RUN_RECORDED_STATUSES: tuple[JobStatus, ...] = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMED_OUT)
+# The run a job gets when it reaches each status; None means no run (still
+# active, or cancelled). COMPLETED is downgraded to FAILED in build_run when
+# the job holds no output of its mode's kind.
+RUN_FOR_JOB_STATUS: Mapping[JobStatus, RunStatus | None] = {
+    JobStatus.QUEUED: None,
+    JobStatus.RUNNING: None,
+    JobStatus.COMPLETED: RunStatus.COMPLETED,
+    JobStatus.FAILED: RunStatus.FAILED,
+    JobStatus.CANCELLED: None,
+    JobStatus.TIMED_OUT: RunStatus.FAILED,
+}
+if set(RUN_FOR_JOB_STATUS) != set(JobStatus):  # a new job status must decide its run
+    raise RuntimeError("RUN_FOR_JOB_STATUS must have exactly one entry per JobStatus")
+# Job statuses that get a run. blockflow_mcp/tools_jobs.py keeps a copy
+# (RUN_RECORDED); tests/test_mcp_status_contract.py keeps them equal.
+RUN_RECORDED_STATUSES: tuple[JobStatus, ...] = tuple(s for s in JobStatus if RUN_FOR_JOB_STATUS[s] is not None)
 MARKER_TABLE = "mcp_job_runs"
 # frontend/src/lib/pipeline/flow-migrations.ts CURRENT_FLOW_SCHEMA_VERSION; the
 # Vitest snapshot test fails if the two drift apart.
 FLOW_SCHEMA_VERSION = 6
-SWEEP_LIMIT = job_store.MAX_LIST_LIMIT
+# sweep() reads finished MCP jobs this many at a time, through all of them.
+SWEEP_PAGE_SIZE = job_store.MAX_LIST_LIMIT
+SWEEP_LIMIT = SWEEP_PAGE_SIZE  # former name, kept for importers
 
 IMAGE_LOADER = ("uploadImageToTmpfiles", "Image Loader")
 OMNI_LOADER = ("omniReferenceLoader", "Omni Reference Loader")
@@ -270,12 +294,16 @@ def build_run(job: Any) -> dict[str, Any] | None:
     job gets no run: not MCP, not finished, cancelled, or an unknown mode."""
     if not isinstance(job, Mapping) or job.get("source") != SOURCE or not job.get("job_id"):
         return None
-    status = job.get("status")
-    if status not in RUN_RECORDED_STATUSES or job.get("mode") not in GENERATION_BLOCKS:
+    try:
+        status = JobStatus(job.get("status"))
+    except ValueError:
+        return None
+    planned = RUN_FOR_JOB_STATUS[status]
+    if planned is None or job.get("mode") not in GENERATION_BLOCKS:
         return None
     snapshot = build_flow_snapshot(job)
     gen_type, gen_label, output_kind, loader = GENERATION_BLOCKS[job["mode"]]
-    refs = _output_refs(job, output_kind) if status == JobStatus.COMPLETED else []
+    refs = _output_refs(job, output_kind) if planned == RunStatus.COMPLETED else []
     ok = bool(refs)
 
     results: list[dict[str, Any]] = []
@@ -288,7 +316,11 @@ def build_run(job: Any) -> dict[str, Any] | None:
                            "outputs": {output_kind: {"kind": output_kind, "value": value}} if ok else {}}
     if not ok:
         error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
-        gen["error"] = str(error.get("message") or job.get("message") or "The job finished without an output.")
+        if planned == RunStatus.COMPLETED:
+            # The job's message ("Done") would contradict the failed run.
+            gen["error"] = f"The job finished but returned no {output_kind} output."
+        else:
+            gen["error"] = str(error.get("message") or job.get("message") or "The job finished without an output.")
     results.append(gen)
     viewer_type, viewer_label = VIEWERS[output_kind]
     results.append({"block_index": len(results), "block_type": viewer_type, "block_label": viewer_label,
@@ -369,11 +401,25 @@ def install(store: job_store.JobStore | None = None) -> Callable[[], None]:
     return (store or job_store.get_store()).subscribe_callback(on_job_event)
 
 
+def _marked_job_ids() -> set[str]:
+    init_db()
+    conn = db._get_conn()
+    try:
+        return {row[0] for row in conn.execute(f"SELECT job_id FROM {MARKER_TABLE}").fetchall()}
+    finally:
+        conn.close()
+
+
 def sweep(store: job_store.JobStore | None = None) -> list[str]:
-    """Save runs for finished MCP jobs that have none yet. Returns their job ids."""
+    """Save runs for finished MCP jobs that have none yet. Returns their job
+    ids. Pages through every such job (``SWEEP_PAGE_SIZE`` at a time); jobs
+    whose run was already saved are skipped without a write."""
     store = store or job_store.get_store()
     saved: list[str] = []
-    for job in store.list_jobs(source=SOURCE, limit=SWEEP_LIMIT):
+    done = _marked_job_ids()
+    for job in store.iter_jobs(source=SOURCE, statuses=RUN_RECORDED_STATUSES, page_size=SWEEP_PAGE_SIZE):
+        if job.get("job_id") in done:
+            continue
         try:
             if save_run_for_job(job):
                 saved.append(job["job_id"])

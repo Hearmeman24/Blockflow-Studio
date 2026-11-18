@@ -838,3 +838,58 @@ def test_annotate_records_a_cost_on_a_terminal_job_only_when_it_has_none(store):
     assert again["cost"] == cost
     with pytest.raises(ValueError):
         store.annotate(job["job_id"], cost={"amount": -1, "unit": "credits"})
+
+
+# ---------------------------------------------------------------- cancel: one source
+
+
+@pytest.mark.parametrize("status,expected", [("QUEUED", False), ("RUNNING", False), ("COMPLETED", False),
+                                             ("FAILED", False), ("TIMED_OUT", False), ("CANCELLED", True)])
+def test_is_cancel_requested_follows_the_status(store, status, expected):
+    job = _create(store)
+    store.update_job(job["job_id"], status=status)
+    assert store.is_cancel_requested(job["job_id"]) is expected
+
+
+def test_request_cancel_still_stores_the_flag(store):
+    job = _create(store)
+    snap = store.request_cancel(job["job_id"])
+    assert snap["cancel_requested"] is True and snap["status"] == "CANCELLED"
+    assert store.is_cancel_requested(job["job_id"]) is True
+    assert store.is_cancel_requested("no-such-job") is False
+
+
+# ---------------------------------------------------------------- paging past one list
+
+
+def test_iter_jobs_pages_through_every_matching_job_newest_first(store):
+    created = [_create(store, source="mcp" if n % 2 else "pipeline") for n in range(7)]
+    for job in created[:3]:
+        store.update_job(job["job_id"], status="COMPLETED")
+    every = [j["job_id"] for j in store.iter_jobs(page_size=2)]
+    assert every == [j["job_id"] for j in reversed(created)]
+    mcp = [j["job_id"] for j in store.iter_jobs(source="mcp", page_size=1)]
+    assert mcp == [j["job_id"] for j in reversed(created) if j["source"] == "mcp"]
+    done = [j["job_id"] for j in store.iter_jobs(statuses=["COMPLETED"], page_size=2)]
+    assert done == [j["job_id"] for j in reversed(created[:3])]
+    with pytest.raises(ValueError):
+        list(store.iter_jobs(statuses=["BOGUS"]))
+    with pytest.raises(ValueError):
+        list(store.iter_jobs(page_size=0))
+
+
+def test_iter_jobs_keeps_order_for_jobs_created_in_the_same_instant(store, monkeypatch):
+    monkeypatch.setattr(job_store.time, "time", lambda: 1000.0)
+    created = [_create(store) for _ in range(5)]
+    assert [j["job_id"] for j in store.iter_jobs(page_size=2)] == [j["job_id"] for j in reversed(created)]
+
+
+def test_find_active_by_client_request_id_is_not_bounded_by_the_list_limit(store, monkeypatch):
+    monkeypatch.setattr(job_store, "MAX_LIST_LIMIT", 2)
+    target = _create(store, request={"client_request_id": "cid-1"})
+    for n in range(4):
+        _create(store, request={"client_request_id": f"cid-other-{n}"})
+    assert store.find_active_by_client_request_id("cid-1")["job_id"] == target["job_id"]
+    store.update_job(target["job_id"], status="FAILED")
+    assert store.find_active_by_client_request_id("cid-1") is None
+    assert store.find_active_by_client_request_id("never") is None

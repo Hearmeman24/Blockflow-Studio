@@ -9,8 +9,15 @@ user turns ``price_ledger_updates`` off in Settings.
   cap; the body must pass ``price_ledger.validate_ledger``.
 - The last good copy is cached in the user data dir (``price_ledger/``) and
   used only for the URL it came from.
-- At most one automatic refresh every 12 hours (``refresh(force=True)`` for
-  on demand). A remote ledger older than the bundled one is ignored.
+- At most one automatic refresh every 12 hours after an attempt that got an
+  answer, and a retry after ``RETRY_AFTER_FAILURE_S`` (minutes) after one that
+  failed to download or validate (``refresh(force=True)`` for on demand). One
+  refresh runs at a time: a forced refresh waits for a background one. A
+  remote ledger older than the bundled one is ignored.
+- ``prices.json`` and ``meta.json`` are a pair: both are written to temporary
+  files before either replaces the old one, and a pair whose ``meta.json``
+  does not name the ledger in ``prices.json`` (a crash between the two
+  replaces) is ignored.
 - Every failure falls back to the cached copy, then the bundled one, and is
   reported through ``status()``; nothing here raises into a request.
 
@@ -30,6 +37,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -48,6 +56,7 @@ URL_ENV, REPO_ENV = "PRICE_LEDGER_URL", "PRICE_LEDGER_REPO"
 URL_PREF, REPO_PREF, UPDATES_PREF = "price_ledger_url", "price_ledger_repo", "price_ledger_updates"
 
 REFRESH_INTERVAL_S = 12 * 3600
+RETRY_AFTER_FAILURE_S = 15 * 60  # after a failed download or an invalid file
 TIMEOUT_S = 10.0
 MAX_BYTES = 2_000_000
 USER_AGENT = "BlockFlow price ledger"
@@ -67,12 +76,50 @@ transport: Transport = UrllibTransport()
 clock: Callable[[], float] = time.time
 
 _lock = threading.Lock()
-_state: dict[str, Any] = {}
+_state: dict[str, Any] = {}  # validated-file memo: ("file", path) -> (mtime, ledger)
+
+# Results after which the next automatic refresh comes sooner: the download or
+# the file failed. Every other result (updated, not_modified, not_available,
+# older_than_bundled) waits the full interval.
+_FAILED_ATTEMPT = frozenset({PriceRefreshStatus.ERROR, PriceRefreshStatus.INVALID, PriceRefreshStatus.TOO_LARGE})
+
+
+@dataclass
+class RefreshState:
+    """Everything the refresh remembers in this process, in one place.
+    ``last_attempt``/``last_failed`` decide when the next automatic refresh is
+    due; ``last_result`` is what ``status()`` reports; ``thread`` is the
+    running background refresh. Guarded by ``_lock``."""
+
+    last_attempt: float | None = None
+    last_failed: bool = False
+    last_result: dict[str, Any] | None = None
+    thread: threading.Thread | None = None
+
+    def due(self, now: float) -> bool:
+        if self.last_attempt is None:
+            return True
+        wait = RETRY_AFTER_FAILURE_S if self.last_failed else REFRESH_INTERVAL_S
+        return now - self.last_attempt >= wait
+
+
+_refresh = RefreshState()
+_refresh_lock = threading.Lock()  # one fetch at a time (forced or background)
 
 
 def reset_state() -> None:
+    global _refresh
     with _lock:
         _state.clear()
+        _refresh = RefreshState()
+
+
+def join_background(timeout: float | None = None) -> None:
+    """Wait for a running background refresh (tests, shutdown)."""
+    with _lock:
+        thread = _refresh.thread
+    if thread is not None:
+        thread.join(timeout)
 
 
 def _cache_dir() -> Path:
@@ -180,9 +227,13 @@ def _meta() -> dict[str, Any]:
 
 
 def _cached(url: str) -> price_ledger.Ledger | None:
-    if not url or _meta().get("url") != url:
+    meta = _meta()
+    if not url or meta.get("url") != url:
         return None
-    return _memo_load(_cache_dir() / "prices.json")
+    ledger = _memo_load(_cache_dir() / "prices.json")
+    if ledger is None or meta.get("generated_at") != ledger.generated_at:
+        return None  # not the pair meta.json describes (e.g. a crash between the two replaces)
+    return ledger
 
 
 def active_ledger() -> tuple[price_ledger.Ledger, str]:
@@ -205,17 +256,30 @@ def active_ledger() -> tuple[price_ledger.Ledger, str]:
 def _record(result: dict[str, Any]) -> dict[str, Any]:
     result = {**result, "at": clock()}
     with _lock:
-        _state["last_result"] = result
+        _refresh.last_result = result
+    return result
+
+
+def _attempted(result: dict[str, Any]) -> dict[str, Any]:
+    """Record the result of a fetch attempt and when the next one is due."""
+    with _lock:
+        _refresh.last_failed = result["status"] in _FAILED_ATTEMPT
     return result
 
 
 def _write_cache(body: bytes, meta: dict[str, Any]) -> None:
+    """Write the pair: both temporary files first, then the two replaces
+    (prices first; the reader ignores a prices.json that meta.json does not
+    describe, so a crash between the replaces is harmless)."""
     directory = _cache_dir()
     directory.mkdir(parents=True, exist_ok=True)
+    staged = []
     for name, data in (("prices.json", body), ("meta.json", json.dumps(meta).encode())):
         tmp = directory / f".{name}.tmp"
         tmp.write_bytes(data)
-        os.replace(tmp, directory / name)
+        staged.append((tmp, directory / name))
+    for tmp, final in staged:
+        os.replace(tmp, final)
 
 
 def refresh(force: bool = False) -> dict[str, Any]:
@@ -229,12 +293,17 @@ def refresh(force: bool = False) -> dict[str, Any]:
                         "message": "No price ledger URL is configured."})
     if not updates_enabled():
         return _record({"ok": False, "status": PriceRefreshStatus.DISABLED, "message": "Price list updates are turned off."})
-    with _lock:
-        last = _state.get("last_attempt", 0.0)
-        if not force and clock() - last < REFRESH_INTERVAL_S:
-            return {"ok": True, "status": PriceRefreshStatus.SKIPPED, "message": "Refreshed recently.",
-                    "at": _state.get("last_result", {}).get("at")}
-        _state["last_attempt"] = clock()
+    with _refresh_lock:
+        with _lock:
+            if not force and not _refresh.due(clock()):
+                return {"ok": True, "status": PriceRefreshStatus.SKIPPED, "message": "Refreshed recently.",
+                        "at": (_refresh.last_result or {}).get("at")}
+            _refresh.last_attempt = clock()
+        return _attempted(_fetch(url))
+
+
+def _fetch(url: str) -> dict[str, Any]:
+    """One conditional GET of ``url``, validated and cached. Never raises."""
     headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
     meta = _meta() if _cached(url) is not None else {}
     if meta.get("etag"):
@@ -274,12 +343,11 @@ def refresh(force: bool = False) -> dict[str, Any]:
 
 def _refresh_in_background() -> None:
     with _lock:
-        due = clock() - _state.get("last_attempt", 0.0) >= REFRESH_INTERVAL_S
-        running = _state.get("thread")
-        if not due or (running is not None and running.is_alive()):
+        running = _refresh.thread
+        if not _refresh.due(clock()) or (running is not None and running.is_alive()):
             return
         thread = threading.Thread(target=refresh, name="price-ledger-refresh", daemon=True)
-        _state["thread"] = thread
+        _refresh.thread = thread
     thread.start()
 
 
@@ -288,7 +356,7 @@ def status() -> dict[str, Any]:
     active, layer = active_ledger()
     url = configured_url()
     with _lock:
-        last = _state.get("last_result")
+        last = _refresh.last_result
 
     def describe(ledger: price_ledger.Ledger) -> dict[str, Any]:
         return {"schema_version": ledger.schema_version, "generated_at": ledger.generated_at,

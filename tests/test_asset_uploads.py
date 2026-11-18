@@ -128,6 +128,44 @@ def test_saved_r2_signed_mode_degrades_to_local_only(monkeypatch):
     assert "r2_signed" not in asset_uploads.ASSET_STORAGE_MODES
 
 
+def _unreadable_settings(monkeypatch):
+    import sqlite3
+
+    def broken(name):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(settings_store, "get_app_pref", broken)
+
+
+def test_unreadable_settings_store_fails_closed_for_loader_uploads(monkeypatch):
+    """One rule for both readers: a settings store that cannot be read means
+    local_only, so nothing is sent to tmpfiles."""
+    from backend import asset_uploads
+
+    settings_store.set_app_pref("asset_storage_mode", "tmpfiles")
+    calls: list[str] = []
+    monkeypatch.setattr(asset_uploads, "_upload_to_tmpfiles", lambda *a, **k: calls.append("x") or "u")
+    _unreadable_settings(monkeypatch)
+    assert asset_uploads.get_asset_storage_mode() == "local_only"
+    with pytest.raises(asset_uploads.RemoteAssetUploadDisabled):
+        asset_uploads.upload_asset(b"b", filename="a.png", content_type="image/png", media_kind="image")
+    assert calls == []
+
+
+def test_generation_and_loader_uploads_share_one_storage_mode_reader(monkeypatch):
+    from backend import asset_uploads
+    from backend.byok import service
+
+    for value, expected in ((None, "local_only"), ("tmpfiles", "tmpfiles"), ("TMPFILES", "local_only"),
+                            ("r2_signed", "local_only"), ("local_only", "local_only")):
+        if value is not None:
+            settings_store.set_app_pref("asset_storage_mode", value)
+        assert asset_uploads.storage_mode() == service.storage_mode() == expected
+    _unreadable_settings(monkeypatch)
+    assert asset_uploads.storage_mode() == service.storage_mode() == "local_only"
+    assert service.STORAGE_MODE_PREF is asset_uploads.ASSET_STORAGE_MODE_PREF
+
+
 def test_image_upload_route_returns_provider_metadata(monkeypatch):
     from backend import asset_uploads
 

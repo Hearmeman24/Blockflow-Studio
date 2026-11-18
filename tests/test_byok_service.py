@@ -1295,3 +1295,84 @@ def test_cancel_that_lands_just_before_the_completed_update_removes_the_files(en
     assert env.downloads.calls == ["https://cdn.test/a.png"]
     assert _saved_files(env) == [keep]
     assert len(learned) == 1
+
+
+# ================================================================== state machine leftovers
+
+
+def test_a_cancel_during_a_poll_retry_backoff_stops_retrying(env):
+    """The poll's own HTTP retry sleeps in slices and stops as soon as the job
+    is cancelled; the job then ends CANCELLED with the billing warning."""
+    slept: list[float] = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        _cancel_latest(env)
+
+    transport = FakeTransport({"code": 200, "msg": "success", "data": {"taskId": "t-b"}},
+                              {"code": 429, "msg": "slow down"}, {"code": 429, "msg": "slow down"},
+                              {"code": 200, "data": {"state": "generating"}})
+    policy = RetryPolicy(max_attempts=3, base_delay_s=1.0, sleep=sleep)
+    env.monkeypatch.setattr(service, "adapter_factory",
+                            lambda p, **kw: get_adapter(p, transport=transport, retry=policy))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["status"] == "CANCELLED"
+    assert final["remote_job_id"] == "t-b"
+    assert "may still" in final["message"].lower()
+    assert [c["method"] for c in transport.calls] == ["POST", "GET"]  # no second poll attempt
+    assert len(slept) == 1 and slept[0] <= 0.5
+
+
+def test_duplicate_client_request_id_is_found_beyond_one_list_page(env):
+    env.monkeypatch.setattr(job_store, "MAX_LIST_LIMIT", 2)
+    store = env.store
+    oldest = store.create_job(source="pipeline", provider="kie", model="wan-3.0", mode="text_to_video",
+                              request={"params": {"prompt": "a fox"}, "client_request_id": "deep-1"})
+    for n in range(3):
+        store.create_job(source="pipeline", provider="kie", model="wan-3.0", mode="text_to_video",
+                         request={"params": {"prompt": f"other {n}"}, "client_request_id": f"other-{n}"})
+    again = service.submit_generation(video_payload(client_request_id="deep-1"))
+    assert again["job_id"] == oldest["job_id"]
+    assert env.scripts["kie"].submits == []
+
+
+def test_finished_workers_are_pruned(env):
+    env.downloads.files["https://cdn.test/out.mp4"] = ("video/mp4", b"x")
+    jobs = [finish(service.submit_generation(video_payload())) for _ in range(3)]
+    assert all(j["status"] == "COMPLETED" for j in jobs)
+    with service._state_lock:
+        assert not any(j["job_id"] in service._futures for j in jobs)
+        assert not any(j["job_id"] in service._attached for j in jobs)
+    # waiting on a pruned job still answers from the store
+    assert service.wait_for_job(jobs[0]["job_id"], timeout=1)["status"] == "COMPLETED"
+
+
+def test_a_resumed_job_measures_its_age_with_the_service_clock(env):
+    """Elapsed time and the deadline come from the same clock: a job whose
+    hour is already up on that clock times out after one poll."""
+    store = env.store
+    job = store.create_job(source="pipeline", provider="kie", model="wan-3.0", mode="text_to_video")
+    store.update_job(job["job_id"], status="RUNNING", remote_job_id="remote-old")
+    late = float(job["created_at"]) + service.JOB_TIMEOUT_S + 5
+    env.monkeypatch.setattr(service, "clock", lambda: late)
+    env.scripts["kie"].polls = [running()]
+    env.scripts["kie"].on_poll = lambda n: store.request_cancel(job["job_id"]) if n >= 5 else None
+    assert service.resume_pending()["resumed"] == [job["job_id"]]
+    final = service.wait_for_job(job["job_id"], timeout=WAIT)
+    assert final["status"] == "TIMED_OUT"
+    assert len(env.scripts["kie"].poll_calls) == 1
+
+
+def test_a_resumed_job_keeps_the_rest_of_its_hour(env):
+    store = env.store
+    job = store.create_job(source="pipeline", provider="kie", model="wan-3.0", mode="text_to_video")
+    store.update_job(job["job_id"], status="RUNNING", remote_job_id="remote-young")
+    start = float(job["created_at"]) + 600  # ten minutes old on the service clock
+    ticks = iter(range(0, 10_000_000, 1000))
+    env.monkeypatch.setattr(service, "clock", lambda: start + next(ticks))
+    env.scripts["kie"].polls = [running()]
+    service.resume_pending()
+    final = service.wait_for_job(job["job_id"], timeout=WAIT)
+    assert final["status"] == "TIMED_OUT"
+    # Age 600 s read at start+0, deadline start+1000+3000; one clock read per poll after that.
+    assert len(env.scripts["kie"].poll_calls) == 3

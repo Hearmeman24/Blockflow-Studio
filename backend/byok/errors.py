@@ -16,9 +16,58 @@ from backend.statuses import PROVIDER_ERROR_KINDS, ErrorKind
 # job-store-only kind and is not one of them).
 ERROR_KINDS: tuple[str, ...] = tuple(k.value for k in PROVIDER_ERROR_KINDS)
 
+
+
+@dataclass(frozen=True)
+class KindPolicy:
+    """How one error kind is retried. The only declaration of retryability:
+
+    - ``retryable_by_default``: ``ProviderError.retryable`` when the raiser
+      does not say. The generation service re-polls a retryable poll error,
+      up to ``service.MAX_POLL_ERRORS`` in a row.
+    - ``http_retry``: ``http.with_retry`` retries it inside one idempotent
+      call (polls, uploads, balance reads) when the error is also retryable.
+      A submit is never retried: it is called with ``http.NO_RETRY``.
+    - ``ambiguous_on_submit``: a submit that fails this way may still have
+      created (and billed) a task, so the job's message says to check the
+      provider dashboard before running again.
+    """
+
+    retryable_by_default: bool
+    http_retry: bool
+    ambiguous_on_submit: bool
+
+
+_P = KindPolicy
+RETRY_POLICY: Mapping[ErrorKind, KindPolicy] = {
+    ErrorKind.AUTH: _P(False, False, False),
+    ErrorKind.INSUFFICIENT_CREDITS: _P(False, False, False),
+    ErrorKind.RATE_LIMITED: _P(True, True, False),
+    ErrorKind.VALIDATION: _P(False, False, False),
+    ErrorKind.CONTENT_REJECTED: _P(False, False, False),
+    ErrorKind.UNSUPPORTED: _P(False, False, False),
+    # Only a 5xx-style failure is marked retryable by the raiser (see _status_kind).
+    ErrorKind.PROVIDER_FAILURE: _P(False, True, False),
+    # A timeout uses one of the service's poll attempts rather than an in-call retry.
+    ErrorKind.TIMEOUT: _P(True, False, True),
+    ErrorKind.NETWORK: _P(True, True, True),
+    ErrorKind.MALFORMED_RESPONSE: _P(False, False, True),
+    # Written by the job store's restart recovery only; never raised or retried.
+    ErrorKind.INTERRUPTED: _P(False, False, False),
+}
+del _P
+if set(RETRY_POLICY) != set(ErrorKind):  # a new kind must state its policy
+    raise RuntimeError("RETRY_POLICY must have exactly one entry per ErrorKind")
+
+
+def kinds_where(flag: str) -> frozenset[str]:
+    """The kinds (plain strings) whose policy has ``flag`` set."""
+    return frozenset(k.value for k, p in RETRY_POLICY.items() if getattr(p, flag))
+
+
 # Kinds that a caller may retry later. Automatic retry inside the provider
 # layer is narrower: see ``http.RETRY_KINDS``.
-_RETRYABLE_BY_DEFAULT = frozenset({ErrorKind.RATE_LIMITED, ErrorKind.NETWORK, ErrorKind.TIMEOUT})
+_RETRYABLE_BY_DEFAULT = kinds_where("retryable_by_default")
 
 _CONTENT_WORDS = ("content policy", "content review", "content violation", "content moderation", "sensitive",
                   "nsfw", "moderation", "violat", "inappropriate", "safety", "prohibited")

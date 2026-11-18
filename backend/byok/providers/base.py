@@ -17,8 +17,20 @@ from backend.byok import ledger
 from backend.byok.errors import ErrorInfo, ProviderError
 from backend.byok.http import RetryPolicy, Transport, UrllibTransport
 from backend.byok.spec import PROVIDER_NAMES, Issue, ModeSpec, Reference
+from backend.statuses import ProviderTaskStatus
 
-JobStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]
+# The old name of the provider poll status. It is not the job store's
+# ``backend.statuses.JobStatus`` (six values); kept so existing imports work.
+JobStatus = ProviderTaskStatus
+
+
+def unknown_status_error(provider: str, provider_name: str, raw: Any) -> ProviderError:
+    """The one error for a raw task status an adapter's map does not know.
+    Retryable: the generation service polls again and fails the job after
+    ``MAX_POLL_ERRORS`` such answers in a row (undocumented statuses are listed
+    in ``catalog.UNVERIFIED``)."""
+    return ProviderError("malformed_response", f"{provider_name} returned an unknown task status '{str(raw)[:40]}'.",
+                         provider=provider, retryable=True)
 
 
 @dataclass(frozen=True)
@@ -64,7 +76,7 @@ class Cost:
 
 @dataclass(frozen=True)
 class PollResult:
-    status: JobStatus
+    status: ProviderTaskStatus
     remote_status: str
     progress: float | None = None
     outputs: tuple[Output, ...] = ()

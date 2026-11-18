@@ -39,8 +39,10 @@ from backend.byok.providers.base import (
     finite_number,
     output_kind_for,
     unique_outputs,
+    unknown_status_error,
 )
 from backend.byok.spec import Reference
+from backend.statuses import ProviderTaskStatus
 
 API_BASE = "https://api.kie.ai"
 CREATE_URL = f"{API_BASE}/api/v1/jobs/createTask"
@@ -70,8 +72,22 @@ KIE_CODE_OVERRIDES: dict[int, tuple[str, bool]] = {
     505: ("unsupported", False),  # feature disabled
 }
 
-STATE_MAP = {"waiting": "QUEUED", "queuing": "QUEUED", "generating": "RUNNING", "success": "COMPLETED",
-             "fail": "FAILED"}
+# Every task state Kie documents (Get Task Details: waiting, queuing,
+# generating, success, fail); there is no cancelled or expired state.
+STATE_MAP: Mapping[str, ProviderTaskStatus] = {
+    "waiting": ProviderTaskStatus.QUEUED, "queuing": ProviderTaskStatus.QUEUED,
+    "generating": ProviderTaskStatus.RUNNING, "success": ProviderTaskStatus.COMPLETED,
+    "fail": ProviderTaskStatus.FAILED,
+}
+
+
+def task_status(raw: Any) -> ProviderTaskStatus:
+    """The one place a raw Kie task state is decided. An unknown state is a
+    retryable ``malformed_response`` naming it."""
+    status = STATE_MAP.get(str(raw or "").lower())
+    if status is None:
+        raise unknown_status_error("kie", "Kie", raw or "")
+    return status
 
 _SEEDANCE_FIELDS = {"image": "reference_image_urls", "video": "reference_video_urls",
                     "audio": "reference_audio_urls"}
@@ -227,14 +243,11 @@ class KieAdapter(ProviderAdapter):
             raise ProviderError("malformed_response", "Kie returned a task record without data.",
                                 provider=self.name, retryable=True)
         state = str(task.get("state") or "")
-        status = STATE_MAP.get(state.lower())
-        if status is None:
-            raise ProviderError("malformed_response", f"Kie returned an unknown task state '{state[:40]}'.",
-                                provider=self.name, retryable=True)
+        status = task_status(state)
         progress = task.get("progress")
         progress = float(progress) if isinstance(progress, (int, float)) and not isinstance(progress, bool) else None
         echo = self._decode_param(task.get("param"))
-        if status == "FAILED":
+        if status == ProviderTaskStatus.FAILED:
             message = redact(task.get("failMsg") or "", key).strip()
             kind = "content_rejected" if message and mentions_content_rejection(message) else "provider_failure"
             text = ("Kie rejected the content of this request." if kind == "content_rejected"
@@ -243,8 +256,8 @@ class KieAdapter(ProviderAdapter):
                              str(task.get("failCode") or "") or None, self.name)
             return PollResult(status, state, progress, (), info, echo, credits_cost(task.get("creditsConsumed")))
         outputs = ()
-        cost = credits_cost(task.get("creditsConsumed")) if status == "COMPLETED" else None
-        if status == "COMPLETED":
+        cost = credits_cost(task.get("creditsConsumed")) if status == ProviderTaskStatus.COMPLETED else None
+        if status == ProviderTaskStatus.COMPLETED:
             # A finished task is billed even when its result cannot be read:
             # the error carries the charge so the job still records it.
             try:

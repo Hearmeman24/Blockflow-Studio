@@ -325,6 +325,80 @@ def test_marker_table_lives_beside_runs(temp_db):
     conn.close()
 
 
+# ------------------------------------------------------------------ job status -> run status
+
+
+def test_run_mapping_is_exhaustive_over_job_statuses():
+    from backend.statuses import JobStatus, RunStatus
+
+    assert set(mcp_runs.RUN_FOR_JOB_STATUS) == set(JobStatus)
+    assert mcp_runs.RUN_FOR_JOB_STATUS == {
+        JobStatus.QUEUED: None, JobStatus.RUNNING: None, JobStatus.CANCELLED: None,
+        JobStatus.COMPLETED: RunStatus.COMPLETED, JobStatus.FAILED: RunStatus.FAILED,
+        JobStatus.TIMED_OUT: RunStatus.FAILED,
+    }
+    assert mcp_runs.RUN_RECORDED_STATUSES == (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMED_OUT)
+
+
+@pytest.mark.parametrize("mode,outputs,kind", [
+    ("text_to_image", [], "image"),
+    ("text_to_video", [], "video"),
+    ("text_to_image", [{"kind": "video", "url": "https://cdn.test/x.mp4"}], "image"),
+])
+def test_completed_job_without_an_output_of_its_kind_says_so(mode, outputs, kind):
+    run = mcp_runs.build_run(_job(mode, outputs=outputs))
+    assert run["status"] == "failed"
+    gen = run["block_results"][0]
+    assert gen["status"] == "error"
+    assert gen["error"] != "Done"
+    assert gen["error"] == f"The job finished but returned no {kind} output."
+
+
+def test_failed_job_without_an_error_still_uses_its_message():
+    run = mcp_runs.build_run(_job(status="FAILED", error=None))
+    assert run["block_results"][0]["error"] == "Done"  # the job's own message, as before
+
+
+def _finished_mcp_job(store, n):
+    job = store.create_job(source="mcp", provider="kie", model="seedream-5-pro", mode="text_to_image",
+                           request={"params": {"prompt": f"job {n}"}, "references": []})
+    store.update_job(job["job_id"], status="COMPLETED",
+                     outputs=[{"kind": "image", "url": f"https://cdn.test/{n}.png"}])
+    return job["job_id"]
+
+
+def test_sweep_pages_through_every_finished_job(temp_db, monkeypatch):
+    monkeypatch.setattr(mcp_runs, "SWEEP_PAGE_SIZE", 2)
+    store = job_store.get_store()
+    ids = [_finished_mcp_job(store, n) for n in range(5)]
+    assert sorted(mcp_runs.sweep(store)) == sorted(ids)
+    assert len(db.list_runs()) == 5
+    assert mcp_runs.sweep(store) == []
+
+
+def test_sweep_skips_jobs_that_already_have_a_run_without_rewriting(temp_db, monkeypatch):
+    store = job_store.get_store()
+    first = _finished_mcp_job(store, 1)
+    assert mcp_runs.sweep(store) == [first]
+    saved: list[str] = []
+    real = mcp_runs.save_run_for_job
+    monkeypatch.setattr(mcp_runs, "save_run_for_job", lambda job: saved.append(job["job_id"]) or real(job))
+    second = _finished_mcp_job(store, 2)
+    assert mcp_runs.sweep(store) == [second]
+    assert saved == [second]
+
+
+def test_startup_installs_the_hook_and_sweeps_before_resuming_jobs():
+    """main.py order is load-bearing: listen, sweep, then resume (a resumed job
+    that ends at once must find the hook installed)."""
+    import ast
+
+    tree = ast.parse((ROOT / "backend" / "main.py").read_text(encoding="utf-8"))
+    guard = next(n for n in tree.body if isinstance(n, ast.If) and "pytest" in ast.unparse(n.test))
+    calls = [ast.unparse(s.value.func) for s in guard.body if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)]
+    assert calls.index("_save_mcp_runs_on_startup") < calls.index("_resume_generation_jobs_on_startup")
+
+
 if __name__ == "__main__":
     FIXTURE.write_text(render_fixture(), encoding="utf-8")
     print(f"wrote {FIXTURE}")

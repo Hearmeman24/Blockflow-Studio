@@ -53,6 +53,20 @@ def can_transition(current: object, new: object) -> bool:
         return False
 
 
+class ProviderTaskStatus(StrEnum):
+    """What a provider says about one task, as read by an adapter's poll
+    (``providers.base.PollResult.status``). Not the job status above: the
+    adapters only ever produce these four, and the generation service turns
+    them into job statuses. Each adapter maps its raw strings to these in one
+    function (``task_status`` in ``providers/kie.py`` and ``providers/piapi.py``).
+    Backend only; not in the frontend contract."""
+
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
 class JobPhase(StrEnum):
     """What an active job's worker is doing (``phase`` on job snapshots from
     ``/api/jobs*``, ``/api/generation/submit`` and the MCP job summaries).

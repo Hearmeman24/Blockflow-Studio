@@ -37,7 +37,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from backend import db
 from backend.statuses import ACTIVE_JOB_STATUSES, TERMINAL_JOB_STATUSES, ErrorKind, JobStatus, can_transition
@@ -538,9 +538,66 @@ class JobStore:
 
         return self._mutate(job_id, change)
 
+    def iter_jobs(
+        self,
+        *,
+        source: str | None = None,
+        statuses: Iterable[str] | None = None,
+        page_size: int = MAX_LIST_LIMIT,
+    ) -> Iterator[dict[str, Any]]:
+        """Every matching job, newest first (the `list_jobs` order), read
+        `page_size` rows at a time; no overall limit. Keyset paging on
+        (created_at, rowid), so jobs created meanwhile are not returned twice
+        and older ones are not skipped."""
+        clauses, params = [], []
+        if source is not None:
+            clauses.append("source = ?")
+            params.append(_check_source(source))
+        if statuses is not None:
+            wanted = [_check_status(s) for s in statuses]
+            if not wanted:
+                return
+            clauses.append(f"status IN ({', '.join('?' for _ in wanted)})")
+            params.extend(wanted)
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+            raise ValueError("page_size must be a positive integer")
+        after: tuple[float, int] | None = None
+        while True:
+            where = list(clauses)
+            args = list(params)
+            if after is not None:
+                where.append("(created_at < ? OR (created_at = ? AND rowid < ?))")
+                args.extend([after[0], after[0], after[1]])
+            sql = (f"SELECT rowid AS rid, created_at, data FROM {TABLE}"
+                   f"{' WHERE ' + ' AND '.join(where) if where else ''}"
+                   " ORDER BY created_at DESC, rowid DESC LIMIT ?")
+            with self._lock:
+                conn = self._connect()
+                try:
+                    rows = conn.execute(sql, [*args, page_size]).fetchall()
+                finally:
+                    conn.close()
+            for row in rows:
+                yield _normalise(json.loads(row["data"]))
+            if len(rows) < page_size:
+                return
+            after = (rows[-1]["created_at"], rows[-1]["rid"])
+
+    def find_active_by_client_request_id(self, client_request_id: str) -> dict[str, Any] | None:
+        """The newest active job whose request carries `client_request_id`,
+        looking at every active job (not one list page)."""
+        for job in self.iter_jobs(statuses=sorted(ACTIVE_STATUSES)):
+            if (job.get("request") or {}).get("client_request_id") == client_request_id:
+                return job
+        return None
+
     def is_cancel_requested(self, job_id: str) -> bool:
+        """True once the job is CANCELLED. The status is the one source: the
+        stored `cancel_requested` flag is still written by `request_cancel`
+        (same rows as always) but never read here, so a job moved to
+        CANCELLED by any path counts as cancelled."""
         job = self.get_job(job_id)
-        return bool(job and job.get("cancel_requested"))
+        return bool(job) and job.get("status") == JobStatus.CANCELLED
 
     def list_resumable(self) -> list[dict[str, Any]]:
         """Active jobs the provider already accepted (they have a remote_job_id);

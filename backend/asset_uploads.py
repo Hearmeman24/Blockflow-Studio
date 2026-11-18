@@ -1,17 +1,23 @@
-"""Remote asset upload provider selection for loader blocks."""
+"""Remote asset upload provider selection for loader blocks, and the one
+reader of the Settings, then Storage mode (``storage_mode()``), which the
+generation service (``backend.byok.service``) uses too."""
 
 from __future__ import annotations
 
 import json
+import logging
 import urllib.request
 from pathlib import Path
 
 from backend import settings_store, tmpfiles
 from backend.statuses import StorageMode
 
+logger = logging.getLogger(__name__)
+
+# The pref name, declared once (backend.byok.service.STORAGE_MODE_PREF is this).
 ASSET_STORAGE_MODE_PREF = "asset_storage_mode"
 ASSET_STORAGE_MODES = {m.value for m in StorageMode}
-# Unset or unknown means files stay on this machine (matches backend.byok.service).
+# Unset, unknown or unreadable means files stay on this machine.
 DEFAULT_ASSET_STORAGE_MODE = StorageMode.LOCAL_ONLY
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
 
@@ -20,15 +26,27 @@ class RemoteAssetUploadDisabled(RuntimeError):
     """Raised when the user has chosen not to create externally fetchable URLs."""
 
 
-def get_asset_storage_mode() -> str:
-    """The saved storage mode, or the default for anything unrecognised.
+def storage_mode() -> StorageMode:
+    """The saved storage mode, with one failure rule: fail closed.
 
-    Older builds offered other modes (for example a signed-bucket mode). A
-    saved value from one of those is not in ASSET_STORAGE_MODES, so it reads
-    as the default (local_only) instead of breaking uploads.
+    ``tmpfiles`` only when the user chose exactly that in Settings, then
+    Storage. Anything else is ``local_only``: unset, unknown (older builds
+    offered other modes, for example a signed-bucket one; such a value reads
+    as the default instead of breaking uploads), or a settings store that
+    cannot be read. Local files then only ever go to the chosen provider's
+    own upload.
     """
-    value = settings_store.get_app_pref(ASSET_STORAGE_MODE_PREF)
-    return value if value in ASSET_STORAGE_MODES else DEFAULT_ASSET_STORAGE_MODE
+    try:
+        value = settings_store.get_app_pref(ASSET_STORAGE_MODE_PREF)
+    except Exception as exc:  # noqa: BLE001 - fail closed: no third-party host
+        logger.warning("could not read the storage mode (%s); using local_only", type(exc).__name__)
+        return DEFAULT_ASSET_STORAGE_MODE
+    return StorageMode(value) if value in ASSET_STORAGE_MODES else DEFAULT_ASSET_STORAGE_MODE
+
+
+def get_asset_storage_mode() -> str:
+    """``storage_mode()``, under the name the loader routes use."""
+    return storage_mode()
 
 
 def _safe_name(filename: str) -> str:

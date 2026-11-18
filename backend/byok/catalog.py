@@ -681,6 +681,14 @@ UNVERIFIED: tuple[Unverified, ...] = (
                "a violation, NSFW, moderation or safety."),
     Unverified("kie", "*", "code 433",
                "Listed in the response code enum with no meaning. Treated as a provider failure."),
+    Unverified("kie", "*", "task status",
+               "Get Task Details documents five states (waiting, queuing, generating, success, fail) and no "
+               "cancelled or expired state. Any other state is treated as an unknown response: the job keeps "
+               "polling and fails as malformed_response after several such answers in a row."),
+    Unverified("kie", "*", "failMsg credits",
+               "Insufficient credits is documented only as response code 402, which is classified as "
+               "insufficient_credits. No failCode or failMsg for it on a failed task is documented, so a "
+               "failed task is never classified as insufficient_credits."),
     Unverified("piapi", "seedance-2, seedance-2-fast, seedance-2-mini", "mode",
                "The description calls mode optional (inferred); the schema marks it required. Always sent."),
     Unverified("piapi", "seedance-2, seedance-2-fast, seedance-2-mini", "max_total_references",
@@ -714,6 +722,11 @@ UNVERIFIED: tuple[Unverified, ...] = (
                "No image formats or size limits are documented for omni references."),
     Unverified("piapi", "image-upscaler", "scale / face_enhance",
                "Both appear required with no documented default. Defaults are 2 and false, always sent."),
+    Unverified("piapi", "*", "task status",
+               "The Get Task pages differ per model (pending, staged, starting, processing, retry, completed, "
+               "success, failed). A canceled status is documented only for models not offered here, and the "
+               "provider-side cancel is not used. Any other status is treated as an unknown response: the job "
+               "keeps polling and fails as malformed_response after several such answers in a row."),
     Unverified("piapi", "*", "account/info response",
                "The response schema is empty; balance fields are read best-effort."),
     Unverified("piapi", "*", "error codes",

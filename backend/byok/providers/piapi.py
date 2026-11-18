@@ -35,8 +35,10 @@ from backend.byok.providers.base import (
     finite_number,
     output_kind_for,
     unique_outputs,
+    unknown_status_error,
 )
 from backend.byok.spec import Reference
+from backend.statuses import ProviderTaskStatus
 
 API_BASE = "https://api.piapi.ai"
 TASK_URL = f"{API_BASE}/api/v1/task"
@@ -69,7 +71,7 @@ def usage_cost(task: Mapping[str, Any], status: str) -> Cost | None:
         return None
     if consume == 0 and (frozen is None or frozen > 0):
         return None  # nothing settled yet: the reservation is still frozen
-    if consume == 0 and status != "FAILED":
+    if consume == 0 and status != ProviderTaskStatus.FAILED:
         return None  # a completed task that reports nothing consumed: not trustworthy
     kind = str(usage.get("type") or "").strip().lower()
     usd = round(consume / POINTS_PER_USD, 6) if kind in _CONVERTIBLE_USAGE else None
@@ -78,12 +80,34 @@ def usage_cost(task: Mapping[str, Any], status: str) -> Cost | None:
 
 PIAPI_CODE_OVERRIDES: dict[int, tuple[str, bool]] = {10003: ("validation", False)}
 
-STATUS_MAP = {
-    "pending": "QUEUED", "staged": "QUEUED", "starting": "QUEUED",
-    "processing": "RUNNING", "retry": "RUNNING", "running": "RUNNING",
-    "completed": "COMPLETED", "success": "COMPLETED", "succeeded": "COMPLETED",
-    "failed": "FAILED", "fail": "FAILED", "error": "FAILED",
+# Raw task statuses, compared stripped and lowercased. The Get Task pages of
+# the models offered here document pending, staged, starting, processing,
+# retry, completed / success and failed; the rest are kept as harmless
+# aliases. No cancelled or expired status is documented for these models
+# (see catalog.UNVERIFIED).
+_Q, _R, _C, _F = (ProviderTaskStatus.QUEUED, ProviderTaskStatus.RUNNING, ProviderTaskStatus.COMPLETED,
+                  ProviderTaskStatus.FAILED)
+STATUS_MAP: Mapping[str, ProviderTaskStatus] = {
+    "pending": _Q, "staged": _Q, "starting": _Q,
+    "processing": _R, "retry": _R, "running": _R,
+    "completed": _C, "success": _C, "succeeded": _C,
+    "failed": _F, "fail": _F, "error": _F,
 }
+TERMINAL_TASK_STATUSES = frozenset({_C, _F})
+
+
+def lookup_status(raw: Any) -> ProviderTaskStatus | None:
+    """The one place a raw PiAPI task status is decided; None when unknown."""
+    return STATUS_MAP.get(str(raw or "").strip().lower())
+
+
+def task_status(raw: Any) -> ProviderTaskStatus:
+    """``lookup_status`` for a poll: an unknown status is a retryable
+    ``malformed_response`` naming it."""
+    status = lookup_status(raw)
+    if status is None:
+        raise unknown_status_error("piapi", "PiAPI", raw or "")
+    return status
 
 _SEEDANCE_MODES = {"text_to_video": "text_to_video", "image_to_video": "first_last_frames",
                    "omni_reference_to_video": "omni_reference"}
@@ -246,11 +270,8 @@ class PiAPIAdapter(ProviderAdapter):
 
     def _poll_result(self, task: Mapping[str, Any], api_key: str, expected_kind: str | None) -> PollResult:
         raw = str(task.get("status") or "")
-        status = STATUS_MAP.get(raw.strip().lower())
-        if status is None:
-            raise ProviderError("malformed_response", f"PiAPI returned an unknown task status '{raw[:40]}'.",
-                                provider=self.name, retryable=True)
-        if status == "FAILED":
+        status = task_status(raw)
+        if status == ProviderTaskStatus.FAILED:
             message, code = _error_detail({"data": task})
             message = redact(message, api_key).strip()
             if message and mentions_content_rejection(message):
@@ -263,8 +284,8 @@ class PiAPIAdapter(ProviderAdapter):
                              None if code in (None, 0) else str(code), self.name)
             return PollResult(status, raw, None, (), info, cost=usage_cost(task, status))
         outputs = ()
-        cost = usage_cost(task, status) if status == "COMPLETED" else None
-        if status == "COMPLETED":
+        cost = usage_cost(task, status) if status == ProviderTaskStatus.COMPLETED else None
+        if status == ProviderTaskStatus.COMPLETED:
             outputs = extract_outputs(task.get("output"), expected_kind)
             if not outputs:
                 # Billed all the same: the error carries the charge for the job.
@@ -284,7 +305,7 @@ class PiAPIAdapter(ProviderAdapter):
         if not isinstance(task_id, str) or not task_id:
             raise ProviderError("malformed_response", "PiAPI accepted the request but returned no task id.",
                                 provider=self.name, retryable=False)
-        if STATUS_MAP.get(str(task.get("status") or "").strip().lower()) in ("COMPLETED", "FAILED"):
+        if lookup_status(task.get("status")) in TERMINAL_TASK_STATUSES:
             # Seedream is documented as synchronous: the result may already be here.
             try:
                 return SubmitResult(task_id, self._poll_result(task, key, request.output_kind))

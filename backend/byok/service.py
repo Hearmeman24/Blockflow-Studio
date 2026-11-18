@@ -33,13 +33,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from backend import job_store
+from backend import asset_uploads, job_store
 from backend.byok import ledger, media, references
-from backend.byok.errors import ProviderError, redact
-from backend.byok.http import USER_AGENT
+from backend.byok.errors import ProviderError, kinds_where, redact
+from backend.byok.http import USER_AGENT, stop_retrying_when
 from backend.byok.providers import PollResult, SubmitResult, get_adapter
 from backend.byok.spec import PROVIDER_NAMES, Reference, canonical_reference, to_jsonable
-from backend.statuses import JobPhase, JobStatus, StorageMode
+from backend.statuses import ErrorKind, JobPhase, JobStatus, ProviderTaskStatus, StorageMode
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +60,8 @@ DOWNLOAD_CHUNK = 1024 * 1024
 OUTPUT_SUBDIR = "byok"
 MAX_CLIENT_REQUEST_ID = 200
 MAX_LABEL = 200               # optional run name (MCP jobs; backend/mcp_runs.py)
-# Settings → Storage. Same pref and default as backend/asset_uploads.py: an unset
-# or unknown value means local_only (fail closed: no third-party host).
-STORAGE_MODE_PREF = "asset_storage_mode"
+# Settings → Storage: the pref and its reader live in backend/asset_uploads.py.
+STORAGE_MODE_PREF = asset_uploads.ASSET_STORAGE_MODE_PREF
 LOCAL_ONLY_CODE = "local_only_storage"
 
 # Injection points (tests replace these).
@@ -91,7 +90,11 @@ class GenerationError(Exception):
         self.issues = [dict(i) for i in issues]
 
 
-_HINTS = {
+# One action per error kind, appended to the job's message; total over
+# ErrorKind (NO_HINT where the message already says what to do).
+NO_HINT = ""
+_HINTS: dict[str, str] = {
+    ErrorKind.INTERRUPTED: NO_HINT,  # the job store's own restart message says what to do
     "auth": "Check the {p} API key in Settings.",
     "insufficient_credits": "Add credits to your {p} account, then run again.",
     "rate_limited": "Wait a minute, then run again.",
@@ -103,7 +106,11 @@ _HINTS = {
     "network": "Check your internet connection, then run again.",
     "malformed_response": "Try again; if it keeps happening, report it.",
 }
-_AMBIGUOUS_SUBMIT = frozenset({"timeout", "network", "malformed_response"})
+if set(_HINTS) != set(ErrorKind):
+    raise RuntimeError("_HINTS must have exactly one entry per ErrorKind")
+# Submit failures after which the provider may still have created the task
+# (declared in ``errors.RETRY_POLICY``).
+_AMBIGUOUS_SUBMIT = kinds_where("ambiguous_on_submit")
 GENERIC_FAILURE = ("Something went wrong while running this job. The details are in the BlockFlow "
                    "server log.")
 
@@ -163,15 +170,9 @@ def get_api_key(provider: str) -> str | None:
 
 def storage_mode() -> str:
     """``tmpfiles`` only when the user chose it in Settings → Storage; anything
-    else (unset, unknown, unreadable) is ``local_only``: local files then only
-    ever go to the chosen provider's own upload."""
-    from backend import settings_store
-
-    try:
-        value = settings_store.get_app_pref(STORAGE_MODE_PREF)
-    except Exception:  # noqa: BLE001 - fail closed
-        return StorageMode.LOCAL_ONLY
-    return StorageMode.TMPFILES if value == StorageMode.TMPFILES else StorageMode.LOCAL_ONLY
+    else (unset, unknown, unreadable) is ``local_only``. One reader for the
+    whole app: ``backend.asset_uploads.storage_mode``."""
+    return asset_uploads.storage_mode()
 
 
 def _local_only_refusal(provider: str, path: Path, err: ProviderError, key: str) -> ProviderError:
@@ -359,6 +360,10 @@ def _pool() -> ThreadPoolExecutor:
 
 
 def _dispatch(job_id: str, fn: Callable[[], None]) -> bool:
+    """Run ``fn`` for ``job_id`` on the worker pool, once at a time per job.
+    ``_attached`` and ``_futures`` hold only jobs whose worker has not
+    finished: the worker removes its own entries as it ends."""
+    pool = _pool()
     with _state_lock:
         if job_id in _attached:
             return False
@@ -371,10 +376,12 @@ def _dispatch(job_id: str, fn: Callable[[], None]) -> bool:
             _clear_phase(job_id)
             with _state_lock:
                 _attached.discard(job_id)
+                _futures.pop(job_id, None)
 
-    future = _pool().submit(run)
+    # Registered under the lock the worker's cleanup takes, so a worker that
+    # ends at once cannot run its cleanup before its future is recorded.
     with _state_lock:
-        _futures[job_id] = future
+        _futures[job_id] = pool.submit(run)
     return True
 
 
@@ -440,11 +447,9 @@ def shutdown(wait: bool = True) -> None:
 
 
 def _find_active(store: job_store.JobStore, client_request_id: str) -> dict[str, Any] | None:
-    for status in (JobStatus.QUEUED, JobStatus.RUNNING):
-        for job in store.list_jobs(status=status, limit=job_store.MAX_LIST_LIMIT):
-            if (job.get("request") or {}).get("client_request_id") == client_request_id:
-                return job
-    return None
+    """The active job already using ``client_request_id`` (every active job is
+    checked, not one list page)."""
+    return store.find_active_by_client_request_id(client_request_id)
 
 
 def submit_generation(payload: Any) -> dict[str, Any]:
@@ -690,9 +695,12 @@ def _follow(store: job_store.JobStore, job_id: str, adapter: Any, key: str, prov
             if result is None:
                 _wait(store, job_id, 0)
                 try:
-                    result = adapter.poll(remote_job_id, key, expected_kind)
+                    # A retry backoff inside the poll ends early on a cancel.
+                    with stop_retrying_when(lambda: store.is_cancel_requested(job_id)):
+                        result = adapter.poll(remote_job_id, key, expected_kind)
                     errors = 0
                 except ProviderError as err:
+                    _wait(store, job_id, 0)  # cancelled meanwhile: stop as a cancel, not a failure
                     errors += 1
                     if not err.retryable or errors >= MAX_POLL_ERRORS:
                         logger.info("byok job %s: poll failed (%s): %s", job_id, err.kind, redact(err.message, key))
@@ -701,10 +709,10 @@ def _follow(store: job_store.JobStore, job_id: str, adapter: Any, key: str, prov
                         return
                     result = None
             if result is not None:
-                if result.status == JobStatus.COMPLETED:
+                if result.status == ProviderTaskStatus.COMPLETED:
                     _complete(store, job_id, provider, result, expected_kind, key, remote_job_id)
                     return
-                if result.status == JobStatus.FAILED:
+                if result.status == ProviderTaskStatus.FAILED:
                     info = result.error
                     kind = info.kind if info else "provider_failure"
                     text = info.message if info else f"{p} could not generate this result."
@@ -713,7 +721,7 @@ def _follow(store: job_store.JobStore, job_id: str, adapter: Any, key: str, prov
                 state = (result.remote_status, _progress(result.progress))
                 if state != last:
                     last = state
-                    waiting = "Queued at" if result.status == JobStatus.QUEUED else "Generating on"
+                    waiting = "Queued at" if result.status == ProviderTaskStatus.QUEUED else "Generating on"
                     _update(store, job_id, remote_status=result.remote_status or None, progress=state[1],
                             message=f"{waiting} {p}")
             if clock() >= deadline:
@@ -891,7 +899,10 @@ def _run_resumed(job: dict[str, Any]) -> None:
         except KeyError:
             expected = "image"
         _set_phase(job_id, JobPhase.POLLING)  # the provider accepted it before the restart
-        elapsed = max(0.0, time.time() - float(job.get("created_at") or time.time()))
+        # created_at is wall-clock time and ``clock`` is time.time in the app,
+        # so age and deadline are read from the same clock.
+        now = clock()
+        elapsed = max(0.0, now - float(job.get("created_at") or now))
         deadline = clock() + max(0.0, JOB_TIMEOUT_S - elapsed)
         _update(store, job_id, status=JobStatus.RUNNING, message=f"Reconnected to {_pname(provider)}")
         _follow(store, job_id, adapter, key, provider, job["remote_job_id"], expected, deadline)
