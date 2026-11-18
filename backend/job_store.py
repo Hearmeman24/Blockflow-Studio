@@ -6,7 +6,8 @@ the columns beside it exist only for filtering and ordering.
 
 Rules enforced here, not by callers:
   - `status` is exactly one of JOB_STATUSES.
-  - Terminal states are final. An update to a COMPLETED / FAILED / CANCELLED /
+  - Every status change follows `backend.statuses.JOB_TRANSITIONS` (asked
+    through `can_transition`). Terminal states are final. An update to a COMPLETED / FAILED / CANCELLED /
     TIMED_OUT job is ignored and returns the unchanged snapshot, so a worker
     that polls once more after a user cancel cannot resurrect the job.
   - Secrets never reach disk: any `request` key (at any depth) whose name,
@@ -39,7 +40,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from backend import db
-from backend.statuses import ACTIVE_JOB_STATUSES, TERMINAL_JOB_STATUSES, ErrorKind, JobStatus
+from backend.statuses import ACTIVE_JOB_STATUSES, TERMINAL_JOB_STATUSES, ErrorKind, JobStatus, can_transition
 
 TABLE = "generation_jobs"
 
@@ -57,6 +58,13 @@ DEFAULT_QUEUE_SIZE = 200
 INTERRUPTED_MESSAGE = (
     "BlockFlow restarted before the provider accepted this job, so it cannot be "
     "resumed. Run it again."
+)
+# For a job that died with its provider request stored but no task id: the
+# submit was in flight, so the provider may have accepted (and billed) it.
+INTERRUPTED_DURING_SUBMIT_MESSAGE = (
+    "BlockFlow restarted while it was sending this job to the provider, so it cannot "
+    "be resumed. The provider may have accepted and charged for it: check your "
+    "provider dashboard before running it again so you are not billed twice."
 )
 
 # Matched against a normalised name (lowercase, `-` and spaces -> `_`): the
@@ -431,7 +439,7 @@ class JobStore:
         cleaned = {name: _VALIDATORS[name](value) for name, value in fields.items()}
 
         def change(job: dict[str, Any]) -> bool:
-            if job["status"] in TERMINAL_STATUSES:
+            if not can_transition(job["status"], cleaned.get("status", job["status"])):
                 return False
             job.update(cleaned)
             return True
@@ -476,7 +484,7 @@ class JobStore:
         expected to notice `is_cancel_requested` and cancel the remote task.
         """
         def change(job: dict[str, Any]) -> bool:
-            if job["status"] in TERMINAL_STATUSES:
+            if not can_transition(job["status"], JobStatus.CANCELLED):
                 return False
             job["cancel_requested"] = True
             job["status"] = JobStatus.CANCELLED
@@ -491,17 +499,22 @@ class JobStore:
         *,
         message: str | None = None,
         remote_job_id: str | None = None,
+        cost: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Set `message` and/or record `remote_job_id` on a job in ANY state,
-        terminal included (e.g. explain a cancel, or keep the provider task id
-        when a cancel lands while the submit is in flight). Status, outputs and
-        timestamps other than updated_at are untouched. `None` leaves a field
-        as is; an existing, different remote_job_id is never replaced
-        (ValueError). Publishes only when something changed."""
+        """Set `message` and/or record `remote_job_id` / `cost` on a job in ANY
+        state, terminal included (e.g. explain a cancel, keep the provider task
+        id when a cancel lands while the submit is in flight, or keep the
+        charge the provider reported for a task whose result was discarded).
+        Status, outputs and timestamps other than updated_at are untouched.
+        `None` leaves a field as is; an existing, different remote_job_id is
+        never replaced (ValueError) and an existing cost is never replaced
+        (the new one is ignored). Publishes only when something changed."""
         if message is not None:
             _check_text("message", message, required=False)
         if remote_job_id is not None:
             _check_text("remote_job_id", remote_job_id, required=True)
+        if cost is not None:
+            cost = _check_cost(cost)
         current = self.get_job(job_id)
         if current is None:
             raise JobNotFoundError(job_id)
@@ -517,6 +530,9 @@ class JobStore:
                 changed = True
             if message is not None and job.get("message") != message:
                 job["message"] = message
+                changed = True
+            if cost is not None and job.get("cost") is None:
+                job["cost"] = cost
                 changed = True
             return changed
 
@@ -537,7 +553,12 @@ class JobStore:
         )
 
     def recover_after_restart(self) -> dict[str, list[str]]:
-        """Fail active jobs that never reached the provider; report the rest.
+        """Fail active jobs that have no provider task id; report the rest.
+
+        A job whose provider request was already stored died while the submit
+        was in flight: it fails with INTERRUPTED_DURING_SUBMIT_MESSAGE (the
+        provider may have accepted and billed it), any other with
+        INTERRUPTED_MESSAGE.
 
         Returns {"failed": [job_id...], "resumable": [job_id...]}.
         """
@@ -549,11 +570,13 @@ class JobStore:
         failed: list[str] = []
         for job in stranded:
             def change(j: dict[str, Any]) -> bool:
-                if j["status"] in TERMINAL_STATUSES or j.get("remote_job_id"):
+                if not can_transition(j["status"], JobStatus.FAILED) or j.get("remote_job_id"):
                     return False
+                message = (INTERRUPTED_DURING_SUBMIT_MESSAGE if (j.get("request") or {}).get("provider_request")
+                           else INTERRUPTED_MESSAGE)
                 j["status"] = JobStatus.FAILED
-                j["error"] = {"kind": ErrorKind.INTERRUPTED, "message": INTERRUPTED_MESSAGE}
-                j["message"] = INTERRUPTED_MESSAGE
+                j["error"] = {"kind": ErrorKind.INTERRUPTED, "message": message}
+                j["message"] = message
                 return True
 
             if self._mutate(job["job_id"], change)["status"] == JobStatus.FAILED:

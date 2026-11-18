@@ -243,12 +243,18 @@ class KieAdapter(ProviderAdapter):
                              str(task.get("failCode") or "") or None, self.name)
             return PollResult(status, state, progress, (), info, echo, credits_cost(task.get("creditsConsumed")))
         outputs = ()
+        cost = credits_cost(task.get("creditsConsumed")) if status == "COMPLETED" else None
         if status == "COMPLETED":
-            outputs = self._outputs(task, expected_kind)
+            # A finished task is billed even when its result cannot be read:
+            # the error carries the charge so the job still records it.
+            try:
+                outputs = self._outputs(task, expected_kind)
+            except ProviderError as err:
+                err.cost = cost
+                raise
             if not outputs:
                 raise ProviderError("malformed_response", "Kie reported success but returned no result URLs.",
-                                    provider=self.name, retryable=False)
-        cost = credits_cost(task.get("creditsConsumed")) if status == "COMPLETED" else None
+                                    provider=self.name, retryable=False, cost=cost)
         return PollResult(status, state, progress, outputs, None, echo, cost)
 
     def _outputs(self, task: Mapping[str, Any], expected_kind: str | None):

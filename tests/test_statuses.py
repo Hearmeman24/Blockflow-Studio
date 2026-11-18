@@ -197,3 +197,33 @@ def test_recovery_still_writes_the_interrupted_kind(tmp_path):
     raw = sqlite3.connect(path).execute(f"SELECT data FROM {job_store.TABLE}").fetchone()[0]
     assert json.loads(raw)["error"]["kind"] == "interrupted"
     assert json.loads(raw)["status"] == "FAILED"
+
+
+# ------------------------------------------------------------ job phase
+
+
+def test_job_phase_vocabulary_is_declared_in_order_and_in_the_contract():
+    assert _values(statuses.JobPhase) == ("preparing", "submitting", "polling", "downloading")
+    assert statuses.contract()["job_phase"] == ["preparing", "submitting", "polling", "downloading"]
+
+
+@pytest.mark.parametrize("verdict", [True, False])
+def test_the_store_enforces_the_declared_transition_table(tmp_path, monkeypatch, verdict):
+    """update_job, request_cancel and recover_after_restart ask can_transition,
+    so the declared table is what is enforced."""
+    store = job_store.JobStore(tmp_path / "jobs.db")
+    asked: list[tuple[str, str]] = []
+
+    def fake(current, new):
+        asked.append((str(current), str(new)))
+        return verdict
+
+    monkeypatch.setattr(job_store, "can_transition", fake)
+    a = store.create_job(source="pipeline", provider="kie", model="veo3")
+    after = store.update_job(a["job_id"], status="RUNNING", message="moved")
+    assert (after["status"] == "RUNNING") is verdict
+    b = store.create_job(source="pipeline", provider="kie", model="veo3")
+    assert (store.request_cancel(b["job_id"])["status"] == "CANCELLED") is verdict
+    c = store.create_job(source="pipeline", provider="kie", model="veo3")
+    assert (c["job_id"] in job_store.JobStore(tmp_path / "jobs.db").recover_after_restart()["failed"]) is verdict
+    assert ("QUEUED", "RUNNING") in asked and ("QUEUED", "CANCELLED") in asked and ("QUEUED", "FAILED") in asked

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -156,6 +157,23 @@ def _backend_env(*, control_dir: Path, packaged: bool, backend_port: int, fronte
     }
 
 
+class LaunchOutcome(Enum):
+    """How a launch ended; ``EXIT_CODES`` gives the launcher's exit code."""
+
+    STOPPED = "stopped"                      # Ctrl+C: a normal stop
+    SERVER_EXITED = "server_exited"          # the backend or frontend stopped on its own
+    SETUP_FAILED = "setup_failed"            # the first-start install could not finish
+    SETUP_INTERRUPTED = "setup_interrupted"  # Ctrl+C during the first-start install
+
+
+EXIT_CODES: dict[LaunchOutcome, int] = {
+    LaunchOutcome.STOPPED: 0,
+    LaunchOutcome.SERVER_EXITED: 1,
+    LaunchOutcome.SETUP_FAILED: 1,
+    LaunchOutcome.SETUP_INTERRUPTED: 130,
+}
+
+
 class ProcessSupervisor:
     """Owns the backend and frontend processes. ``tick()`` handles restart /
     pause / resume requests and returns False when the app should stop (a
@@ -172,6 +190,8 @@ class ProcessSupervisor:
         self._wait = wait or (lambda: None)
         self.backend: subprocess.Popen | None = None
         self.frontend: subprocess.Popen | None = None
+        # (name, exit code) of the server that stopped on its own, once tick() saw it.
+        self.stopped_server: tuple[str, int | None] | None = None
 
     def _take(self, name: str) -> bool:
         path = self.control_dir / name
@@ -211,9 +231,13 @@ class ProcessSupervisor:
             if self.frontend is None:
                 print("[app] Resuming the web interface...")
                 self.frontend = self._start_frontend()
-        for p in self.procs():
-            if p.poll() is not None:
-                print(f"[app] Process {p.args} exited with code {p.returncode}")
+        for name, p in (("backend", self.backend), ("frontend", self.frontend)):
+            if p is not None and p.poll() is not None:
+                self.stopped_server = (name, p.returncode)
+                print(f"[app] The {name} server stopped on its own (exit code {p.returncode}), so BlockFlow "
+                      "Studio is shutting down.")
+                print("[app] Run `python3 scripts/doctor.py` to find the cause, then start it again with "
+                      "`uv run app.py`.")
                 return False
         return True
 
@@ -250,6 +274,14 @@ def _line_buffered_output() -> None:
 
 
 def main() -> None:
+    """Run the app; exit with the code of how the launch ended (EXIT_CODES).
+    A normal stop (Ctrl+C) returns without calling sys.exit, as always."""
+    code = EXIT_CODES[_launch()]
+    if code:
+        sys.exit(code)
+
+
+def _launch() -> LaunchOutcome:
     _line_buffered_output()
     if "--advanced" in sys.argv:
         os.environ["SGS_ADVANCED"] = "1"
@@ -262,7 +294,7 @@ def main() -> None:
     if not packaged:
         code = _auto_setup()
         if code:
-            sys.exit(code)
+            return LaunchOutcome.SETUP_INTERRUPTED if code == 130 else LaunchOutcome.SETUP_FAILED
 
     control_dir = Path(tempfile.mkdtemp(prefix="blockflow-supervisor-"))
     mode = "standalone" if packaged else "dev"
@@ -320,9 +352,11 @@ def main() -> None:
         # Handle update requests; stop when either process exits on its own.
         while supervisor.tick():
             time.sleep(1)
+        return LaunchOutcome.SERVER_EXITED
 
     except KeyboardInterrupt:
         print("\n[app] Shutting down...")
+        return LaunchOutcome.STOPPED
     finally:
         _stop_processes(supervisor.procs())
         shutil.rmtree(control_dir, ignore_errors=True)

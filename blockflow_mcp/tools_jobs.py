@@ -52,6 +52,9 @@ def summarize(job: dict[str, Any], *, roots: list[Path] | None = None) -> dict[s
     summary = {
         "job_id": job.get("job_id"),
         "status": job.get("status"),
+        # What the backend is doing while the job is active (preparing,
+        # submitting, polling, downloading); None once it has finished.
+        "phase": job.get("phase"),
         "source": job.get("source"),
         "provider": job.get("provider"),
         "model": job.get("model"),
@@ -111,7 +114,8 @@ def wait_for(job_ids: list[str], timeout_s: float) -> tuple[dict[str, dict[str, 
 @tool(read_only=True)
 def job_status(job_id: str) -> dict[str, Any]:
     """The current state of one generation job: status (QUEUED, RUNNING,
-    COMPLETED, FAILED, CANCELLED, TIMED_OUT), progress, message, error, the
+    COMPLETED, FAILED, CANCELLED, TIMED_OUT), `phase` while it is active
+    (preparing, submitting, polling, downloading), progress, message, error, the
     provider's actual cost, and outputs (`local` /outputs path, `file_path` on
     this computer, `open_url`, and the expiring `provider_url`)."""
     roots = references.output_folders(get_client())

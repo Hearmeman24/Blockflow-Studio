@@ -8,6 +8,7 @@ served by ``backend/job_routes.py`` at ``/api/jobs*``.
   POST /api/providers/{provider}/validate-key -> {ok, valid, message, balance?, balance_unit?}
   POST /api/generation/validate              -> {ok, issues}
   POST /api/generation/submit                -> {ok: true, job} | 422/400/409 {ok: false, error, kind, issues}
+                                               (job carries `phase` while active; see job_routes.py)
   POST /api/generation/check-references      -> {ok: true, results: [{index, status, detail}]}
        status: ok | missing_local | expired | unreachable | unchecked (provider
        asset://, not probed) | malformed; see references.STATUSES
@@ -115,7 +116,7 @@ async def submit_generation(request: Request) -> JSONResponse:
     except service.GenerationError as err:
         return JSONResponse({"ok": False, "error": err.message, "kind": err.kind, "issues": err.issues},
                             status_code=_STATUS_FOR_KIND.get(err.kind, 400))
-    return JSONResponse({"ok": True, "job": job})
+    return JSONResponse({"ok": True, "job": service.with_phase(job)})
 
 
 @router.post("/api/generation/check-references")

@@ -35,9 +35,9 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(JobStatus) - ACTIVE_JOB_
 
 # What the job store allows today: an active job may be updated to any status
 # (itself included, for an update that changes other fields); a terminal job
-# is final and every update to it is ignored. Declared here; enforced, for
-# now, by ``job_store.JobStore.update_job`` / ``request_cancel`` /
-# ``recover_after_restart`` on their own.
+# is final and every update to it is ignored. Declared here and enforced by
+# ``job_store.JobStore`` (``update_job``, ``request_cancel`` and
+# ``recover_after_restart`` all ask ``can_transition``).
 JOB_TRANSITIONS: Mapping[JobStatus, frozenset[JobStatus]] = {
     status: (frozenset(JobStatus) if status in ACTIVE_JOB_STATUSES else frozenset())
     for status in JobStatus
@@ -51,6 +51,20 @@ def can_transition(current: object, new: object) -> bool:
         return JobStatus(new) in JOB_TRANSITIONS[JobStatus(current)]
     except ValueError:
         return False
+
+
+class JobPhase(StrEnum):
+    """What an active job's worker is doing (``phase`` on job snapshots from
+    ``/api/jobs*``, ``/api/generation/submit`` and the MCP job summaries).
+
+    Kept in memory only, by the generation service (``backend.byok.service``);
+    never stored. ``null`` once the job is terminal. After a restart a job the
+    provider had accepted reports ``polling``."""
+
+    PREPARING = "preparing"      # references uploaded, provider request built
+    SUBMITTING = "submitting"    # the provider create call is in flight
+    POLLING = "polling"          # the provider accepted the task; waiting on it
+    DOWNLOADING = "downloading"  # the provider finished; saving the outputs
 
 
 class ErrorKind(StrEnum):
@@ -174,6 +188,7 @@ def contract() -> dict[str, list[str]]:
         "job_status": _ordered(JobStatus),
         "job_status_active": _ordered(JobStatus, ACTIVE_JOB_STATUSES),
         "job_status_terminal": _ordered(JobStatus, TERMINAL_JOB_STATUSES),
+        "job_phase": _ordered(JobPhase),
         "error_kind": _ordered(ErrorKind),
         "run_status": _ordered(RunStatus),
         "block_result_status": _ordered(BlockResultStatus),

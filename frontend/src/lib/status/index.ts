@@ -19,6 +19,11 @@ export type JobStatus = (typeof JOB_STATUSES)[number]
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = ['QUEUED', 'RUNNING']
 export const TERMINAL_JOB_STATUSES: readonly JobStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']
 
+/** What an active job's backend worker is doing (`phase` on a job snapshot).
+ * Kept in the backend's memory only; absent once the job is terminal. */
+export const JOB_PHASES = ['preparing', 'submitting', 'polling', 'downloading'] as const
+export type JobPhase = (typeof JOB_PHASES)[number]
+
 // ---- Pipeline blocks ----
 
 /** A block's live status in the pipeline runner. */

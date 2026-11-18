@@ -5,6 +5,11 @@
   GET  /api/jobs/{job_id}                 -> {"ok": true, "job": snapshot} | 404
   POST /api/jobs/{job_id}/cancel          -> {"ok": true, "job": snapshot} | 404
 
+Every snapshot served here carries `phase` (backend.statuses.JobPhase) while
+the job is active and a generation worker in this process reports one. The
+phase lives in memory only (backend/byok/service.py) and is merged in as the
+snapshot is served; it is never stored.
+
 SSE framing matches the legacy block events stream: a `retry: 3000` line
 first, then one unnamed `data: <json>` message per change (so a browser
 EventSource fires `onmessage`), and a `: ping` comment as heartbeat.
@@ -19,6 +24,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from backend import job_store
+from backend.byok.service import with_phase
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -50,7 +56,7 @@ def list_jobs(
         status=_filter(status, job_store.JOB_STATUSES, "status", upper=True),
         limit=limit,
     )
-    return JSONResponse({"ok": True, "jobs": jobs})
+    return JSONResponse({"ok": True, "jobs": [with_phase(job) for job in jobs]})
 
 
 # Declared before /{job_id} so "events" is never read as a job id.
@@ -70,6 +76,8 @@ async def events(request: Request) -> StreamingResponse:
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
                     continue
+                if isinstance(event, dict) and isinstance(event.get("job"), dict):
+                    event = {**event, "job": with_phase(event["job"])}
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             store.unsubscribe(queue)
@@ -88,7 +96,7 @@ def get_job(job_id: str) -> JSONResponse:
     job = job_store.get_store().get_job(job_id)
     if job is None:
         return JSONResponse(_NOT_FOUND, status_code=404)
-    return JSONResponse({"ok": True, "job": job})
+    return JSONResponse({"ok": True, "job": with_phase(job)})
 
 
 @router.post("/{job_id}/cancel")
@@ -97,4 +105,4 @@ def cancel_job(job_id: str) -> JSONResponse:
         job = job_store.get_store().request_cancel(job_id)
     except job_store.JobNotFoundError:
         return JSONResponse(_NOT_FOUND, status_code=404)
-    return JSONResponse({"ok": True, "job": job})
+    return JSONResponse({"ok": True, "job": with_phase(job)})

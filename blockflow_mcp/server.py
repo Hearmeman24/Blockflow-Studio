@@ -32,7 +32,10 @@ as runs on the Artifacts page.
 
 generate SPENDS THE USER'S PROVIDER CREDITS. Estimate first, pass
 max_cost_usd, and only run what the user asked for. cancel_job may not stop
-the provider from billing.
+the provider from billing. Never call generate again after a result that
+carries a job_id, even an error: the job exists, so follow it with
+job_status or wait_for_jobs. After a submit error that says the job may have
+been created, check list_jobs (source "mcp") before trying again.
 
 Only these modes exist: text_to_image, image_to_image, text_to_video,
 image_to_video, omni_reference_to_video. References are image, video or audio

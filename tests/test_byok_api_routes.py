@@ -274,6 +274,23 @@ def test_submit_duplicate_client_request_id_returns_same_job(env):
     assert len(creates) == 1
 
 
+def test_submit_reports_the_job_phase(env):
+    client, transports, _ = env
+    settings_store.set_credential("kie_api_key", KIE_KEY)
+    transports["kie"] = gated = GatedTransport("t-ph")
+    a = client.post("/api/generation/submit", json={**VIDEO, "client_request_id": "ph"}).json()["job"]
+    try:
+        assert a.get("phase") in ("preparing", "submitting", "polling")
+        assert gated.polled.wait(10)
+        b = client.post("/api/generation/submit", json={**VIDEO, "client_request_id": "ph"}).json()["job"]
+        assert b["job_id"] == a["job_id"] and b.get("phase") == "polling"
+    finally:
+        job_store.get_store().request_cancel(a["job_id"])
+        gated.gate.set()
+    final = service.wait_for_job(a["job_id"], timeout=10)
+    assert final["status"] == "CANCELLED" and "phase" not in final
+
+
 def test_submit_conflicting_client_request_id_is_409(env):
     client, transports, _ = env
     settings_store.set_credential("kie_api_key", KIE_KEY)

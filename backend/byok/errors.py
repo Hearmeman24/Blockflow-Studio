@@ -57,7 +57,11 @@ class ProviderError(Exception):
         http_status: int | None = None,
         provider_code: str | int | None = None,
         issues: Sequence[Any] = (),
+        cost: Any = None,
     ) -> None:
+        """``cost``: the charge the provider reported for the task (a
+        ``providers.base.Cost``) when the error was raised while reading a
+        finished task's result, so the job can still record it; else None."""
         if kind not in ERROR_KINDS:
             raise ValueError(f"unknown error kind: {kind}")
         super().__init__(message)
@@ -68,6 +72,7 @@ class ProviderError(Exception):
         self.http_status = http_status
         self.provider_code = None if provider_code is None else str(provider_code)
         self.issues = tuple(issues)
+        self.cost = cost
 
     def info(self) -> ErrorInfo:
         return ErrorInfo(self.kind, self.message, self.retryable, self.http_status, self.provider_code,

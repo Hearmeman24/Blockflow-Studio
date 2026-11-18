@@ -263,12 +263,13 @@ class PiAPIAdapter(ProviderAdapter):
                              None if code in (None, 0) else str(code), self.name)
             return PollResult(status, raw, None, (), info, cost=usage_cost(task, status))
         outputs = ()
+        cost = usage_cost(task, status) if status == "COMPLETED" else None
         if status == "COMPLETED":
             outputs = extract_outputs(task.get("output"), expected_kind)
             if not outputs:
+                # Billed all the same: the error carries the charge for the job.
                 raise ProviderError("malformed_response", "PiAPI reported success but returned no output URL.",
-                                    provider=self.name, retryable=False)
-        cost = usage_cost(task, status) if status == "COMPLETED" else None
+                                    provider=self.name, retryable=False, cost=cost)
         return PollResult(status, raw, None, outputs, cost=cost)
 
     # -- network -------------------------------------------------------------------
@@ -283,11 +284,14 @@ class PiAPIAdapter(ProviderAdapter):
         if not isinstance(task_id, str) or not task_id:
             raise ProviderError("malformed_response", "PiAPI accepted the request but returned no task id.",
                                 provider=self.name, retryable=False)
-        initial = None
         if STATUS_MAP.get(str(task.get("status") or "").strip().lower()) in ("COMPLETED", "FAILED"):
             # Seedream is documented as synchronous: the result may already be here.
-            initial = self._poll_result(task, key, request.output_kind)
-        return SubmitResult(task_id, initial)
+            try:
+                return SubmitResult(task_id, self._poll_result(task, key, request.output_kind))
+            except ProviderError as err:
+                # The task exists (and may bill) even when its result is unreadable.
+                return SubmitResult(task_id, initial_error=err)
+        return SubmitResult(task_id)
 
     def poll(self, remote_job_id: str, api_key: str, expected_kind: str | None = None) -> PollResult:
         key = self._require_key(api_key)

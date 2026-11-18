@@ -245,7 +245,8 @@ def test_generate_refuses_on_validation_errors(backend):
     issue = {"code": "prompt_required", "severity": "error", "field": "params.prompt", "message": "Add a prompt."}
     backend.on("POST", "/api/generation/validate", {"ok": False, "issues": [issue]})
     result = generate(**{**T2I, "prompt": ""})
-    assert result == {"ok": False, "error": {"kind": "validation", "message": "Add a prompt.", "issues": [issue]}}
+    assert result == {"ok": False, "error": {"kind": "validation", "message": "Add a prompt.", "issues": [issue]},
+                      "stage": "validate"}
     assert submits(backend) == []
 
 
@@ -529,6 +530,120 @@ def test_search_prompts_empty_query_lists_recent(backend):
     result = search_prompts("")
     assert "q" not in backend.calls[-1]["query"]
     assert [r["prompt"] for r in result["results"]] == ["anything"]
+
+
+# ------------------------------------------------------------------ generate: stages and the job id
+
+
+def _no_retry_hint(result, job_id):
+    hint = result["next"]
+    assert "not call generate again" in hint.lower()
+    assert job_id in hint and "job_status" in hint and "wait_for_jobs" in hint
+
+
+def test_generate_stage_vocabulary_is_declared():
+    from blockflow_mcp import tools_generation
+
+    assert [s.value for s in tools_generation.GenerateStage] == ["validate", "estimate", "submit", "wait"]
+
+
+def test_generate_success_reports_its_stage(backend):
+    queued = generate(**T2I)
+    assert queued["ok"] is True and queued["job_id"] == "j1" and queued["stage"] == "submit"
+    backend.on_job("j1", job("j1", "COMPLETED"))
+    waited = generate(**T2I, wait=True)
+    assert waited["ok"] is True and waited["job_id"] == "j1" and waited["stage"] == "wait"
+
+
+@pytest.mark.parametrize("reply", [
+    ConnectionResetError("reset"),
+    TimeoutError("timed out"),
+])
+def test_losing_the_backend_while_waiting_keeps_the_job_id(backend, reply):
+    backend.on("GET", "/api/jobs/j1", reply)
+    result = generate(**T2I, wait=True)
+    assert result["ok"] is False and result["error"]["kind"] == "backend_unreachable"
+    assert result["job_id"] == "j1" and result["stage"] == "wait"
+    _no_retry_hint(result, "j1")
+    assert len(submits(backend)) == 1
+
+
+def test_a_backend_error_while_waiting_keeps_the_job_id(backend):
+    backend.on("GET", "/api/jobs/j1", {"ok": False, "error": "Database is locked"}, status=500)
+    result = generate(**T2I, wait=True)
+    assert result["ok"] is False and result["error"] == {"kind": "backend", "message": "Database is locked",
+                                                         "status": 500}
+    assert result["job_id"] == "j1" and result["stage"] == "wait"
+    _no_retry_hint(result, "j1")
+
+
+def test_an_unexpected_error_while_summarising_keeps_the_job_id(backend, monkeypatch):
+    backend.on_job("j1", job("j1", "COMPLETED"))
+
+    def broken(*a, **k):
+        raise RuntimeError("bad snapshot")
+
+    monkeypatch.setattr(tools_jobs, "summarize", broken)
+    result = generate(**T2I, wait=True)
+    assert result["ok"] is False and result["error"]["kind"] == "internal"
+    assert result["job_id"] == "j1" and result["stage"] == "wait"
+    _no_retry_hint(result, "j1")
+
+
+@pytest.mark.parametrize("exc", [TimeoutError("timed out"), ConnectionResetError("reset"),
+                                 ConnectionAbortedError("aborted")])
+def test_a_submit_that_may_have_arrived_says_so_and_is_not_retried(backend, exc):
+    backend.on("POST", "/api/generation/submit", exc)
+    result = generate(**T2I, wait=True)
+    assert result["ok"] is False and result["error"]["kind"] == "backend_unreachable"
+    assert result["stage"] == "submit" and "job_id" not in result
+    message = result["error"]["message"]
+    assert "may have" in message and "list_jobs" in message and "Artifacts" in message
+    assert "not call generate again" in result["next"].lower() and "list_jobs" in result["next"]
+    assert len(submits(backend)) == 1
+
+
+def test_a_submit_that_never_arrived_keeps_todays_message(backend):
+    from blockflow_mcp.client import unreachable_message
+
+    backend.on("POST", "/api/generation/submit", ConnectionRefusedError("refused"))
+    result = generate(**T2I)
+    assert result["ok"] is False and result["error"]["kind"] == "backend_unreachable"
+    assert result["error"]["message"] == unreachable_message(BASE, ConnectionRefusedError())
+    assert result["stage"] == "submit" and "job_id" not in result and "next" not in result
+
+
+def test_a_submit_reply_without_a_job_may_still_have_created_one(backend):
+    backend.on("POST", "/api/generation/submit", {"ok": True})
+    result = generate(**T2I)
+    assert result["ok"] is False and result["stage"] == "submit" and "job_id" not in result
+    assert "may have" in result["error"]["message"] and "list_jobs" in result["next"]
+
+
+@pytest.mark.parametrize("args,routes,kind,stage", [
+    ({"max_cost_usd": -1}, {}, "invalid_max_cost", "validate"),
+    ({"timeout_s": "soon"}, {}, "invalid_timeout", "validate"),
+    ({"settings": {"api_key": "x"}}, {}, "key_in_request", "validate"),
+    ({"max_cost_usd": 1.0}, {}, "over_budget", "estimate"),
+    ({}, {("POST", "/api/generation/estimate"): {"ok": True, "estimate": None}}, "unknown_cost", "estimate"),
+    ({}, {("POST", "/api/generation/submit"): ({"ok": False, "kind": "auth", "issues": [], "error": "No key."}, 400)},
+     "auth", "submit"),
+])
+def test_refusals_before_a_job_exists_carry_their_stage_and_no_job_id(backend, args, routes, kind, stage):
+    for (method, path), reply in routes.items():
+        body, status = reply if isinstance(reply, tuple) else (reply, 200)
+        backend.on(method, path, body, status=status)
+    result = generate(**T2I, **args)
+    assert result["ok"] is False and result["error"]["kind"] == kind
+    assert result["stage"] == stage and "job_id" not in result and "next" not in result
+    assert "may have" not in result["error"]["message"]
+
+
+def test_job_summaries_carry_the_phase(backend):
+    backend.on_job("j1", job("j1", "RUNNING", phase="downloading"))
+    assert job_status("j1")["job"]["phase"] == "downloading"
+    backend.on_job("j2", job("j2", "COMPLETED"))
+    assert job_status("j2")["job"]["phase"] is None
 
 
 def test_unreachable_message_points_at_the_clone_not_npm():

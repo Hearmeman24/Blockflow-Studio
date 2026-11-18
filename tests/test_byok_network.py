@@ -583,3 +583,72 @@ def test_urllib_transport_success_passes_method_headers_and_body(monkeypatch):
 def test_retry_backoff_is_bounded_exponential():
     policy = RetryPolicy(max_attempts=5, base_delay_s=1.0, max_delay_s=4.0)
     assert [policy.delay(n) for n in range(1, 5)] == [1.0, 2.0, 4.0, 4.0]
+
+
+# =========================================================================
+# A finished task whose result cannot be read still reports its charge
+# =========================================================================
+
+@pytest.mark.parametrize("result_json", ["", "{bad json", json.dumps({"resultUrls": []})])
+def test_kie_success_without_urls_carries_the_reported_charge(result_json):
+    kie, _ = adapter("kie", _kie_task("success", resultJson=result_json, creditsConsumed=24))
+    with pytest.raises(ProviderError) as exc:
+        kie.poll("t1", KEY)
+    err = exc.value
+    assert (err.kind, err.retryable) == ("malformed_response", False)
+    assert err.cost is not None and err.cost.as_dict() == {"amount": 24.0, "unit": "credits",
+                                                           "usd_equivalent": 0.12}
+
+
+def test_kie_success_without_urls_and_without_a_charge_has_no_cost():
+    kie, _ = adapter("kie", _kie_task("success", resultJson=""))
+    with pytest.raises(ProviderError) as exc:
+        kie.poll("t1", KEY)
+    assert exc.value.kind == "malformed_response" and exc.value.cost is None
+
+
+@pytest.mark.parametrize("output", [None, {}, {"video": ""}])
+def test_piapi_completed_without_output_carries_the_reported_charge(output):
+    usage = {"meta": {"usage": {"type": "point", "frozen": 0, "consume": 600000}}}
+    pi, _ = adapter("piapi", _pi_task("completed", output, **usage))
+    with pytest.raises(ProviderError) as exc:
+        pi.poll("pi-1", KEY)
+    err = exc.value
+    assert (err.kind, err.retryable) == ("malformed_response", False)
+    assert err.cost is not None and err.cost.as_dict() == {"amount": 600000.0, "unit": "points",
+                                                           "usd_equivalent": 0.06}
+
+
+def test_piapi_completed_without_output_and_unsettled_usage_has_no_cost():
+    usage = {"meta": {"usage": {"type": "point", "frozen": 600000, "consume": 0}}}
+    pi, _ = adapter("piapi", _pi_task("completed", None, **usage))
+    with pytest.raises(ProviderError) as exc:
+        pi.poll("pi-1", KEY)
+    assert exc.value.cost is None
+
+
+def test_ordinary_provider_errors_carry_no_cost():
+    assert ProviderError("network", "x").cost is None
+
+
+def test_piapi_unreadable_immediate_result_keeps_the_task_id():
+    """A synchronous result that cannot be read must not lose the task id:
+    the task exists and may bill. submit returns it with the error."""
+    usage = {"meta": {"usage": {"type": "point", "frozen": 0, "consume": 300000}}}
+    payload = _pi_task("Completed", {"image_urls": []}, **usage)
+    payload["data"]["task_id"] = "pi-sync-bad"
+    pi, t = adapter("piapi", payload)
+    result = pi.submit(piapi_request("seedream-5-lite", "text_to_image"), KEY)
+    assert result.remote_job_id == "pi-sync-bad" and result.initial is None
+    err = result.initial_error
+    assert isinstance(err, ProviderError) and err.kind == "malformed_response"
+    assert err.message == "PiAPI reported success but returned no output URL."
+    assert err.cost.as_dict() == {"amount": 300000.0, "unit": "points", "usd_equivalent": 0.03}
+    assert len(t.calls) == 1
+
+
+def test_readable_submits_have_no_initial_error():
+    pi, _ = adapter("piapi", _pi_task("pending"))
+    assert pi.submit(piapi_request(), KEY).initial_error is None
+    kie, _ = adapter("kie", {"code": 200, "msg": "success", "data": {"taskId": "task_abc"}})
+    assert kie.submit(kie_request(), KEY).initial_error is None

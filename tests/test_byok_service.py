@@ -1032,3 +1032,266 @@ def test_no_label_leaves_request_record_unchanged(env):
 def test_invalid_label_is_a_validation_issue(env, label):
     issues = service.validate_generation(image_payload(label=label))
     assert [i["code"] for i in issues if i["severity"] == "error"] == ["invalid_label"]
+
+
+# ================================================================== job phase (in memory only)
+
+
+def _latest_id(env) -> str:
+    return env.store.list_jobs(limit=1)[0]["job_id"]
+
+
+def test_phase_follows_the_worker_and_is_never_stored(env):
+    seen: list[tuple[str, Any]] = []
+    env.store.subscribe_callback(
+        lambda e: seen.append((e["job"]["message"], service.with_phase(e["job"]).get("phase"))))
+    env.scripts["kie"].on_submit = lambda request: seen.append(("submit", service.job_phase(_latest_id(env))))
+    env.scripts["kie"].on_poll = lambda n: seen.append(("poll", service.job_phase(_latest_id(env))))
+    real_open = env.downloads
+
+    def downloading(url, timeout):
+        seen.append(("download", service.job_phase(_latest_id(env))))
+        return real_open(url, timeout)
+
+    env.monkeypatch.setattr(service, "open_url", downloading)
+    env.downloads.files["https://cdn.test/out.mp4"] = ("video/mp4", b"x")
+
+    job = service.submit_generation(video_payload())
+    final = finish(job)
+
+    assert final["status"] == "COMPLETED"
+    assert seen[1:] == [("Preparing references", "preparing"), ("Sending to Kie", "submitting"),
+                        ("submit", "submitting"), ("Waiting for Kie", "polling"), ("poll", "polling"),
+                        ("download", "downloading"), ("Done", None)]
+    assert service.job_phase(job["job_id"]) is None
+    assert "phase" not in service.with_phase(final)
+    import sqlite3
+
+    raw = sqlite3.connect(env.db_path).execute(f"SELECT data FROM {job_store.TABLE}").fetchone()[0]
+    assert "phase" not in json.loads(raw)
+
+
+def test_phase_is_cleared_when_a_job_fails_or_is_cancelled(env):
+    env.scripts["kie"].polls = [failed("provider_failure", "boom")]
+    failed_job = finish(service.submit_generation(video_payload()))
+    assert failed_job["status"] == "FAILED" and service.job_phase(failed_job["job_id"]) is None
+
+    env.scripts["kie"].polls = [running()]
+    env.scripts["kie"].on_poll = lambda n: _cancel_latest(env)
+    cancelled = finish(service.submit_generation(video_payload()))
+    assert cancelled["status"] == "CANCELLED" and service.job_phase(cancelled["job_id"]) is None
+    assert "phase" not in service.with_phase(cancelled)
+
+
+def test_a_job_resumed_after_a_restart_reports_polling(env):
+    gate = Gate()
+    store = env.store
+    job = store.create_job(source="pipeline", provider="kie", model="wan-3.0", mode="text_to_video")
+    store.update_job(job["job_id"], status="RUNNING", remote_job_id="remote-55")
+    assert "phase" not in service.with_phase(store.get_job(job["job_id"]))  # no worker yet
+    env.scripts["kie"].polls = [gate]
+    assert service.resume_pending()["resumed"] == [job["job_id"]]
+    assert gate.polled.wait(WAIT)
+    assert service.with_phase(store.get_job(job["job_id"]))["phase"] == "polling"
+    store.request_cancel(job["job_id"])
+    gate.release.set()
+    service.wait_for_job(job["job_id"], timeout=WAIT)
+    assert service.job_phase(job["job_id"]) is None
+
+
+def test_a_submitted_job_starts_in_the_preparing_phase(env):
+    gate = threading.Event()
+    env.scripts["kie"].on_upload = lambda path: gate.wait(WAIT)
+    (env.out / "in.png").write_bytes(b"IN")
+    job = service.submit_generation(video_payload(
+        mode="image_to_video", references=[{"kind": "image", "local": "/outputs/in.png", "role": "first_frame"}]))
+    assert service.with_phase(job)["phase"] == "preparing"
+    gate.set()
+    finish(job)
+
+
+def test_with_phase_never_mutates_its_argument_and_hides_terminal_jobs(env):
+    job = {"job_id": "x", "status": "COMPLETED"}
+    service._set_phase("x", service.JobPhase.DOWNLOADING)
+    try:
+        assert service.with_phase(job) == {"job_id": "x", "status": "COMPLETED"}
+        active = {"job_id": "x", "status": "RUNNING"}
+        assert service.with_phase(active) == {"job_id": "x", "status": "RUNNING", "phase": "downloading"}
+        assert active == {"job_id": "x", "status": "RUNNING"}
+    finally:
+        service._clear_phase("x")
+
+
+# ================================================================== a finished task's charge is never dropped
+
+
+def _kie_success_without_urls(env, credits):
+    transport = FakeTransport(
+        {"code": 200, "msg": "success", "data": {"taskId": "t-nourl"}},
+        {"code": 200, "data": {"taskId": "t-nourl", "state": "success", "resultJson": "",
+                               "creditsConsumed": credits}},
+    )
+    env.use_transport("kie", transport)
+    return transport
+
+
+def test_kie_success_without_urls_fails_but_keeps_the_reported_cost(env):
+    _kie_success_without_urls(env, 24)
+    final = finish(service.submit_generation(video_payload()))
+    assert final["status"] == "FAILED"
+    assert final["error"]["kind"] == "malformed_response"
+    expected = service.error_message("malformed_response", "Kie reported success but returned no result URLs.",
+                                     "kie")
+    assert final["error"]["message"] == expected == final["message"]
+    assert final["cost"] == {"amount": 24.0, "unit": "credits", "usd_equivalent": 0.12}
+    assert final["price_check"] is None
+    assert final["remote_job_id"] == "t-nourl" and final["outputs"] == []
+
+
+def test_piapi_success_without_output_fails_but_keeps_the_reported_cost(env):
+    usage = {"type": "point", "frozen": 0, "consume": 600000}
+    transport = FakeTransport(
+        {"code": 200, "message": "success", "data": {"task_id": "pi-nourl", "status": "pending"}},
+        {"code": 200, "message": "success", "data": {"task_id": "pi-nourl", "status": "completed",
+                                                     "output": {}, "meta": {"usage": usage}}},
+    )
+    env.use_transport("piapi", transport)
+    final = finish(service.submit_generation(
+        {"provider": "piapi", "model": "seedream-5-lite", "mode": "text_to_image", "params": {"prompt": "a cat"}}))
+    assert final["status"] == "FAILED" and final["error"]["kind"] == "malformed_response"
+    expected = service.error_message("malformed_response", "PiAPI reported success but returned no output URL.",
+                                     "piapi")
+    assert final["error"]["message"] == expected
+    assert final["cost"] == {"amount": 600000.0, "unit": "points", "usd_equivalent": 0.06}
+    assert final["remote_job_id"] == "pi-nourl"
+
+
+# ================================================================== PiAPI immediate result keeps its task id
+
+
+_PI_SYNC_BAD = {"code": 200, "message": "success", "data": {
+    "task_id": "pi-sync-bad", "status": "Completed", "output": {"image_urls": []},
+    "meta": {"usage": {"type": "point", "frozen": 0, "consume": 300000}},
+    "error": {"code": 0, "message": "", "raw_message": ""}}}
+_PI_IMAGE = {"provider": "piapi", "model": "seedream-5-lite", "mode": "text_to_image", "params": {"prompt": "a cat"}}
+
+
+def test_piapi_unreadable_immediate_result_records_the_task_and_fails_as_before(env):
+    transport = FakeTransport(_PI_SYNC_BAD)
+    env.use_transport("piapi", transport)
+    final = finish(service.submit_generation(_PI_IMAGE))
+    assert final["status"] == "FAILED"
+    assert final["remote_job_id"] == "pi-sync-bad"
+    assert final["error"]["kind"] == "malformed_response"
+    expected = service.error_message("malformed_response", "PiAPI reported success but returned no output URL.",
+                                     "piapi")
+    expected += (" PiAPI may have accepted the request anyway; check your PiAPI dashboard before running it "
+                 "again so you are not billed twice.")
+    assert final["error"]["message"] == expected == final["message"]
+    assert final["cost"] == {"amount": 300000.0, "unit": "points", "usd_equivalent": 0.03}
+    assert [c["method"] for c in transport.calls] == ["POST"]  # never polled, never resubmitted
+
+
+def test_piapi_unreadable_immediate_result_after_a_cancel_keeps_the_task_id(env):
+    calls = []
+
+    def transport(method, url, headers, body, timeout):
+        calls.append(method)
+        _cancel_latest(env)
+        return HttpResponse(200, json.dumps(_PI_SYNC_BAD).encode())
+
+    env.use_transport("piapi", transport)
+    final = finish(service.submit_generation(_PI_IMAGE))
+    assert final["status"] == "CANCELLED"
+    assert final["remote_job_id"] == "pi-sync-bad"
+    assert "bill" in final["message"].lower()
+    assert calls == ["POST"]
+
+
+# ================================================================== cancel while the outputs download
+
+
+def _done_with_cost(*urls):
+    from backend.byok.providers.base import Cost
+
+    return PollResult("COMPLETED", "success", 1.0, tuple(Output("image", u) for u in urls), None, None,
+                      Cost(30.0, "credits", 0.15))
+
+
+def _saved_files(env) -> list[Path]:
+    folder = env.out / "byok"
+    return sorted(folder.iterdir()) if folder.exists() else []
+
+
+def _learned(env) -> list[Any]:
+    from backend.byok import learned_prices
+
+    calls: list[Any] = []
+    env.monkeypatch.setattr(learned_prices, "learn", lambda *a: calls.append(a) or None)
+    return calls
+
+
+def _assert_cancelled_after_provider_finished(final):
+    assert final["status"] == "CANCELLED"
+    assert final["outputs"] == []
+    assert final["remote_job_id"] == "remote-1"
+    assert final["cost"] == {"amount": 30.0, "unit": "credits", "usd_equivalent": 0.15}
+    assert final["price_check"] is None
+    msg = final["message"].lower()
+    assert "already finished" in msg and "charged" in msg and "remote-1" in final["message"]
+
+
+def test_cancel_after_the_provider_finished_downloads_nothing(env):
+    learned = _learned(env)
+    env.scripts["kie"].polls = [_done_with_cost("https://cdn.test/a.png")]
+    env.scripts["kie"].on_poll = lambda n: _cancel_latest(env)
+    env.downloads.files["https://cdn.test/a.png"] = ("image/png", b"A")
+    final = finish(service.submit_generation(image_payload()))
+    _assert_cancelled_after_provider_finished(final)
+    assert env.downloads.calls == []
+    assert _saved_files(env) == []
+    assert len(learned) == 1  # the provider's charge for a finished task is still a price observation
+
+
+def test_cancel_during_the_download_of_several_outputs_leaves_no_files(env):
+    learned = _learned(env)
+    env.scripts["kie"].polls = [_done_with_cost("https://cdn.test/a.png", "https://cdn.test/b.png")]
+    env.downloads.files["https://cdn.test/a.png"] = ("image/png", b"A")
+    env.downloads.files["https://cdn.test/b.png"] = ("image/png", b"B")
+    real_open = env.downloads
+
+    def cancel_on_first(url, timeout):
+        if len(real_open.calls) == 0:
+            _cancel_latest(env)
+        return real_open(url, timeout)
+
+    env.monkeypatch.setattr(service, "open_url", cancel_on_first)
+    final = finish(service.submit_generation(image_payload()))
+    _assert_cancelled_after_provider_finished(final)
+    assert real_open.calls == ["https://cdn.test/a.png"]  # stopped before the second output
+    assert _saved_files(env) == []
+    assert len(learned) == 1
+
+
+def test_cancel_that_lands_just_before_the_completed_update_removes_the_files(env):
+    """The last check is the COMPLETED update itself: if the store refuses it
+    because the job is already CANCELLED, every file this job saved is removed."""
+    learned = _learned(env)
+    env.scripts["kie"].polls = [_done_with_cost("https://cdn.test/a.png")]
+    env.downloads.files["https://cdn.test/a.png"] = ("image/png", b"A")
+    real_update = job_store.JobStore.update_job
+
+    def cancel_then_update(self, job_id, /, **fields):
+        if fields.get("status") == "COMPLETED":
+            self.request_cancel(job_id)
+        return real_update(self, job_id, **fields)
+
+    env.monkeypatch.setattr(job_store.JobStore, "update_job", cancel_then_update)
+    keep = env.out / "byok" / "someone-elses.png"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_bytes(b"KEEP")
+    final = finish(service.submit_generation(image_payload()))
+    _assert_cancelled_after_provider_finished(final)
+    assert env.downloads.calls == ["https://cdn.test/a.png"]
+    assert _saved_files(env) == [keep]
+    assert len(learned) == 1

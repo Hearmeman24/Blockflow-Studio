@@ -109,8 +109,14 @@ def finite_number(value: Any) -> float | None:
 
 @dataclass(frozen=True)
 class SubmitResult:
+    """The provider accepted the task ``remote_job_id``. ``initial`` is its
+    result when the provider answered synchronously; ``initial_error`` is set
+    instead when that synchronous result could not be read (the task still
+    exists and may bill, so the id must not be lost)."""
+
     remote_job_id: str
     initial: PollResult | None = None
+    initial_error: ProviderError | None = None
 
 
 @dataclass(frozen=True)

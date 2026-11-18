@@ -3,6 +3,7 @@
 import {
   ACTIVE_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
+  type JobPhase,
   type JobStatus,
   type RunStatus,
   type SavedBlockStatus,
@@ -73,6 +74,9 @@ export interface JobSnapshot {
   cost?: JobCost | null
   /** Set when the job finished with a cost and the ledger had a price for it. */
   price_check?: PriceCheck | null
+  /** What the backend worker is doing while the job is active (in memory
+   * only on the server). Absent on terminal jobs and from older servers. */
+  phase?: JobPhase | null
 }
 
 // ---- Run History ----

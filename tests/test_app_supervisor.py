@@ -7,8 +7,11 @@ ProcessSupervisor are run together here, with fake processes.
 from __future__ import annotations
 
 import importlib.util
+import sys
 import threading
 from pathlib import Path
+
+import pytest
 
 from backend.app_update import supervisor as backend_side
 
@@ -96,6 +99,87 @@ def test_pause_without_a_supervisor_answers_false(tmp_path):
     assert side.pause_frontend(timeout=0.01) is False
     side.restart()  # a no-op, never raises
     assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("which,code", [("backend", 1), ("frontend", 137), ("backend", -9)])
+def test_a_server_that_stops_on_its_own_is_named_with_its_code(tmp_path, capsys, which, code):
+    app, sup, started, stopped = make(tmp_path)
+    getattr(sup, which).returncode = code
+    assert sup.tick() is False
+    assert sup.stopped_server == (which, code)
+    out = capsys.readouterr().out
+    line = next(ln for ln in out.splitlines() if which in ln)
+    assert line.startswith("[app] ") and f"exit code {code}" in line
+    assert "python3 scripts/doctor.py" in out
+
+
+def test_launch_outcomes_map_to_exit_codes():
+    app = _load_app()
+    assert {o.name: app.EXIT_CODES[o] for o in app.LaunchOutcome} == {
+        "STOPPED": 0, "SERVER_EXITED": 1, "SETUP_FAILED": 1, "SETUP_INTERRUPTED": 130}
+
+
+class _Proc:
+    def __init__(self, name):
+        self.args, self.returncode, self.name = [name], None, name
+
+    def poll(self):
+        return self.returncode
+
+
+def _run_main(app, monkeypatch, tick):
+    monkeypatch.setattr(sys, "argv", ["app.py"])
+    monkeypatch.delenv("BLOCKFLOW_PACKAGED", raising=False)
+    monkeypatch.setenv("BLOCKFLOW_NO_OPEN", "1")
+    monkeypatch.setattr(app, "_auto_setup", lambda *a, **k: 0)
+    monkeypatch.setattr(app, "_wait_for", lambda *a, **k: True)
+    monkeypatch.setattr(app, "_stop_processes", lambda procs: None)
+    monkeypatch.setattr(app.time, "sleep", lambda s: None)
+
+    def start(self):
+        self.backend, self.frontend = _Proc("backend"), _Proc("frontend")
+
+    monkeypatch.setattr(app.ProcessSupervisor, "start", start)
+    monkeypatch.setattr(app.ProcessSupervisor, "tick", tick)
+    app.main()
+
+
+def test_main_exits_1_when_a_server_stops_on_its_own(monkeypatch, capsys):
+    app = _load_app()
+    real_tick = app.ProcessSupervisor.tick
+
+    def tick(self):
+        self.backend.returncode = 3
+        return real_tick(self)
+
+    with pytest.raises(SystemExit) as exc:
+        _run_main(app, monkeypatch, tick)
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "backend" in out and "exit code 3" in out and "python3 scripts/doctor.py" in out
+
+
+def test_ctrl_c_still_stops_cleanly_with_exit_code_0(monkeypatch, capsys):
+    app = _load_app()
+
+    def tick(self):
+        raise KeyboardInterrupt
+
+    try:
+        _run_main(app, monkeypatch, tick)
+    except SystemExit as exc:  # pragma: no cover - only if main chose to exit explicitly
+        assert exc.code in (0, None)
+    assert "Shutting down" in capsys.readouterr().out
+
+
+def test_ctrl_c_during_install_still_exits_130(monkeypatch):
+    app = _load_app()
+    monkeypatch.setattr(sys, "argv", ["app.py"])
+    monkeypatch.delenv("BLOCKFLOW_PACKAGED", raising=False)
+    monkeypatch.setattr(app, "_auto_setup", lambda *a, **k: 130)
+    with pytest.raises(SystemExit) as exc:
+        app.main()
+    assert exc.value.code == 130
 
 
 def test_unexpected_exits_still_shut_down(tmp_path):

@@ -17,6 +17,12 @@
     "CANCELLED",
     "TIMED_OUT"
   ],
+  "job_phase": [
+    "preparing",
+    "submitting",
+    "polling",
+    "downloading"
+  ],
   "error_kind": [
     "auth",
     "insufficient_credits",

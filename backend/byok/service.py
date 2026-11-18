@@ -6,6 +6,8 @@ Public API (no FastAPI imports; callable from routes, MCP or scripts):
 - ``submit_generation(payload) -> job snapshot`` (raises ``GenerationError``)
 - ``wait_for_job(job_id, timeout=None) -> job snapshot | None``
 - ``resume_pending() -> {"failed": [...], "resumed": [...]}``
+- ``job_phase(job_id)``, ``with_phase(job snapshot)``: what an active job's
+  worker is doing (``backend.statuses.JobPhase``), kept in memory only
 - ``get_api_key(provider)``, ``configured_providers()``, ``shutdown()``
 
 Keys are read server-side from the settings store, passed only to adapter
@@ -37,7 +39,7 @@ from backend.byok.errors import ProviderError, redact
 from backend.byok.http import USER_AGENT
 from backend.byok.providers import PollResult, SubmitResult, get_adapter
 from backend.byok.spec import PROVIDER_NAMES, Reference, canonical_reference, to_jsonable
-from backend.statuses import JobStatus, StorageMode
+from backend.statuses import JobPhase, JobStatus, StorageMode
 
 logger = logging.getLogger(__name__)
 
@@ -366,6 +368,7 @@ def _dispatch(job_id: str, fn: Callable[[], None]) -> bool:
         try:
             fn()
         finally:
+            _clear_phase(job_id)
             with _state_lock:
                 _attached.discard(job_id)
 
@@ -373,6 +376,41 @@ def _dispatch(job_id: str, fn: Callable[[], None]) -> bool:
     with _state_lock:
         _futures[job_id] = future
     return True
+
+
+# ------------------------------------------------------------------ job phase
+
+# What each job's worker in this process is doing. Process-local and never
+# stored (no column, not in the job's JSON): the routes merge it into the
+# snapshots they serve. A job without an entry (finished, or never run by a
+# worker here) reports no phase.
+_phase_lock = threading.Lock()
+_phases: dict[str, JobPhase] = {}
+
+
+def _set_phase(job_id: str, phase: JobPhase) -> None:
+    with _phase_lock:
+        _phases[job_id] = JobPhase(phase)
+
+
+def _clear_phase(job_id: str) -> None:
+    with _phase_lock:
+        _phases.pop(job_id, None)
+
+
+def job_phase(job_id: str) -> JobPhase | None:
+    with _phase_lock:
+        return _phases.get(job_id)
+
+
+def with_phase(job: Any) -> Any:
+    """``job`` plus ``phase`` when it is active and a worker here reports
+    one; otherwise ``job`` itself, unchanged (terminal jobs carry no phase).
+    Never mutates its argument."""
+    if not isinstance(job, Mapping) or job.get("status") not in job_store.ACTIVE_STATUSES:
+        return job
+    phase = job_phase(str(job.get("job_id")))
+    return job if phase is None else {**job, "phase": phase.value}
 
 
 def wait_for_job(job_id: str, timeout: float | None = None) -> dict[str, Any] | None:
@@ -437,6 +475,7 @@ def submit_generation(payload: Any) -> dict[str, Any]:
             raise GenerationError("validation", f"The request could not be stored: {exc}",
                                   [_issue("invalid_payload", "", str(exc))]) from None
         job_id = job["job_id"]
+        _set_phase(job_id, JobPhase.PREPARING)
         _dispatch(job_id, lambda: _run_new(job_id, plan))
     return job
 
@@ -449,16 +488,17 @@ class _Stop(Exception):
 
 
 def _annotate_cancelled(store: job_store.JobStore, job_id: str, message: str,
-                        remote_job_id: str | None = None) -> None:
+                        remote_job_id: str | None = None, cost: dict[str, Any] | None = None) -> None:
     """Explain a cancel on a job that is already CANCELLED (and keep the
-    provider task id if the cancel landed while the submit was in flight)."""
+    provider task id if the cancel landed while the submit was in flight, and
+    the provider-reported charge if the task had already finished)."""
     try:
         job = store.get_job(job_id)
         if job is None or job.get("status") != JobStatus.CANCELLED:
             return
         if job.get("remote_job_id"):
             remote_job_id = None
-        store.annotate(job_id, message=message, remote_job_id=remote_job_id)
+        store.annotate(job_id, message=message, remote_job_id=remote_job_id, cost=cost)
     except (job_store.JobNotFoundError, ValueError):
         pass
 
@@ -473,6 +513,14 @@ def _cancel_after_submit(store: job_store.JobStore, job_id: str, provider: str, 
     _annotate_cancelled(store, job_id,
                         f"Cancelled. {p} may still finish task {remote_job_id} and bill it: {p} offers no "
                         "cancel for this model. BlockFlow will not download the result.", remote_job_id)
+
+
+def _cancel_after_finish(store: job_store.JobStore, job_id: str, provider: str, remote_job_id: str,
+                         cost: dict[str, Any] | None) -> None:
+    p = _pname(provider)
+    _annotate_cancelled(store, job_id,
+                        f"Cancelled. {p} had already finished task {remote_job_id} and may have charged for it; "
+                        "BlockFlow did not keep the result.", remote_job_id, cost)
 
 
 def _update(store: job_store.JobStore, job_id: str, **fields: Any) -> dict[str, Any]:
@@ -511,6 +559,22 @@ def _cost(result: PollResult) -> dict[str, Any] | None:
     return result.cost.as_dict() if result.cost is not None else None
 
 
+def _error_cost(err: ProviderError) -> dict[str, Any] | None:
+    """The charge a provider error carries (a finished task whose result could
+    not be read), as stored on the job."""
+    cost = getattr(err, "cost", None)
+    return cost.as_dict() if cost is not None else None
+
+
+def _submit_failure_message(err: ProviderError, provider: str, key: str | None) -> str:
+    message = error_message(err.kind, err.message, provider, key)
+    if err.kind in _AMBIGUOUS_SUBMIT:
+        p = _pname(provider)
+        message += (f" {p} may have accepted the request anyway; check your {p} dashboard before "
+                    "running it again so you are not billed twice.")
+    return message
+
+
 def _resolve_for_upload(value: str) -> Path:
     try:
         return references.resolve_local(value)
@@ -536,21 +600,33 @@ def _run_new(job_id: str, plan: _Plan) -> None:
         request = adapter.build_request(plan.model, plan.mode, plan.params, refs)
         record = {**plan.request_record(),
                   "provider_request": {"method": request.method, "url": request.url, "body": dict(request.body)}}
+        _set_phase(job_id, JobPhase.SUBMITTING)
         _update(store, job_id, request=record, message=f"Sending to {_pname(plan.provider)}")
         if store.is_cancel_requested(job_id):
             raise _Stop
         try:
             result: SubmitResult = adapter.submit(request, key)
         except ProviderError as err:
-            message = error_message(err.kind, err.message, plan.provider, key)
-            if err.kind in _AMBIGUOUS_SUBMIT:
-                p = _pname(plan.provider)
-                message += (f" {p} may have accepted the request anyway; check your {p} dashboard before "
-                            "running it again so you are not billed twice.")
             logger.info("byok job %s: submit failed (%s): %s", job_id, err.kind, redact(err.message, key))
-            _fail(store, job_id, err.kind, message)
+            _fail(store, job_id, err.kind, _submit_failure_message(err, plan.provider, key))
             return
         remote_job_id = result.remote_job_id
+        initial_error = getattr(result, "initial_error", None)
+        if initial_error is not None:
+            # The provider created the task but its immediate result is
+            # unreadable: keep the task id (it may bill), then fail as before.
+            err = initial_error
+            logger.info("byok job %s: immediate result unreadable (%s): %s", job_id, err.kind,
+                        redact(err.message, key))
+            message = _submit_failure_message(err, plan.provider, key)
+            cost = _error_cost(err)
+            job = store.update_job(job_id, remote_job_id=remote_job_id, status=JobStatus.FAILED,
+                                   error={"kind": err.kind, "message": message}, message=message,
+                                   **({"cost": cost} if cost is not None else {}))
+            if job["status"] == JobStatus.CANCELLED:
+                _cancel_after_submit(store, job_id, plan.provider, remote_job_id)
+            return
+        _set_phase(job_id, JobPhase.POLLING)
         try:
             _update(store, job_id, remote_job_id=remote_job_id, remote_status="submitted",
                     message=f"Waiting for {_pname(plan.provider)}")
@@ -620,12 +696,13 @@ def _follow(store: job_store.JobStore, job_id: str, adapter: Any, key: str, prov
                     errors += 1
                     if not err.retryable or errors >= MAX_POLL_ERRORS:
                         logger.info("byok job %s: poll failed (%s): %s", job_id, err.kind, redact(err.message, key))
-                        _fail(store, job_id, err.kind, error_message(err.kind, err.message, provider, key))
+                        _fail(store, job_id, err.kind, error_message(err.kind, err.message, provider, key),
+                              _error_cost(err))
                         return
                     result = None
             if result is not None:
                 if result.status == JobStatus.COMPLETED:
-                    _complete(store, job_id, provider, result, expected_kind, key)
+                    _complete(store, job_id, provider, result, expected_kind, key, remote_job_id)
                     return
                 if result.status == JobStatus.FAILED:
                     info = result.error
@@ -684,6 +761,15 @@ def _reserve(dest: Path, stem: str, ext: str) -> Path:
 
 def download_output(url: str, kind: str, stem: str) -> str:
     """Stream ``url`` into the byok output folder. Returns the ``/outputs/...`` URL."""
+    return _local_url(_download(url, kind, stem))
+
+
+def _local_url(path: Path) -> str:
+    return f"/outputs/{OUTPUT_SUBDIR}/{quote(path.name)}"
+
+
+def _download(url: str, kind: str, stem: str) -> Path:
+    """Stream ``url`` into the byok output folder. Returns the saved file."""
     if not references.is_http_url(url):
         raise ValueError("output URL is not http(s)")
     dest = output_dir()
@@ -710,18 +796,45 @@ def download_output(url: str, kind: str, stem: str) -> str:
         os.replace(part, final)
     finally:
         part.unlink(missing_ok=True)
-    return f"/outputs/{OUTPUT_SUBDIR}/{quote(final.name)}"
+    return final
+
+
+def _remove_files(job_id: str, paths: Sequence[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("byok job %s: could not remove discarded output %s (%s)", job_id, path.name,
+                           type(exc).__name__)
 
 
 def _complete(store: job_store.JobStore, job_id: str, provider: str, result: PollResult, expected_kind: str,
-              key: str) -> None:
+              key: str, remote_job_id: str) -> None:
+    """Download the outputs and mark the job COMPLETED.
+
+    A cancel can land after the provider finished: it is checked before each
+    download, and the COMPLETED update itself is the last check (the store
+    refuses it once the job is CANCELLED). Either way no file this job saved
+    is kept, and the cancelled job records the provider-reported charge with
+    a message saying the provider had already finished. The charge is still
+    learned as a price observation: the provider did finish the task."""
+    _set_phase(job_id, JobPhase.DOWNLOADING)
+    cost = _cost(result)
     outputs: list[dict[str, str]] = []
+    saved: list[Path] = []
     failures = 0
     for index, out in enumerate(result.outputs, start=1):
+        if store.is_cancel_requested(job_id):
+            _remove_files(job_id, saved)
+            _price_check(store, job_id, cost)
+            _cancel_after_finish(store, job_id, provider, remote_job_id, cost)
+            return
         kind = out.kind if out.kind in job_store.OUTPUT_KINDS else expected_kind
         entry = {"kind": kind, "url": out.url}
         try:
-            entry["local_url"] = download_output(out.url, kind, f"{job_id}_{index}")
+            path = _download(out.url, kind, f"{job_id}_{index}")
+            saved.append(path)
+            entry["local_url"] = _local_url(path)
         except Exception as exc:  # noqa: BLE001 - keep the remote URL
             failures += 1
             logger.warning("byok job %s: could not save output %d from %s: %s", job_id, index,
@@ -732,10 +845,12 @@ def _complete(store: job_store.JobStore, job_id: str, provider: str, result: Pol
                    f"{_pname(provider)} links expire, so save them soon.")
     else:
         message = "Done"
-    cost = _cost(result)
-    store.update_job(job_id, status=JobStatus.COMPLETED, outputs=outputs, progress=1.0,
-                     remote_status=result.remote_status or None, error=None, message=message,
-                     cost=cost, price_check=_price_check(store, job_id, cost))
+    job = store.update_job(job_id, status=JobStatus.COMPLETED, outputs=outputs, progress=1.0,
+                           remote_status=result.remote_status or None, error=None, message=message,
+                           cost=cost, price_check=_price_check(store, job_id, cost))
+    if job["status"] != JobStatus.COMPLETED:
+        _remove_files(job_id, saved)
+        _cancel_after_finish(store, job_id, provider, remote_job_id, cost)
 
 
 # ------------------------------------------------------------------ resume
@@ -775,6 +890,7 @@ def _run_resumed(job: dict[str, Any]) -> None:
             expected = ledger.get_model(job["model"]).output
         except KeyError:
             expected = "image"
+        _set_phase(job_id, JobPhase.POLLING)  # the provider accepted it before the restart
         elapsed = max(0.0, time.time() - float(job.get("created_at") or time.time()))
         deadline = clock() + max(0.0, JOB_TIMEOUT_S - elapsed)
         _update(store, job_id, status=JobStatus.RUNNING, message=f"Reconnected to {_pname(provider)}")

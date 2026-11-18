@@ -794,3 +794,47 @@ def test_rows_written_before_cost_existed_read_back_with_null_cost(db_path):
                                cost={"amount": 3, "unit": "credits", "usd_equivalent": 0.015})
     assert updated["cost"]["amount"] == 3.0
     assert store.request_cancel("old-2")["cost"] is None
+
+
+# ---------------------------------------------------------------- restart during submit
+
+
+def test_restart_while_the_submit_was_in_flight_warns_about_a_possible_charge(store, db_path):
+    """A job that stored its provider request but has no remote id may have
+    been accepted and billed: it still fails as `interrupted`, but its message
+    says so instead of claiming the provider never accepted it."""
+    sending = _create(store)
+    store.update_job(sending["job_id"], status="RUNNING", message="Sending to Kie",
+                     request={"params": {"prompt": "x"},
+                              "provider_request": {"method": "POST", "url": "https://api.kie.ai/x", "body": {}}})
+    preparing = _create(store)
+    store.update_job(preparing["job_id"], status="RUNNING", message="Preparing references")
+
+    summary = JobStore(db_path).recover_after_restart()
+    assert sorted(summary["failed"]) == sorted([sending["job_id"], preparing["job_id"]])
+
+    sent = store.get_job(sending["job_id"])
+    assert sent["status"] == "FAILED" and sent["error"]["kind"] == "interrupted"
+    assert sent["error"]["message"] == job_store.INTERRUPTED_DURING_SUBMIT_MESSAGE == sent["message"]
+    text = sent["message"].lower()
+    assert "may have accepted" in text and "charged" in text and "dashboard" in text
+    assert "before the provider accepted" not in text
+
+    early = store.get_job(preparing["job_id"])
+    assert early["status"] == "FAILED" and early["error"]["kind"] == "interrupted"
+    assert early["error"]["message"] == job_store.INTERRUPTED_MESSAGE == early["message"]
+
+
+# ---------------------------------------------------------------- annotate: cost
+
+
+def test_annotate_records_a_cost_on_a_terminal_job_only_when_it_has_none(store):
+    job = _create(store)
+    store.request_cancel(job["job_id"])
+    cost = {"amount": 12.0, "unit": "credits", "usd_equivalent": 0.06}
+    snap = store.annotate(job["job_id"], message="late", cost=cost)
+    assert snap["cost"] == cost and snap["status"] == "CANCELLED" and snap["outputs"] == []
+    again = store.annotate(job["job_id"], cost={"amount": 99.0, "unit": "credits", "usd_equivalent": None})
+    assert again["cost"] == cost
+    with pytest.raises(ValueError):
+        store.annotate(job["job_id"], cost={"amount": -1, "unit": "credits"})

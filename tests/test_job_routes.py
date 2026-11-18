@@ -262,3 +262,55 @@ def test_main_app_mounts_job_routes():
 
 # Startup recovery + resume now lives in main._resume_generation_jobs_on_startup
 # (byok_service.resume_pending); see tests/test_byok_api_routes.py.
+
+
+# ---------------------------------------------------------------- phase (in memory only)
+
+
+@pytest.fixture
+def phased(store):
+    """A RUNNING job whose (in-memory) phase is `polling`."""
+    from backend.byok import service
+    from backend.statuses import JobPhase
+
+    job = _create(store)
+    store.update_job(job["job_id"], status="RUNNING", remote_job_id="task-p")
+    service._set_phase(job["job_id"], JobPhase.POLLING)
+    yield job
+    service._clear_phase(job["job_id"])
+
+
+def test_get_and_list_report_the_phase_of_an_active_job(client, store, phased):
+    got = client.get(f"/api/jobs/{phased['job_id']}").json()["job"]
+    assert got["phase"] == "polling"
+    assert {k: v for k, v in got.items() if k != "phase"} == store.get_job(phased["job_id"])
+    listed = client.get("/api/jobs").json()["jobs"]
+    assert [j.get("phase") for j in listed] == ["polling"]
+    assert "phase" not in store.get_job(phased["job_id"])  # never stored
+
+
+def test_a_terminal_job_reports_no_phase_even_with_a_stale_entry(client, store, phased):
+    cancelled = client.post(f"/api/jobs/{phased['job_id']}/cancel").json()["job"]
+    assert cancelled["status"] == "CANCELLED" and "phase" not in cancelled
+    assert "phase" not in client.get(f"/api/jobs/{phased['job_id']}").json()["job"]
+
+
+def test_events_carry_the_phase(store, phased):
+    async def scenario():
+        sse = _SSEClient(_sse_app(), "/api/jobs/events")
+        task = sse.open()
+        assert await sse.next_frame() == "retry: 3000"
+        assert await sse.next_frame() == ": ping"
+        worker = threading.Thread(target=store.update_job, args=(phased["job_id"],),
+                                  kwargs={"progress": 0.3})
+        worker.start()
+        worker.join()
+        frame = await sse.next_frame()
+        while frame == ": ping":
+            frame = await sse.next_frame()
+        sse.disconnect()
+        await asyncio.wait_for(task, timeout=5)
+        return frame
+
+    event = json.loads(asyncio.run(scenario())[len("data: "):])
+    assert event["job"]["progress"] == 0.3 and event["job"]["phase"] == "polling"

@@ -12,6 +12,7 @@ import functools
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,11 +29,25 @@ Transport = Callable[[str, str, dict[str, str], bytes | None, float], tuple[int,
 
 
 class BackendError(Exception):
-    """A request the backend could not answer usefully (not running, bad reply)."""
+    """A request the backend could not answer usefully (not running, bad reply).
 
-    def __init__(self, kind: str, message: str, status: int | None = None) -> None:
+    ``may_have_arrived`` is True when the request may have reached the backend
+    before it failed (a timeout or a dropped connection, or an answer that was
+    not JSON), so whatever it asked for may have happened; False when it
+    certainly did not (connection refused, unknown host)."""
+
+    def __init__(self, kind: str, message: str, status: int | None = None, *,
+                 may_have_arrived: bool = False) -> None:
         super().__init__(message)
         self.kind, self.message, self.status = kind, message, status
+        self.may_have_arrived = may_have_arrived
+
+
+def _never_sent(exc: BaseException) -> bool:
+    """True when ``exc`` proves the request never reached the backend."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) and not isinstance(
+        exc, urllib.error.HTTPError) else exc
+    return isinstance(reason, (ConnectionRefusedError, socket.gaierror, ValueError, str))
 
 
 def urllib_transport(method: str, url: str, headers: dict[str, str], body: bytes | None,
@@ -72,12 +87,13 @@ class BackendClient:
         except BackendError:
             raise
         except (OSError, ValueError) as exc:
-            raise BackendError("backend_unreachable", unreachable_message(self.base_url, exc)) from None
+            raise BackendError("backend_unreachable", unreachable_message(self.base_url, exc),
+                               may_have_arrived=not _never_sent(exc)) from None
         try:
             parsed = json.loads(raw.decode("utf-8")) if raw else {}
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise BackendError("bad_response", f"BlockFlow answered {method} {path} with HTTP {status} and a body "
-                                               "that is not JSON.", status) from None
+                                               "that is not JSON.", status, may_have_arrived=True) from None
         return status, parsed
 
     def get(self, path: str, **kw: Any) -> tuple[int, Any]:
@@ -144,6 +160,15 @@ def scrub(value: Any) -> Any:
     return value
 
 
+def failure_result(exc: Exception) -> dict[str, Any]:
+    """The structured result for an exception a tool raised (see ``tool``)."""
+    if isinstance(exc, ToolFailure):
+        return scrub(exc.result)
+    if isinstance(exc, BackendError):
+        return error(exc.kind, exc.message, **({"status": exc.status} if exc.status else {}))
+    return error("internal", f"The MCP server hit an unexpected error: {type(exc).__name__}: {exc}")
+
+
 def tool(*, read_only: bool, spends: bool = False) -> Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]]:
     """Mark a tool function and turn failures into structured results.
 
@@ -154,12 +179,8 @@ def tool(*, read_only: bool, spends: bool = False) -> Callable[[Callable[..., di
         def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
             try:
                 return scrub(fn(*args, **kwargs))
-            except ToolFailure as failure:
-                return scrub(failure.result)
-            except BackendError as err:
-                return error(err.kind, err.message, **({"status": err.status} if err.status else {}))
             except Exception as exc:  # noqa: BLE001 - a tool answers, it never dumps a traceback
-                return error("internal", f"The MCP server hit an unexpected error: {type(exc).__name__}: {exc}")
+                return failure_result(exc)
 
         wrapper.mcp_annotations = {  # type: ignore[attr-defined]
             "readOnlyHint": read_only,

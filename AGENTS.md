@@ -44,7 +44,9 @@ needs their explicit yes.
    python scripts/setup.py` repairs the install. Then run `uv run python
    scripts/doctor.py --expect-running`.
    *Success:* `backend` and `frontend` are `ok`; the app answers at
-   <http://localhost:47300>.
+   <http://localhost:47300>. If either server stops on its own, `app.py`
+   prints an `[app]` line naming it and its exit code and exits with code 1
+   (Ctrl+C exits 0); run `python3 scripts/doctor.py`, then start it again.
 3. **The user enters their key.** Tell the user to open
    <http://localhost:47300> and enter a Kie and/or PiAPI key in the Welcome
    dialog, or later in **Settings, then API keys**. Never ask for a key in chat,
