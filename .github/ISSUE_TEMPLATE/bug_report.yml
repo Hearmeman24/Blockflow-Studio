@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in BlockFlow Studio did not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. BlockFlow Studio is beta software, and bug reports help.
+
+        **Never paste an API key** (Kie, PiAPI, OpenRouter) or a screenshot that shows one. If you pasted one by mistake, delete it here and rotate the key with the provider.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The version from Settings, or `git rev-parse --short HEAD` in your checkout.
+      placeholder: "0.1.0-beta.1 or a commit such as 80c3067"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - git clone, then uv run app.py
+        - git clone, set up by a coding agent
+        - Downloaded release archive
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: generation
+    attributes:
+      label: Provider, model and mode (if it is about a generation)
+      placeholder: "Kie, Seedream 5 Pro, Image to Image"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Include the exact error message, if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Run `python3 scripts/doctor.py --json` in your checkout and paste the result. It contains no keys; paths in your home folder are shown as ~.
+      render: json
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Backend output from the terminal running `uv run app.py`, the browser console, or screenshots. Check them for keys before pasting.

@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest a block, model, provider or improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want
+      description: One or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The use case. Specific is better than general.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you have tried
+      description: Existing blocks, settings or workarounds, and why they do not fit. Could a private block (AGENTS.md, "Adding a block") do it?
+  - type: textarea
+    id: sketch
+    attributes:
+      label: Sketch (optional)
+      description: What the block, setting or MCP tool could look like.

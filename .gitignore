@@ -1,0 +1,49 @@
+__pycache__/
+.DS_Store
+.env
+node_modules/
+.next/
+venv/
+.venv/
+
+# Runtime data (local only)
+run_history.db
+run_history.db.backup*
+job_history.json
+output/
+output
+prompt_writer_settings.json
+prompt_library.json
+
+# Flow data (gitignored, personal pipelines)
+flows/*.flow.json
+
+# Private block overlay (local-only blocks that never enter the public OSS build)
+private_blocks/
+# Codegen output for private blocks (regenerated on every `npm run predev`)
+frontend/src/components/pipeline/custom_blocks/generated_private/
+# _register.ts is auto-generated AND its import set depends on whether
+# private_blocks/ exists on the current machine. Committing it caused fresh
+# checkouts to fail with "Module not found: ./generated_private/<slug>" when
+# codegen hadn't populated those files yet.
+frontend/src/components/pipeline/custom_blocks/_register.ts
+
+# Scratch notes
+/architecture.md
+frontend/architecture.md
+issues.md
+frontend/issues.md
+logs.txt
+
+# Local databases
+*.db
+
+# Screenshots & runtime caches
+BlockFlow_ScreenCapture/
+
+# Private working notes (not part of the repository)
+internal_docs/
+
+# Local agent instructions; AGENTS.md is the shared file
+CLAUDE.md
+CLAUDE.local.md

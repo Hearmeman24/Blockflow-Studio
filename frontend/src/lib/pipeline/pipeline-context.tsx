@@ -1,0 +1,1652 @@
+'use client'
+
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from 'react'
+import {
+  type Pipeline,
+  type PipelineBlock,
+  type BlockStatus,
+  type BlockState,
+  type IterationState,
+  type SourceMode,
+} from './types'
+import {
+  type PortKind,
+  type BlockExecuteResult,
+  type NodeTypeDef,
+  canonicalizePortKind,
+  bindingRequiresUpstream,
+  getBlockDef,
+  getNodeType,
+  getValidNextTypes,
+  getStarterTypes,
+} from './registry'
+import { toast } from 'sonner'
+import {
+  exportFlow as exportFlowIO,
+  importFlowWithReport,
+  type FlowImportOutcome,
+} from './flow-io'
+import { findRunBlockingUnsupportedBlocks, formatUnsupportedRunMessage } from './legacy-blocks'
+import { createRunSnapshot } from './run-snapshot'
+import { selectedSourceIds } from './source-resolution'
+import { findRunBlockers, formatRunBlockerMessage } from './run-blockers'
+import {
+  walkBlocks,
+  findBlockInTree,
+  findBlockById,
+  removeBlockFromTree,
+} from './tree-utils'
+import { usePipelineTabs, type TabActions } from './tabs-context'
+import { saveRun } from '@/lib/api'
+import type { BlockResult, RunEntry } from '@/lib/types'
+import { hasPendingJobRunForBlock } from './job-pending'
+import { abortPoll } from './job-poller'
+
+// ---- Persistence (sessionStorage, keyed by tabId) ----
+
+const PIPELINE_PREFIX = 'pipeline_v2_'
+const PIPELINE_RUNTIME_PREFIX = 'pipeline_runtime_v2_'
+
+const EMPTY_PIPELINE: Pipeline = { id: 'default', blocks: [] }
+
+function loadPipeline(tabId: string): Pipeline {
+  if (typeof window === 'undefined') return EMPTY_PIPELINE
+  try {
+    const raw = sessionStorage.getItem(`${PIPELINE_PREFIX}${tabId}`)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (parsed.steps && !parsed.blocks) {
+        parsed.blocks = parsed.steps
+        delete parsed.steps
+      }
+      return parsed
+    }
+  } catch { /* ignore */ }
+  return EMPTY_PIPELINE
+}
+
+function savePipeline(tabId: string, pipeline: Pipeline) {
+  try {
+    sessionStorage.setItem(`${PIPELINE_PREFIX}${tabId}`, JSON.stringify(pipeline))
+  } catch { /* quota exceeded */ }
+}
+
+export interface PersistedPipelineRuntime {
+  blockStates: Array<[string, BlockState]>
+  isRunning: boolean
+  runningBlockId: string | null
+}
+
+export function normalizeRecoveredRuntime(
+  runtime: PersistedPipelineRuntime,
+  tabMarkedRunning: boolean,
+): PersistedPipelineRuntime {
+  if (tabMarkedRunning) {
+    if (runtime.isRunning) return runtime
+    const firstRunning = runtime.blockStates.find(([, state]) => state.status === 'running')
+    return {
+      ...runtime,
+      isRunning: true,
+      runningBlockId: runtime.runningBlockId ?? firstRunning?.[0] ?? null,
+    }
+  }
+
+  // Check only this tab's blocks for pending polling runs (not global)
+  const hasPendingJobs = runtime.blockStates.some(([id]) => hasPendingJobRunForBlock(id))
+  if (runtime.isRunning && hasPendingJobs) return runtime
+  if (!runtime.isRunning && hasPendingJobs) {
+    const firstRunning = runtime.blockStates.find(([, state]) => state.status === 'running')
+    return {
+      ...runtime,
+      isRunning: true,
+      runningBlockId: runtime.runningBlockId ?? firstRunning?.[0] ?? null,
+    }
+  }
+  if (!runtime.isRunning) return runtime
+
+  const recoveredStates = runtime.blockStates.map(([id, state]) => {
+    if (state.status !== 'running') return [id, state] as [string, BlockState]
+    return [
+      id,
+      {
+        ...state,
+        status: 'idle',
+        statusMessage: 'Run tracking was interrupted. Check Artifacts for completed outputs.',
+      },
+    ] as [string, BlockState]
+  })
+
+  return {
+    blockStates: recoveredStates,
+    isRunning: false,
+    runningBlockId: null,
+  }
+}
+
+function loadPipelineRuntime(tabId: string): PersistedPipelineRuntime {
+  if (typeof window === 'undefined') {
+    return { blockStates: [], isRunning: false, runningBlockId: null }
+  }
+  try {
+    const raw = sessionStorage.getItem(`${PIPELINE_RUNTIME_PREFIX}${tabId}`)
+    if (!raw) return { blockStates: [], isRunning: false, runningBlockId: null }
+    const parsed = JSON.parse(raw) as {
+      blockStates?: unknown
+      isRunning?: unknown
+      runningBlockId?: unknown
+    }
+
+    const entries = Array.isArray(parsed.blockStates)
+      ? parsed.blockStates.filter(
+          (entry): entry is [string, BlockState] =>
+            Array.isArray(entry) &&
+            entry.length === 2 &&
+            typeof entry[0] === 'string' &&
+            !!entry[1] &&
+            typeof entry[1] === 'object' &&
+            'outputs' in (entry[1] as Record<string, unknown>),
+        )
+      : []
+
+    return {
+      blockStates: entries,
+      isRunning: parsed.isRunning === true,
+      runningBlockId: typeof parsed.runningBlockId === 'string' ? parsed.runningBlockId : null,
+    }
+  } catch {
+    return { blockStates: [], isRunning: false, runningBlockId: null }
+  }
+}
+
+function savePipelineRuntime(tabId: string, runtime: PersistedPipelineRuntime) {
+  try {
+    sessionStorage.setItem(`${PIPELINE_RUNTIME_PREFIX}${tabId}`, JSON.stringify(runtime))
+  } catch {
+    // quota exceeded
+  }
+}
+
+// ---- Accumulator types ----
+
+interface AccumulatorEntry {
+  blockId: string
+  value: unknown
+}
+
+/** Multi-source accumulator: PortKind → list of upstream producers (in pipeline order) */
+type Accumulator = Map<string, AccumulatorEntry[]>
+
+// ---- Upstream producer info (for source selector UI) ----
+
+export interface UpstreamProducer {
+  blockId: string
+  blockIndex: number
+  blockLabel: string
+}
+
+/** A block whose input port reads a given block's output. */
+export interface DownstreamConsumer {
+  blockId: string
+  type: string
+  /** The block's own label, or its type's label. */
+  label: string
+  portName: string
+}
+
+/** An upstream producer plus its current output value, tagged by blockId. */
+export interface UpstreamProducerValue extends UpstreamProducer {
+  value: unknown
+}
+
+// ---- Context ----
+
+type ExecuteFn = (inputs: Record<string, unknown>, signal: AbortSignal) => Promise<void | BlockExecuteResult>
+
+function findLastEnabledIndex(blocks: PipelineBlock[], maxExclusive: number): number {
+  for (let i = Math.min(maxExclusive, blocks.length) - 1; i >= 0; i--) {
+    if (!blocks[i].disabled) return i
+  }
+  return -1
+}
+
+function getAdvertisedOutputKinds(
+  blocks: PipelineBlock[],
+  index: number,
+  hints?: Record<string, string>,
+): Set<PortKind> {
+  if (index < 0 || index >= blocks.length) return new Set()
+  const block = blocks[index]
+  const def = getNodeType(block.type)
+  if (!def || def.outputs.length === 0) return new Set()
+
+  // HITL is a passthrough: constrain addable-next suggestions to whatever
+  // kind reached the block immediately before it.
+  if (block.type === 'hitl') {
+    const prevIdx = findLastEnabledIndex(blocks, index)
+    if (prevIdx < 0) return new Set()
+    return getAdvertisedOutputKinds(blocks, prevIdx, hints)
+  }
+
+  if (hints) {
+    const hintedPort = hints[block.id]
+    if (hintedPort) {
+      const matchingPorts = def.outputs.filter((port) => port.name === hintedPort)
+      if (matchingPorts.length > 0) {
+        return new Set(matchingPorts.map((port) => canonicalizePortKind(port.kind)))
+      }
+    }
+  }
+
+  return new Set(def.outputs.map((port) => canonicalizePortKind(port.kind)))
+}
+
+function getRequiredInputNames(type: string): Set<string> {
+  const def = getNodeType(type)
+  if (!def) return new Set()
+
+  const required = new Set(
+    def.inputs
+      .filter((input) => input.required !== false)
+      .map((input) => input.name),
+  )
+
+  const blockDef = getBlockDef(type)
+  for (const binding of blockDef?.bindings ?? []) {
+    if (bindingRequiresUpstream(binding)) {
+      required.add(binding.input)
+    }
+  }
+
+  return required
+}
+
+interface PipelineContextValue {
+  pipeline: Pipeline
+  /** Returns the id of the newly created block (the primary one, not auto-inserted prereqs). */
+  addBlock: (type: string, atIndex?: number) => string
+  removeBlock: (blockId: string) => void
+  /** Per-tab block selection — drives keyboard navigation + the canvas ring. */
+  selectedBlockId: string | null
+  setSelectedBlockId: (id: string | null) => void
+  setBlockLabel: (blockId: string, label: string) => void
+  blockStates: Map<string, BlockState>
+  setBlockOutput: (blockId: string, portName: string, value: unknown) => void
+  setBlockStatus: (blockId: string, status: BlockStatus, error?: string) => void
+  setBlockStatusMessage: (blockId: string, message: string | undefined) => void
+  getInputsForBlock: (blockId: string) => Record<string, unknown>
+  isBlockReady: (blockId: string) => boolean
+  /** Get block types valid at a specific position (index where block would be inserted).
+   *  If no position given, defaults to end of pipeline. */
+  getAddableTypes: (atIndex?: number) => NodeTypeDef[]
+  registerBlockExecute: (blockId: string, fn: ExecuteFn) => void
+  /** Hint which output port is active for a block (narrows add-block menu). */
+  setOutputHint: (blockId: string, activePortName: string) => void
+  runPipeline: (opts?: { continueFromExisting?: boolean }) => Promise<{ hadError: boolean }>
+  cancelPipeline: () => void
+  /** Whether any block has completed outputs from a previous run (enables "Continue" mode). */
+  hasCompletedBlocks: boolean
+  isRunning: boolean
+  runningBlockId: string | null
+  /** Set which upstream block feeds a specific input port */
+  setBlockSource: (blockId: string, portName: string, sourceBlockId: string) => void
+  /** Set whether an input reads the closest, all, or custom-selected upstream producers. */
+  setBlockSourceMode: (blockId: string, portName: string, mode: SourceMode) => void
+  /** Set custom upstream producer IDs for an input port. */
+  setBlockSourceSelection: (blockId: string, portName: string, sourceBlockIds: string[]) => void
+  /** Clear explicit source override for an input port (falls back to nearest producer). */
+  clearBlockSource: (blockId: string, portName: string) => void
+  /** Reset runtime state for a block and all downstream blocks in its chain/branches. */
+  resetRuntimeFromBlock: (blockId: string, opts?: { preserveOutputHint?: boolean }) => void
+  /** Get all upstream blocks that produce a given port kind, for a given block */
+  getUpstreamProducers: (blockId: string, portKind: PortKind) => UpstreamProducer[]
+  /** The upstream producers an input port reads, by its source mode (closest / all / custom). */
+  getPortSources: (blockId: string, portName: string) => UpstreamProducer[]
+  /** Enabled blocks whose input of this kind reads `blockId`'s output. */
+  getDownstreamConsumers: (blockId: string, portKind: PortKind) => DownstreamConsumer[]
+  /** Like getUpstreamProducers, but each entry also carries the producer's current output value (tagged by blockId). */
+  getUpstreamProducerValues: (blockId: string, portKind: PortKind) => UpstreamProducerValue[]
+  /** Whether any block has unsatisfied required inputs */
+  hasMissingRequired: boolean
+  /** Import a flow from a JSON string (no file picker). On failure the current
+   *  pipeline is left untouched and the outcome carries the error. */
+  importFlowJson: (json: string) => FlowImportOutcome
+  /** Toggle a block's disabled state (skipped during execution). */
+  toggleBlockDisabled: (blockId: string) => void
+  /** Export the current pipeline as a flow JSON string. */
+  exportFlowJson: (name?: string) => string
+  /** Add an empty branch forking from a block. */
+  addBranch: (forkBlockId: string) => void
+  /** Insert a block directly before or after another; returns its id, or null when the anchor is gone. */
+  insertBlockAdjacent: (anchorId: string, position: 'before' | 'after', type: string, config?: Record<string, unknown>) => string | null
+  /** Add a block to a specific branch of a fork block. */
+  /** Returns the id of the newly added block. */
+  addBlockToBranch: (forkBlockId: string, branchIndex: number, type: string, atIndex?: number) => string
+  /** Remove an entire branch from a fork block. */
+  removeBranch: (forkBlockId: string, branchIndex: number) => void
+  /** Get valid block types for a position within a branch. */
+  getAddableTypesForBranch: (ancestors: PipelineBlock[], chain: PipelineBlock[], atIndex?: number) => NodeTypeDef[]
+  /** Active iteration state for iterator blocks (null when no iteration is running). */
+  iterationState: IterationState | null
+  /** Whether this tab's pipeline is running in loop mode. */
+  isLooping: boolean
+}
+
+const PipelineCtx = createContext<PipelineContextValue | null>(null)
+
+function newBlockIdFor(): string {
+  return `block-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+}
+
+/**
+ * Insert `block` into `chain` at `index`, preceded by the block types its
+ * definition lists in `starterPrereqs` (a generation block's loader). A
+ * prerequisite is skipped when the enabled block directly upstream (the
+ * previous block in the chain, or the fork block for the first block of a
+ * branch) already has that type, or lists it in `satisfiesPrereqs`, because
+ * it is then the closest source. Mutates `chain`.
+ */
+function insertWithPrereqs(chain: PipelineBlock[], index: number, fork: PipelineBlock | null, block: PipelineBlock, prereqIds: string[]) {
+  const prereqs = getBlockDef(block.type)?.starterPrereqs ?? []
+  const upstream = index > 0 ? chain[index - 1] : fork
+  const standsIn = upstream ? getBlockDef(upstream.type)?.satisfiesPrereqs ?? [] : []
+  const missing = prereqs.filter((type) => !(upstream && !upstream.disabled && (upstream.type === type || standsIn.includes(type))))
+  const inserted: PipelineBlock[] = missing.map((type, i) => ({ id: prereqIds[i], type }))
+  chain.splice(index, 0, ...inserted, block)
+}
+
+/** Ids for a block's prerequisites, made outside the state updater so a re-run of the updater yields the same tree. */
+function prereqIdsFor(type: string): string[] {
+  return (getBlockDef(type)?.starterPrereqs ?? []).map(() => newBlockIdFor())
+}
+
+export function usePipeline() {
+  const ctx = useContext(PipelineCtx)
+  if (!ctx) throw new Error('usePipeline must be used within PipelineProvider')
+  return ctx
+}
+
+export function useOptionalPipeline() {
+  return useContext(PipelineCtx)
+}
+
+// ---- Provider ----
+
+interface PipelineProviderProps {
+  tabId: string
+  /** SavedFlow JSON to import on first mount. */
+  flowJson?: string
+  children: ReactNode
+}
+
+export function PipelineProvider({ tabId, flowJson, children }: PipelineProviderProps) {
+  const { registerTabActions, unregisterTabActions, setTabRunState, setTabRuntimeInfo, tabRunStates, loopingTabs } = usePipelineTabs()
+  const tabMarkedRunning = (tabRunStates[tabId] ?? 'idle') === 'running'
+  const initialRuntime = useRef<PersistedPipelineRuntime>(
+    normalizeRecoveredRuntime(loadPipelineRuntime(tabId), tabMarkedRunning),
+  )
+  const [pipeline, setPipeline] = useState<Pipeline>(() => {
+    // If flowJson provided, import it immediately. Callers that open flows
+    // validate and report first (tabs-context); an unreadable flow here falls
+    // back to the tab's stored pipeline rather than throwing during render.
+    if (flowJson) {
+      const imported = importFlowWithReport(flowJson)
+      if (imported.ok) {
+        savePipeline(tabId, imported.pipeline)
+        return imported.pipeline
+      }
+    }
+    return loadPipeline(tabId)
+  })
+  const [blockStates, setBlockStates] = useState<Map<string, BlockState>>(
+    () => new Map(initialRuntime.current.blockStates),
+  )
+  const [isRunning, setIsRunning] = useState<boolean>(initialRuntime.current.isRunning)
+  const [runningBlockId, setRunningBlockId] = useState<string | null>(initialRuntime.current.runningBlockId)
+  const [iterationState, setIterationState] = useState<IterationState | null>(null)
+  // Per-tab block selection. Local state only — not persisted; clears
+  // automatically when a block is removed from the tree.
+  const [selectedBlockId, setSelectedBlockIdState] = useState<string | null>(null)
+  const setSelectedBlockId = useCallback((id: string | null) => {
+    setSelectedBlockIdState(id)
+  }, [])
+  const iterationStateRef = useRef<IterationState | null>(null)
+  const pipelineRef = useRef(pipeline)
+  const blockStatesRef = useRef(blockStates)
+  const isRunningRef = useRef(initialRuntime.current.isRunning)
+  const runningBlockIdRef = useRef<string | null>(initialRuntime.current.runningBlockId)
+  const executeFns = useRef<Map<string, ExecuteFn>>(new Map())
+  /** Map of blockId → active output port name (e.g. 'image'). Used to narrow add-block menu. */
+  const [outputHints, setOutputHints] = useState<Record<string, string>>({})
+  const runLockRef = useRef(false)
+  const cancelledRef = useRef(false)
+  const runAbortControllerRef = useRef<AbortController | null>(null)
+
+  const persistRuntimeSnapshot = useCallback(
+    (
+      nextBlockStates: Map<string, BlockState>,
+      nextIsRunning = isRunningRef.current,
+      nextRunningBlockId = runningBlockIdRef.current,
+    ) => {
+      savePipelineRuntime(tabId, {
+        blockStates: Array.from(nextBlockStates.entries()),
+        isRunning: nextIsRunning,
+        runningBlockId: nextRunningBlockId,
+      })
+    },
+    [tabId],
+  )
+
+  // Wrapper that updates the ref + sessionStorage synchronously so callbacks
+  // reading pipelineRef.current during the same render cycle see fresh data.
+  const updatePipeline = useCallback((updater: (prev: Pipeline) => Pipeline) => {
+    setPipeline((prev) => {
+      const next = updater(prev)
+      pipelineRef.current = next
+      savePipeline(tabId, next)
+      return next
+    })
+  }, [tabId])
+
+  useEffect(() => {
+    pipelineRef.current = pipeline
+  }, [pipeline])
+
+  useEffect(() => {
+    blockStatesRef.current = blockStates
+  }, [blockStates])
+
+  useEffect(() => {
+    isRunningRef.current = isRunning
+  }, [isRunning])
+
+  useEffect(() => {
+    runningBlockIdRef.current = runningBlockId
+  }, [runningBlockId])
+
+  useEffect(() => {
+    savePipelineRuntime(tabId, {
+      blockStates: Array.from(blockStates.entries()),
+      isRunning,
+      runningBlockId,
+    })
+  }, [tabId, blockStates, isRunning, runningBlockId])
+
+  // Build accumulator from a block's ancestors (tree-aware)
+  const buildAccumulatorFromAncestors = useCallback(
+    (ancestors: PipelineBlock[], states: Map<string, BlockState>): Accumulator => {
+      const acc: Accumulator = new Map()
+      for (const block of ancestors) {
+        if (block.disabled) continue
+        const state = states.get(block.id)
+        if (!state) continue
+        const def = getNodeType(block.type)
+        if (!def) continue
+        for (const port of def.outputs) {
+          if (state.outputs[port.name] !== undefined) {
+            const kind = canonicalizePortKind(port.kind)
+            const entries = acc.get(kind) ?? []
+            entries.push({ blockId: block.id, value: state.outputs[port.name] })
+            acc.set(kind, entries)
+          }
+        }
+      }
+      return acc
+    },
+    [],
+  )
+
+  // Build a lightweight producer map from a block's ancestors (tree-aware)
+  // Include pipeline.blocks in deps so consumers re-evaluate after structural changes
+  const buildProducerMapFromAncestors = useCallback(
+    (ancestors: PipelineBlock[]): Map<string, UpstreamProducer[]> => {
+      const map = new Map<string, UpstreamProducer[]>()
+      for (let i = 0; i < ancestors.length; i++) {
+        const block = ancestors[i]
+        if (block.disabled) continue
+        const def = getNodeType(block.type)
+        if (!def) continue
+        const outputKinds = getAdvertisedOutputKinds(
+          ancestors,
+          i,
+          outputHints,
+        )
+        for (const kind of outputKinds) {
+          const entries = map.get(kind) ?? []
+          entries.push({ blockId: block.id, blockIndex: i, blockLabel: block.label || def.label })
+          map.set(kind, entries)
+        }
+      }
+      return map
+    },
+    [outputHints, pipeline.blocks],
+  )
+
+  // Resolve a single input port value from the accumulator, respecting source overrides
+  const resolvePort = (
+    block: PipelineBlock,
+    portName: string,
+    portKind: string,
+    acc: Accumulator,
+    producerMap: Map<string, UpstreamProducer[]>,
+  ): unknown | undefined => {
+    const canonicalKind = canonicalizePortKind(portKind as PortKind)
+    const entries = acc.get(canonicalKind)
+    const producers = producerMap.get(canonicalKind) ?? []
+    const sourceMode = block.sourceModes?.[portName] ?? 'closest'
+
+    if (sourceMode === 'all') {
+      if (!entries || entries.length === 0) return undefined
+      return entries.map((entry) => entry.value)
+    }
+
+    if (sourceMode === 'custom') {
+      const selectedIds = block.sourceSelections?.[portName] ?? []
+      if (selectedIds.length === 0) return undefined
+      if (!entries || entries.length === 0) return undefined
+
+      const values: unknown[] = []
+      for (const sourceId of selectedIds) {
+        const entry = entries.find((candidate) => candidate.blockId === sourceId)
+        if (!entry) return undefined
+        values.push(entry.value)
+      }
+      return values
+    }
+
+    // Source resolution priority:
+    // 1) Explicit source override chosen by user.
+    // 2) Implicit default source = closest upstream producer (same as dropdown default).
+    const preferredSourceId = block.sources?.[portName] ?? producers[producers.length - 1]?.blockId
+    if (preferredSourceId) {
+      if (!entries || entries.length === 0) return undefined
+      const entry = entries.find((e) => e.blockId === preferredSourceId)
+      // Strict source selection: do not fall back to older producers when
+      // the preferred source has not emitted output yet.
+      return entry?.value
+    }
+
+    if (!entries || entries.length === 0) return undefined
+
+    // Default: last (closest upstream) producer
+    return entries[entries.length - 1].value
+  }
+
+  // Resolve inputs for a block from a given states snapshot (tree-aware)
+  const resolveInputsForBlocks = useCallback(
+    (
+      blocks: PipelineBlock[],
+      blockId: string,
+      states: Map<string, BlockState>,
+    ): Record<string, unknown> => {
+      const location = findBlockInTree(blocks, blockId)
+      if (!location) return {}
+      const block = location.chain[location.index]
+      const def = getNodeType(block.type)
+      if (!def) return {}
+      const acc = buildAccumulatorFromAncestors(location.ancestors, states)
+      const producerMap = buildProducerMapFromAncestors(location.ancestors)
+      const inputs: Record<string, unknown> = {}
+      for (const port of def.inputs) {
+        const val = resolvePort(block, port.name, port.kind, acc, producerMap)
+        if (val !== undefined) inputs[port.name] = val
+      }
+      return inputs
+    },
+    [buildAccumulatorFromAncestors, buildProducerMapFromAncestors],
+  )
+
+  const resolveInputs = useCallback(
+    (blockId: string, states: Map<string, BlockState>): Record<string, unknown> => {
+      return resolveInputsForBlocks(pipelineRef.current.blocks, blockId, states)
+    },
+    [resolveInputsForBlocks],
+  )
+
+  const getInputsForBlock = useCallback(
+    (blockId: string): Record<string, unknown> => {
+      return resolveInputsForBlocks(pipeline.blocks, blockId, blockStatesRef.current)
+    },
+    [pipeline.blocks, resolveInputsForBlocks],
+  )
+
+  // Check if a block has all required inputs satisfied by upstream producers (tree-aware)
+  const isBlockReady = useCallback(
+    (blockId: string): boolean => {
+      const location = findBlockInTree(pipeline.blocks, blockId)
+      if (!location) return false
+      const def = getNodeType(location.chain[location.index].type)
+      if (!def) return false
+      if (def.inputs.length === 0) return true
+
+      const producerMap = buildProducerMapFromAncestors(location.ancestors)
+      const requiredInputNames = getRequiredInputNames(location.chain[location.index].type)
+      const requiredInputs = def.inputs.filter((p) => requiredInputNames.has(p.name))
+      return requiredInputs.every((port) => {
+        const producers = producerMap.get(canonicalizePortKind(port.kind))
+        return producers && producers.length > 0
+      })
+    },
+    [buildProducerMapFromAncestors, pipeline.blocks],
+  )
+
+  const getUpstreamProducers = useCallback(
+    (blockId: string, portKind: PortKind): UpstreamProducer[] => {
+      const location = findBlockInTree(pipeline.blocks, blockId)
+      if (!location) return []
+      const producerMap = buildProducerMapFromAncestors(location.ancestors)
+      return producerMap.get(canonicalizePortKind(portKind)) ?? []
+    },
+    [buildProducerMapFromAncestors, pipeline.blocks],
+  )
+
+  // The producers an input port actually reads, by its source mode.
+  const getPortSources = useCallback(
+    (blockId: string, portName: string): UpstreamProducer[] => {
+      const location = findBlockInTree(pipeline.blocks, blockId)
+      if (!location) return []
+      const block = location.chain[location.index]
+      const port = getNodeType(block.type)?.inputs.find((p) => p.name === portName)
+      if (!port) return []
+      const producers = buildProducerMapFromAncestors(location.ancestors).get(canonicalizePortKind(port.kind)) ?? []
+      const ids = selectedSourceIds(block, portName, producers.map((p) => p.blockId))
+      return ids.map((id) => producers.find((p) => p.blockId === id)).filter((p): p is UpstreamProducer => Boolean(p))
+    },
+    [buildProducerMapFromAncestors, pipeline.blocks],
+  )
+
+  // The inverse of getPortSources: enabled blocks whose input of this kind
+  // reads `blockId`. A disabled block is skipped with its branches, as the
+  // runner does.
+  const getDownstreamConsumers = useCallback(
+    (blockId: string, portKind: PortKind): DownstreamConsumer[] => {
+      const kind = canonicalizePortKind(portKind)
+      const out: DownstreamConsumer[] = []
+      const visit = (chain: PipelineBlock[]) => {
+        for (const block of chain) {
+          if (block.disabled) continue
+          if (block.id !== blockId) {
+            const def = getNodeType(block.type)
+            for (const port of def?.inputs ?? []) {
+              if (canonicalizePortKind(port.kind) !== kind) continue
+              if (getPortSources(block.id, port.name).some((p) => p.blockId === blockId)) {
+                out.push({ blockId: block.id, type: block.type, label: block.label || def!.label, portName: port.name })
+              }
+            }
+          }
+          for (const branch of block.branches ?? []) visit(branch)
+        }
+      }
+      visit(pipeline.blocks)
+      return out
+    },
+    [getPortSources, pipeline.blocks],
+  )
+
+  // Like getUpstreamProducers, but joins each producer with its current output
+  // value from the accumulator. The resolved inputs.<port> array drops which
+  // block produced which value; consumers that need per-source routing (e.g.
+  // per-segment prompt sourcing) use this to address values by blockId.
+  const getUpstreamProducerValues = useCallback(
+    (blockId: string, portKind: PortKind): UpstreamProducerValue[] => {
+      const location = findBlockInTree(pipeline.blocks, blockId)
+      if (!location) return []
+      const canonicalKind = canonicalizePortKind(portKind)
+      const producers = buildProducerMapFromAncestors(location.ancestors).get(canonicalKind) ?? []
+      const entries = buildAccumulatorFromAncestors(location.ancestors, blockStatesRef.current).get(canonicalKind) ?? []
+      const valueByBlockId = new Map(entries.map((e) => [e.blockId, e.value]))
+      return producers.map((p) => ({ ...p, value: valueByBlockId.get(p.blockId) }))
+    },
+    [buildAccumulatorFromAncestors, buildProducerMapFromAncestors, pipeline.blocks],
+  )
+
+  const addBlock = useCallback((type: string, atIndex?: number): string => {
+    const newBlockId = newBlockIdFor()
+    const prereqIds = prereqIdsFor(type)
+    updatePipeline((prev) => {
+      const blocks = [...prev.blocks]
+      const insertAt = Math.min(atIndex ?? blocks.length, blocks.length)
+      insertWithPrereqs(blocks, insertAt, null, { id: newBlockId, type }, prereqIds)
+      return { ...prev, blocks }
+    })
+    return newBlockId
+  }, [updatePipeline])
+
+  // Insert a block directly before or after another one, in the same chain.
+  // Optional config is written to the new block's keys first, as flow import does.
+  const insertBlockAdjacent = useCallback(
+    (anchorId: string, position: 'before' | 'after', type: string, config?: Record<string, unknown>): string | null => {
+      if (!findBlockInTree(pipelineRef.current.blocks, anchorId)) return null
+      const id = newBlockIdFor()
+      for (const [key, value] of Object.entries(config ?? {})) {
+        try {
+          sessionStorage.setItem(`block_${id}_${key}`, JSON.stringify(value))
+        } catch {
+          // storage full: the block still appears, empty
+        }
+      }
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const location = findBlockInTree(next.blocks, anchorId)
+        if (!location) return prev
+        location.chain.splice(position === 'before' ? location.index : location.index + 1, 0, { id, type })
+        return next
+      })
+      return id
+    },
+    [updatePipeline],
+  )
+
+  const removeBlock = useCallback((blockId: string) => {
+    // Collect all block IDs being removed (the target + any blocks in its branches)
+    const location = findBlockInTree(pipelineRef.current.blocks, blockId)
+    const idsToClean = new Set<string>()
+    if (location) {
+      const block = location.chain[location.index]
+      for (const b of walkBlocks([block])) idsToClean.add(b.id)
+    }
+
+    updatePipeline((prev) => {
+      const next = structuredClone(prev)
+      removeBlockFromTree(next.blocks, blockId)
+      return next
+    })
+    setBlockStates((prev) => {
+      const next = new Map(prev)
+      for (const id of idsToClean) next.delete(id)
+      blockStatesRef.current = next
+      persistRuntimeSnapshot(next)
+      return next
+    })
+    for (const id of idsToClean) {
+      executeFns.current.delete(id)
+      setOutputHints((prev) => {
+        if (!(id in prev)) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    }
+    // Clear selection if the selected block was just removed.
+    setSelectedBlockIdState((prev) => (prev && idsToClean.has(prev) ? null : prev))
+  }, [persistRuntimeSnapshot, updatePipeline])
+
+  const toggleBlockDisabled = useCallback((blockId: string) => {
+    updatePipeline((prev) => {
+      const next = structuredClone(prev)
+      const block = findBlockById(next.blocks, blockId)
+      if (!block) return prev
+      block.disabled = !block.disabled
+      return next
+    })
+  }, [updatePipeline])
+
+  const setBlockLabel = useCallback((blockId: string, label: string) => {
+    updatePipeline((prev) => {
+      const next = structuredClone(prev)
+      const block = findBlockById(next.blocks, blockId)
+      if (!block) return prev
+      block.label = label || undefined
+      return next
+    })
+  }, [updatePipeline])
+
+  const setBlockOutput = useCallback(
+    (blockId: string, portName: string, value: unknown) => {
+      // Update ref synchronously so pipeline runner can read outputs immediately
+      // (React state updates are batched and won't flush mid-pipeline)
+      const prev = blockStatesRef.current
+      const existing = prev.get(blockId) ?? { status: 'idle' as const, outputs: {} }
+      const prevValue = existing.outputs[portName]
+      if (Object.is(prevValue, value)) return
+
+      const next = new Map(prev)
+      next.set(blockId, {
+        ...existing,
+        outputs: { ...existing.outputs, [portName]: value },
+      })
+      blockStatesRef.current = next
+      setBlockStates(next)
+      persistRuntimeSnapshot(next)
+    },
+    [persistRuntimeSnapshot],
+  )
+
+  const setBlockStatus = useCallback(
+    (blockId: string, status: BlockStatus, error?: string) => {
+      // Update ref synchronously so rapid status changes aren't lost to batching
+      const prev = blockStatesRef.current
+      const existing = prev.get(blockId) ?? { status: 'idle' as const, outputs: {} }
+      const nextError = error ?? undefined
+      if (
+        existing.status === status &&
+        (existing.error ?? undefined) === nextError &&
+        existing.statusMessage === undefined
+      ) {
+        return
+      }
+
+      const next = new Map(prev)
+      next.set(blockId, { ...existing, status, error: nextError, statusMessage: undefined })
+      blockStatesRef.current = next
+      setBlockStates(next)
+      persistRuntimeSnapshot(next)
+    },
+    [persistRuntimeSnapshot],
+  )
+
+  const setBlockStatusMessage = useCallback(
+    (blockId: string, message: string | undefined) => {
+      const prev = blockStatesRef.current
+      const existing = prev.get(blockId) ?? { status: 'idle' as const, outputs: {} }
+      if (existing.statusMessage === message) return
+
+      const next = new Map(prev)
+      next.set(blockId, { ...existing, statusMessage: message })
+      blockStatesRef.current = next
+      setBlockStates(next)
+      persistRuntimeSnapshot(next)
+    },
+    [persistRuntimeSnapshot],
+  )
+
+  const setBlockSource = useCallback(
+    (blockId: string, portName: string, sourceBlockId: string) => {
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const block = findBlockById(next.blocks, blockId)
+        if (!block) return prev
+        block.sources = { ...block.sources, [portName]: sourceBlockId }
+        return next
+      })
+    },
+    [updatePipeline],
+  )
+
+  const setBlockSourceMode = useCallback(
+    (blockId: string, portName: string, mode: SourceMode) => {
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const block = findBlockById(next.blocks, blockId)
+        if (!block) return prev
+        if (mode === 'closest') {
+          if (!block.sourceModes?.[portName]) return prev
+          const sourceModes = { ...block.sourceModes }
+          delete sourceModes[portName]
+          if (Object.keys(sourceModes).length === 0) delete block.sourceModes
+          else block.sourceModes = sourceModes
+          return next
+        }
+        block.sourceModes = { ...block.sourceModes, [portName]: mode }
+        return next
+      })
+    },
+    [updatePipeline],
+  )
+
+  const setBlockSourceSelection = useCallback(
+    (blockId: string, portName: string, sourceBlockIds: string[]) => {
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const block = findBlockById(next.blocks, blockId)
+        if (!block) return prev
+
+        const uniqueIds = Array.from(new Set(sourceBlockIds))
+        if (uniqueIds.length === 0) {
+          if (!block.sourceSelections?.[portName]) return prev
+          const sourceSelections = { ...block.sourceSelections }
+          delete sourceSelections[portName]
+          if (Object.keys(sourceSelections).length === 0) delete block.sourceSelections
+          else block.sourceSelections = sourceSelections
+          return next
+        }
+
+        block.sourceSelections = { ...block.sourceSelections, [portName]: uniqueIds }
+        return next
+      })
+    },
+    [updatePipeline],
+  )
+
+  const clearBlockSource = useCallback(
+    (blockId: string, portName: string) => {
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const block = findBlockById(next.blocks, blockId)
+        if (!block?.sources?.[portName]) return prev
+        const sources = { ...block.sources }
+        delete sources[portName]
+        if (Object.keys(sources).length === 0) delete block.sources
+        else block.sources = sources
+        return next
+      })
+    },
+    [updatePipeline],
+  )
+
+  const resetRuntimeFromBlock = useCallback(
+    (blockId: string, opts?: { preserveOutputHint?: boolean }) => {
+      const location = findBlockInTree(pipeline.blocks, blockId)
+      if (!location) return
+
+      const idsToReset = new Set<string>()
+      for (const downstreamBlock of location.chain.slice(location.index)) {
+        for (const nested of walkBlocks([downstreamBlock])) {
+          idsToReset.add(nested.id)
+        }
+      }
+
+      const next = new Map(blockStatesRef.current)
+      for (const id of idsToReset) {
+        next.set(id, { status: 'idle', outputs: {} })
+      }
+
+      blockStatesRef.current = next
+      setBlockStates(next)
+      persistRuntimeSnapshot(next)
+      setOutputHints((prev) => {
+        const next = { ...prev }
+        for (const id of idsToReset) {
+          if (!opts?.preserveOutputHint || id !== blockId) {
+            delete next[id]
+          }
+        }
+        return next
+      })
+    },
+    [persistRuntimeSnapshot, pipeline.blocks],
+  )
+
+  const registerBlockExecute = useCallback(
+    (blockId: string, fn: ExecuteFn) => {
+      executeFns.current.set(blockId, fn)
+    },
+    [],
+  )
+
+  const setOutputHint = useCallback(
+    (blockId: string, activePortName: string) => {
+      setOutputHints((prev) => {
+        const currentHint = prev[blockId] ?? ''
+        if (currentHint === activePortName) return prev
+        if (!activePortName) {
+          if (!(blockId in prev)) return prev
+          const next = { ...prev }
+          delete next[blockId]
+          return next
+        }
+        return { ...prev, [blockId]: activePortName }
+      })
+    },
+    [],
+  )
+
+  const cancelPipeline = useCallback(() => {
+    cancelledRef.current = true
+    // Abort only polls belonging to this tab's pipeline blocks (not all tabs)
+    for (const block of walkBlocks(pipelineRef.current.blocks)) {
+      abortPoll(block.id)
+    }
+    runAbortControllerRef.current?.abort()
+    runLockRef.current = false
+    runningBlockIdRef.current = null
+    isRunningRef.current = false
+    setRunningBlockId(null)
+    setIsRunning(false)
+    persistRuntimeSnapshot(blockStatesRef.current, false, null)
+    setTabRunState(tabId, 'idle')
+    setTabRuntimeInfo(tabId, {})
+  }, [persistRuntimeSnapshot, setTabRunState, setTabRuntimeInfo, tabId])
+
+  const runPipeline = useCallback(async (opts?: { continueFromExisting?: boolean }): Promise<{ hadError: boolean }> => {
+    if (runLockRef.current) return { hadError: false }
+    // A block with no registered type has no execute function; the runner
+    // would silently pass through it. Refuse to start instead.
+    const unsupportedBlockers = findRunBlockingUnsupportedBlocks(pipelineRef.current.blocks)
+    if (unsupportedBlockers.length > 0) {
+      toast.error(formatUnsupportedRunMessage(unsupportedBlockers))
+      return { hadError: true }
+    }
+    // Broken references and over-limit loaders would fail mid-run; say so up front.
+    const knownBlockers = findRunBlockers(pipelineRef.current.blocks)
+    if (knownBlockers.length > 0) {
+      toast.error(formatRunBlockerMessage(knownBlockers))
+      return { hadError: true }
+    }
+    runLockRef.current = true
+    cancelledRef.current = false
+    const continueMode = opts?.continueFromExisting ?? false
+    const runAbortController = new AbortController()
+    runAbortControllerRef.current = runAbortController
+
+    const blocks = pipelineRef.current.blocks
+    // The saved run describes these blocks, whatever is added, removed or edited mid-run.
+    const runSnapshot = createRunSnapshot(pipelineRef.current)
+    setTabRunState(tabId, 'running')
+    isRunningRef.current = true
+    runningBlockIdRef.current = null
+    setIsRunning(true)
+    setRunningBlockId(null)
+    const startTime = Date.now()
+
+    // In continue mode, preserve completed blocks; otherwise reset all
+    const freshStates = new Map<string, BlockState>()
+    const prevStates = blockStatesRef.current
+    for (const block of walkBlocks(blocks)) {
+      const prev = prevStates.get(block.id)
+      if (continueMode && prev && prev.status === 'completed' && Object.keys(prev.outputs).length > 0) {
+        freshStates.set(block.id, prev)
+      } else {
+        freshStates.set(block.id, { status: 'idle', outputs: {} })
+      }
+    }
+    setBlockStates(freshStates)
+    blockStatesRef.current = freshStates
+    persistRuntimeSnapshot(freshStates, true, null)
+
+    let hadError = false
+    let hadPartialFailure = false
+    let completedBlockExecutions = 0
+
+    const updateIterState = (state: IterationState | null) => {
+      iterationStateRef.current = state
+      setIterationState(state ? { ...state, items: [...state.items] } : null)
+    }
+
+    function extractItemLabel(item: unknown, index: number): string {
+      if (typeof item === 'string') {
+        try {
+          const url = new URL(item)
+          const segments = url.pathname.split('/')
+          return segments[segments.length - 1] || `Item ${index + 1}`
+        } catch {
+          // Not a URL — try filesystem path
+          const parts = item.split('/')
+          return parts[parts.length - 1] || `Item ${index + 1}`
+        }
+      }
+      return `Item ${index + 1}`
+    }
+
+    // Recursive chain executor: runs blocks sequentially, launches branches in parallel
+    async function executeChain(chain: PipelineBlock[]): Promise<void> {
+      const pendingBranches: Promise<void>[] = []
+      const forwardOutputs = (block: PipelineBlock, freshInputs: Record<string, unknown>) => {
+        const blockDef = getBlockDef(block.type)
+        for (const forward of blockDef?.forwards ?? []) {
+          const mode = forward.when ?? 'if_present'
+          const value = freshInputs[forward.fromInput]
+          if (mode === 'always' || value !== undefined) {
+            setBlockOutput(block.id, forward.toOutput, value)
+          }
+        }
+      }
+
+      const validateBindingRequirements = (block: PipelineBlock, freshInputs: Record<string, unknown>) => {
+        const blockDef = getBlockDef(block.type)
+        for (const binding of blockDef?.bindings ?? []) {
+          if (!bindingRequiresUpstream(binding)) continue
+          if (freshInputs[binding.input] === undefined) {
+            throw new Error(`Missing required upstream input "${binding.input}" for "${binding.field}"`)
+          }
+        }
+      }
+
+      const markSkippedTree = (root: PipelineBlock) => {
+        for (const block of walkBlocks([root])) {
+          setBlockStatus(block.id, 'skipped')
+        }
+      }
+
+      for (let idx = 0; idx < chain.length; idx++) {
+        if (cancelledRef.current) break
+
+        const block = chain[idx]
+        if (block.disabled) {
+          setBlockStatus(block.id, 'skipped')
+          continue
+        }
+
+        // In continue mode, skip blocks that already completed with outputs
+        const existingState = blockStatesRef.current.get(block.id)
+        if (continueMode && existingState?.status === 'completed' && Object.keys(existingState.outputs).length > 0) {
+          completedBlockExecutions++
+          // Still launch branches for completed blocks
+          if (block.branches) {
+            for (const branch of block.branches) {
+              pendingBranches.push(executeChain(branch))
+            }
+          }
+          continue
+        }
+
+        runningBlockIdRef.current = block.id
+        setRunningBlockId(block.id)
+        persistRuntimeSnapshot(blockStatesRef.current, isRunningRef.current, block.id)
+        setBlockStatus(block.id, 'running')
+        const blockDef_ = getNodeType(block.type)
+        setTabRuntimeInfo(tabId, { runningBlockLabel: block.label || blockDef_?.label || block.type })
+
+        const executeFn = executeFns.current.get(block.id)
+        const freshInputs = resolveInputs(block.id, blockStatesRef.current)
+        runSnapshot.started(block)
+        try {
+          validateBindingRequirements(block, freshInputs)
+          if (executeFn) {
+            const cancelRace = new Promise<never>((_, reject) => {
+              if (runAbortController.signal.aborted) {
+                reject(new DOMException('Pipeline cancelled', 'AbortError'))
+                return
+              }
+              runAbortController.signal.addEventListener('abort', () => {
+                reject(new DOMException('Pipeline cancelled', 'AbortError'))
+              }, { once: true })
+            })
+            const execResult = await Promise.race([executeFn(freshInputs, runAbortController.signal), cancelRace])
+            forwardOutputs(block, freshInputs)
+            setBlockStatus(block.id, 'completed')
+            completedBlockExecutions++
+            if (execResult?.partialFailure) {
+              hadPartialFailure = true
+            }
+            if (execResult?.terminateChain) {
+              // Skip all descendants and remaining siblings in this chain.
+              for (const branch of block.branches ?? []) {
+                for (const branchBlock of branch) markSkippedTree(branchBlock)
+              }
+              for (let rest = idx + 1; rest < chain.length; rest++) {
+                markSkippedTree(chain[rest])
+              }
+              break
+            }
+          } else {
+            forwardOutputs(block, freshInputs)
+            setBlockStatus(block.id, 'completed')
+            completedBlockExecutions++
+            // Double rAF yield to let React paint forwarded outputs before next block starts
+            await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
+          }
+        } catch (e) {
+          if (e instanceof DOMException && e.name === 'AbortError') {
+            // Pipeline was cancelled — don't mark block as errored
+            setBlockStatusMessage(block.id, 'Pipeline cancelled')
+            break
+          }
+          setBlockStatus(block.id, 'error', String(e))
+          hadError = true
+          break // Stop this chain on error (branches already launched continue)
+        }
+
+        // After executing this block, check if it's an iterator
+        const iterDef = getBlockDef(block.type)
+        if (iterDef?.iterator) {
+          // Auto-detect which output port has an array if iteratorOutput is not specified
+          let iterPortName = iterDef.iteratorOutput ?? ''
+          const blockOutputs = blockStatesRef.current.get(block.id)?.outputs ?? {}
+          if (!iterPortName) {
+            // Find the first output port that contains an array with >1 items
+            for (const port of iterDef.outputs) {
+              const val = blockOutputs[port.name]
+              if (Array.isArray(val) && val.length > 1) {
+                iterPortName = port.name
+                break
+              }
+            }
+            // Fallback to first output port
+            if (!iterPortName) iterPortName = iterDef.outputs[0]?.name ?? ''
+          }
+          const iterOutput = blockOutputs[iterPortName]
+
+          if (Array.isArray(iterOutput) && iterOutput.length > 1) {
+            // Build the remaining chain (everything after this block)
+            const remainingChain = chain.slice(idx + 1)
+            // Also include branches of the iterator block
+            const iterBranches = block.branches ?? []
+
+            const iterState: IterationState = {
+              blockId: block.id,
+              currentIndex: -1,
+              totalCount: iterOutput.length,
+              items: iterOutput.map((item, i) => ({
+                index: i,
+                label: extractItemLabel(item, i),
+                status: 'pending' as const,
+                thumbnailUrl: typeof item === 'string' ? item : undefined,
+              })),
+            }
+            updateIterState(iterState)
+
+            // Collect all downstream block IDs for output accumulation
+            const downstreamBlockIds = new Set<string>()
+            for (const b of walkBlocks(remainingChain)) downstreamBlockIds.add(b.id)
+            for (const branch of iterBranches) {
+              for (const b of walkBlocks(branch)) downstreamBlockIds.add(b.id)
+            }
+            // Accumulate downstream outputs across iterations
+            const accumulatedOutputs = new Map<string, Record<string, unknown[]>>()
+
+            for (let itemIdx = 0; itemIdx < iterOutput.length; itemIdx++) {
+              if (cancelledRef.current) break
+
+              iterState.currentIndex = itemIdx
+              iterState.items[itemIdx].status = 'running'
+              updateIterState(iterState)
+
+              // Override the iterator block's output to this single item
+              setBlockOutput(block.id, iterPortName, iterOutput[itemIdx])
+
+              // Reset downstream statuses for this iteration, but preserve completed
+              // outputs so viewers can continue showing prior items while the next
+              // item is still processing.
+              const resetStates = new Map(blockStatesRef.current)
+              for (const b of walkBlocks(remainingChain)) {
+                const existing = resetStates.get(b.id)
+                resetStates.set(b.id, {
+                  status: 'idle',
+                  outputs: existing?.outputs ?? {},
+                })
+              }
+              for (const branch of iterBranches) {
+                for (const b of walkBlocks(branch)) {
+                  const existing = resetStates.get(b.id)
+                  resetStates.set(b.id, {
+                    status: 'idle',
+                    outputs: existing?.outputs ?? {},
+                  })
+                }
+              }
+              blockStatesRef.current = resetStates
+              setBlockStates(resetStates)
+
+              try {
+                // Execute the remaining chain for this item
+                await executeChain(remainingChain)
+                // Execute branches for this item
+                for (const branch of iterBranches) {
+                  await executeChain(branch)
+                }
+                iterState.items[itemIdx].status = 'completed'
+
+                // Collect downstream outputs from this iteration
+                for (const bId of downstreamBlockIds) {
+                  const state = blockStatesRef.current.get(bId)
+                  if (!state?.outputs) continue
+                  let acc = accumulatedOutputs.get(bId)
+                  if (!acc) { acc = {}; accumulatedOutputs.set(bId, acc) }
+                  for (const [portName, value] of Object.entries(state.outputs)) {
+                    if (!acc[portName]) acc[portName] = []
+                    // Flatten arrays (e.g. a batch block that outputs 4 URLs)
+                    if (Array.isArray(value)) acc[portName].push(...value)
+                    else acc[portName].push(value)
+                  }
+                }
+              } catch (e) {
+                if (e instanceof DOMException && e.name === 'AbortError') {
+                  iterState.items[itemIdx].status = 'skipped'
+                  break
+                }
+                iterState.items[itemIdx].status = 'error'
+                iterState.items[itemIdx].error = e instanceof Error ? e.message : String(e)
+                hadPartialFailure = true
+                // Skip failed item, continue to next
+              }
+              updateIterState(iterState)
+            }
+
+            // Restore the full array as output after all iterations
+            setBlockOutput(block.id, iterPortName, iterOutput)
+
+            // Restore accumulated downstream outputs so artifacts capture all iterations
+            for (const [bId, ports] of accumulatedOutputs) {
+              for (const [portName, values] of Object.entries(ports)) {
+                setBlockOutput(bId, portName, values.length === 1 ? values[0] : values)
+              }
+            }
+
+            const failedCount = iterState.items.filter((i) => i.status === 'error').length
+            const completedCount = iterState.items.filter((i) => i.status === 'completed').length
+            if (completedCount === 0 && failedCount > 0) {
+              hadError = true
+            }
+            setBlockStatusMessage(block.id, `${completedCount}/${iterState.totalCount} items completed`)
+
+            // Skip the rest of the chain — iterations already handled it
+            break
+          }
+        }
+
+        // Launch all branches of this block in parallel (non-iterator path)
+        if (block.branches) {
+          for (const branch of block.branches) {
+            pendingBranches.push(executeChain(branch))
+          }
+        }
+      }
+
+      // Wait for all branches launched from this chain to complete
+      await Promise.all(pendingBranches)
+    }
+
+    try {
+      await executeChain(blocks)
+
+      // ---- Auto-save run to history ----
+      const durationMs = Date.now() - startTime
+      const runStatus: RunEntry['status'] = hadError
+        ? (completedBlockExecutions === 0 ? 'failed' : 'partial')
+        : (hadPartialFailure ? 'partial' : 'completed')
+
+      let globalIdx = 0
+      const blockResults: BlockResult[] = []
+      for (const block of walkBlocks(blocks)) {
+        const state = blockStatesRef.current.get(block.id)
+        const def = getNodeType(block.type)
+        const outputs: Record<string, { kind: string; value: unknown }> = {}
+        if (state?.outputs && def) {
+          for (const [portName, value] of Object.entries(state.outputs)) {
+            const portDef = def.outputs.find((p) => p.name === portName)
+            outputs[portName] = { kind: portDef?.kind ?? 'unknown', value }
+          }
+        }
+        blockResults.push({
+          block_index: globalIdx++,
+          block_type: block.type,
+          block_label: block.label || def?.label || block.type,
+          status: state?.status ?? 'idle',
+          outputs,
+        })
+      }
+
+      const flowSnapshot = runSnapshot.exportFlow('Pipeline Run')
+      const now = new Date()
+      const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      const dateStr = now.toLocaleDateString([], { month: 'short', day: 'numeric' })
+
+      const run: RunEntry = {
+        id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: `Pipeline Run \u2014 ${dateStr} ${timeStr}`,
+        status: runStatus,
+        duration_ms: durationMs,
+        flow_snapshot: flowSnapshot as unknown as Record<string, unknown>,
+        block_results: blockResults,
+        created_at: now.toISOString(),
+      }
+
+      // Fire-and-forget — don't block the UI
+      saveRun(run).catch(() => {})
+
+      return { hadError }
+    } finally {
+      runLockRef.current = false
+      runAbortControllerRef.current = null
+      runningBlockIdRef.current = null
+      isRunningRef.current = false
+      iterationStateRef.current = null
+      setIterationState(null)
+      setRunningBlockId(null)
+      setIsRunning(false)
+      persistRuntimeSnapshot(blockStatesRef.current, false, null)
+      setTabRunState(tabId, 'done')
+      setTabRuntimeInfo(tabId, {})
+    }
+  }, [persistRuntimeSnapshot, resolveInputs, setBlockOutput, setBlockStatus, setBlockStatusMessage, setTabRunState, setTabRuntimeInfo, tabId])
+
+  const getAddableTypes = useCallback((atIndex?: number): NodeTypeDef[] => {
+    const blocks = pipeline.blocks
+    const insertAt = atIndex ?? blocks.length
+
+    if (insertAt === 0 || blocks.length === 0) return getStarterTypes()
+
+    const lastEnabledIdx = findLastEnabledIndex(blocks, insertAt)
+    if (lastEnabledIdx < 0) return getStarterTypes()
+
+    const lastEnabledBlock = blocks[lastEnabledIdx]
+    const lastOutputKinds = getAdvertisedOutputKinds(blocks, lastEnabledIdx, outputHints)
+    if (lastOutputKinds.size === 0) return []
+
+    const lastType = lastEnabledBlock.type
+    const consumers = getValidNextTypes(lastOutputKinds).filter((def) => def.type !== lastType)
+
+    const existingTypes = new Set(blocks.map((b) => b.type))
+    const starters = getStarterTypes().filter((starter) => {
+      if (existingTypes.has(starter.type)) return false
+      return starter.outputs.some((out) => {
+        const consumersOfKind = getValidNextTypes(new Set([out.kind]))
+        return consumersOfKind.some((c) => !existingTypes.has(c.type))
+      })
+    })
+
+    if (consumers.length === 0 && starters.length === 0) return []
+
+    const seen = new Set<string>()
+    const result: NodeTypeDef[] = []
+    for (const def of [...consumers, ...starters]) {
+      if (!seen.has(def.type)) {
+        seen.add(def.type)
+        result.push(def)
+      }
+    }
+    return result
+  }, [outputHints, pipeline.blocks])
+
+  // ---- Branching methods ----
+
+  const addBranch = useCallback((forkBlockId: string) => {
+    updatePipeline((prev) => {
+      const next = structuredClone(prev)
+      const block = findBlockById(next.blocks, forkBlockId)
+      if (!block) return prev
+      // Only non-terminal blocks can fork
+      const def = getNodeType(block.type)
+      if (!def || def.outputs.length === 0) return prev
+      if (!block.branches) block.branches = []
+      if (block.branches.length >= 2) return prev
+      block.branches.push([])
+      return next
+    })
+  }, [updatePipeline])
+
+  const addBlockToBranch = useCallback(
+    (forkBlockId: string, branchIndex: number, type: string, atIndex?: number): string => {
+      const id = newBlockIdFor()
+      const prereqIds = prereqIdsFor(type)
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const block = findBlockById(next.blocks, forkBlockId)
+        if (!block?.branches?.[branchIndex]) return prev
+        const branch = block.branches[branchIndex]
+        const insertAt = Math.min(atIndex ?? branch.length, branch.length)
+        insertWithPrereqs(branch, insertAt, block, { id, type }, prereqIds)
+        return next
+      })
+      return id
+    },
+    [updatePipeline],
+  )
+
+  const removeBranch = useCallback(
+    (forkBlockId: string, branchIndex: number) => {
+      // Collect all block IDs in the branch for cleanup
+      const block = findBlockById(pipelineRef.current.blocks, forkBlockId)
+      const idsToClean = new Set<string>()
+      if (block?.branches?.[branchIndex]) {
+        for (const b of walkBlocks(block.branches[branchIndex])) idsToClean.add(b.id)
+      }
+
+      updatePipeline((prev) => {
+        const next = structuredClone(prev)
+        const blk = findBlockById(next.blocks, forkBlockId)
+        if (!blk?.branches?.[branchIndex]) return prev
+        blk.branches.splice(branchIndex, 1)
+        if (blk.branches.length === 0) delete blk.branches
+        return next
+      })
+      setBlockStates((prev) => {
+        const next = new Map(prev)
+        for (const id of idsToClean) next.delete(id)
+        blockStatesRef.current = next
+        persistRuntimeSnapshot(next)
+        return next
+      })
+      for (const id of idsToClean) {
+        executeFns.current.delete(id)
+        setOutputHints((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+      }
+      // Clear selection if it pointed into the removed branch.
+      setSelectedBlockIdState((prev) => (prev && idsToClean.has(prev) ? null : prev))
+    },
+    [persistRuntimeSnapshot, updatePipeline],
+  )
+
+  /** Get addable block types for a position within a branch.
+   *  `ancestors` = all blocks that precede this branch (trunk up to fork + branch blocks before atIndex). */
+  const getAddableTypesForBranch = useCallback(
+    (ancestors: PipelineBlock[], chain: PipelineBlock[], atIndex?: number): NodeTypeDef[] => {
+      const insertAt = atIndex ?? chain.length
+      const linear = [...ancestors, ...chain.slice(0, insertAt)]
+      const lastEnabledIdx = findLastEnabledIndex(linear, linear.length)
+      if (lastEnabledIdx < 0) return getStarterTypes()
+
+      const lastOutputKinds = getAdvertisedOutputKinds(linear, lastEnabledIdx, outputHints)
+      if (lastOutputKinds.size === 0) return []
+
+      const lastType = linear[lastEnabledIdx].type
+      return getValidNextTypes(lastOutputKinds).filter((def) => def.type !== lastType)
+    },
+    [outputHints],
+  )
+
+  const importFlowJson = useCallback((json: string): FlowImportOutcome => {
+    const outcome = importFlowWithReport(json)
+    if (!outcome.ok) return outcome
+    const imported = outcome.pipeline
+    pipelineRef.current = imported
+    savePipeline(tabId, imported)
+    setPipeline(imported)
+    // Reset block states for the new pipeline
+    const emptyStates = new Map<string, BlockState>()
+    setBlockStates(emptyStates)
+    blockStatesRef.current = emptyStates
+    isRunningRef.current = false
+    runningBlockIdRef.current = null
+    setIsRunning(false)
+    setRunningBlockId(null)
+    persistRuntimeSnapshot(emptyStates, false, null)
+    executeFns.current.clear()
+    setOutputHints({})
+    return outcome
+  }, [persistRuntimeSnapshot, tabId])
+
+  const exportFlowJson = useCallback((name = 'pipeline'): string => {
+    const flow = exportFlowIO(pipelineRef.current, name)
+    return JSON.stringify(flow)
+  }, [])
+
+  // Stable refs to avoid re-registering on every render
+  const runPipelineRef = useRef(runPipeline)
+  useEffect(() => { runPipelineRef.current = runPipeline }, [runPipeline])
+  const cancelPipelineRef = useRef(cancelPipeline)
+  useEffect(() => { cancelPipelineRef.current = cancelPipeline }, [cancelPipeline])
+
+  // Register actions with tabs context
+  useEffect(() => {
+    const actions: TabActions = {
+      runPipeline: (opts) => runPipelineRef.current(opts),
+      cancelPipeline: () => cancelPipelineRef.current(),
+      exportFlowJson,
+      importFlowJson,
+      hasHitlBlocks: () => [...walkBlocks(pipelineRef.current.blocks)].some((b) => b.type === 'hitl'),
+    }
+    registerTabActions(tabId, actions)
+    return () => unregisterTabActions(tabId)
+  }, [tabId, registerTabActions, unregisterTabActions, exportFlowJson, importFlowJson])
+
+  // Check if any block (trunk + branches) has unsatisfied required inputs
+  const hasMissingRequired = [...walkBlocks(pipeline.blocks)].some((block) => {
+    if (block.disabled) return false
+    const def = getNodeType(block.type)
+    if (!def) return false
+    const requiredInputNames = getRequiredInputNames(block.type)
+    const requiredInputs = def.inputs.filter((p) => requiredInputNames.has(p.name))
+    if (requiredInputs.length === 0) return false
+    const location = findBlockInTree(pipeline.blocks, block.id)
+    if (!location) return false
+    const upstreamKinds = new Set<string>()
+    for (const anc of location.ancestors) {
+      if (anc.disabled) continue
+      const ancIndex = location.ancestors.findIndex((candidate) => candidate.id === anc.id)
+      const outputKinds = getAdvertisedOutputKinds(
+        location.ancestors,
+        ancIndex,
+        outputHints,
+      )
+      for (const kind of outputKinds) upstreamKinds.add(kind)
+    }
+    return requiredInputs.some((port) => !upstreamKinds.has(canonicalizePortKind(port.kind)))
+  })
+
+  const hasCompletedBlocks = [...blockStates.values()].some(
+    (s) => s.status === 'completed' && Object.keys(s.outputs).length > 0,
+  )
+
+  return (
+    <PipelineCtx.Provider
+      value={{
+        pipeline,
+        addBlock,
+        removeBlock,
+        setBlockLabel,
+        blockStates,
+        setBlockOutput,
+        setBlockStatus,
+        setBlockStatusMessage,
+        getInputsForBlock,
+        isBlockReady,
+        getAddableTypes,
+        registerBlockExecute,
+        setOutputHint,
+        runPipeline,
+        cancelPipeline,
+        isRunning,
+        runningBlockId,
+        setBlockSource,
+        setBlockSourceMode,
+        setBlockSourceSelection,
+        clearBlockSource,
+        resetRuntimeFromBlock,
+        getUpstreamProducers,
+        getUpstreamProducerValues,
+        getPortSources,
+        getDownstreamConsumers,
+        hasMissingRequired,
+        hasCompletedBlocks,
+        importFlowJson,
+        toggleBlockDisabled,
+        exportFlowJson,
+        addBranch,
+        addBlockToBranch,
+        insertBlockAdjacent,
+        removeBranch,
+        getAddableTypesForBranch,
+        iterationState,
+        isLooping: loopingTabs[tabId] ?? false,
+        selectedBlockId,
+        setSelectedBlockId,
+      }}
+    >
+      {children}
+    </PipelineCtx.Provider>
+  )
+}

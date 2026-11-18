@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Wrong or missing price
+    url: https://github.com/Hearmeman24/blockflow-prices/issues
+    about: Cost estimates come from the public price list. Report a wrong or missing price there.
+  - name: Setup help for coding agents
+    url: https://github.com/Hearmeman24/Blockflow-Studio/blob/main/AGENTS.md
+    about: The setup procedure an agent follows, and the commands to check an install.

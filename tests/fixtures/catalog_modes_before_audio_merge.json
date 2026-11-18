@@ -1,0 +1,1630 @@
+{
+ "_comment": "Catalog payload modes captured before the voice kind was merged into audio (commit cb33991). Only mentions.voice is expected to differ.",
+ "modes": {
+  "kie/gpt-image-2.6/image_to_image": {
+   "aspect_ratios": {
+    "default": "auto",
+    "values": [
+     "auto",
+     "1:1",
+     "3:2",
+     "2:3",
+     "4:3",
+     "3:4",
+     "5:4",
+     "4:5",
+     "16:9",
+     "9:16",
+     "2:1",
+     "1:2",
+     "21:9",
+     "9:21",
+     "3:1",
+     "1:3"
+    ]
+   },
+   "audio_only_allowed": false,
+   "available": true,
+   "duration": null,
+   "frames": null,
+   "ids": {
+    "model": "gpt-image-2-6/flare-image-to-image",
+    "task_type": null,
+    "version": null
+   },
+   "max_total_references": null,
+   "media": [
+    {
+     "formats": [
+      "jpeg",
+      "jpg",
+      "png",
+      "webp"
+     ],
+     "kind": "image",
+     "max_aspect": null,
+     "max_count": 16,
+     "max_duration_s": null,
+     "max_side_px": null,
+     "max_size_bytes": null,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 1,
+     "min_duration_s": null,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "audio {n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "image {n}",
+    "last_frame": null,
+    "video": "video {n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "image_to_image",
+   "notes": [],
+   "prompt": {
+    "max_length": 32000,
+    "min_length": 1,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "1K",
+    "values": [
+     "1K",
+     "2K",
+     "4K"
+    ]
+   },
+   "rules": [
+    "transparent_needs_png_or_webp",
+    "compression_needs_jpeg_or_webp"
+   ],
+   "settings": [
+    {
+     "category": "variant",
+     "choices": [
+      "flare",
+      "sunburst",
+      "economy"
+     ],
+     "default": "flare",
+     "description": "Flare and Sunburst are separate models; Economy is the budget route.",
+     "key": "tier",
+     "label": "Tier",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "general",
+     "choices": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "auto"
+     ],
+     "default": "medium",
+     "description": "",
+     "key": "quality",
+     "label": "Quality",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "general",
+     "choices": [
+      "auto",
+      "transparent",
+      "opaque"
+     ],
+     "default": "auto",
+     "description": "Transparent needs PNG or WebP output.",
+     "key": "background",
+     "label": "Background",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "general",
+     "choices": [
+      "png",
+      "jpeg",
+      "webp"
+     ],
+     "default": "png",
+     "description": "",
+     "key": "output_format",
+     "label": "Output format",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "general",
+     "choices": [
+      "low",
+      "medium",
+      "high"
+     ],
+     "default": "high",
+     "description": "",
+     "key": "complexity",
+     "label": "Planning complexity",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "content",
+     "choices": [
+      "auto",
+      "low"
+     ],
+     "default": "low",
+     "description": "",
+     "key": "moderation",
+     "label": "Moderation",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "general",
+     "choices": [],
+     "default": null,
+     "description": "JPEG / WebP only.",
+     "key": "output_compression",
+     "label": "Compression",
+     "maximum": 100,
+     "minimum": 0,
+     "type": "int"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": "tier",
+   "variants": [
+    [
+     "flare",
+     {
+      "aspect_ratios": {
+       "default": "auto",
+       "values": [
+        "auto",
+        "1:1",
+        "3:2",
+        "2:3",
+        "4:3",
+        "3:4",
+        "5:4",
+        "4:5",
+        "16:9",
+        "9:16",
+        "2:1",
+        "1:2",
+        "21:9",
+        "9:21",
+        "3:1",
+        "1:3"
+       ]
+      },
+      "audio_only_allowed": false,
+      "duration": null,
+      "frames": null,
+      "ids": {
+       "model": "gpt-image-2-6/flare-image-to-image",
+       "task_type": null,
+       "version": null
+      },
+      "max_total_references": null,
+      "media": [
+       {
+        "formats": [
+         "jpeg",
+         "jpg",
+         "png",
+         "webp"
+        ],
+        "kind": "image",
+        "max_aspect": null,
+        "max_count": 16,
+        "max_duration_s": null,
+        "max_side_px": null,
+        "max_size_bytes": null,
+        "max_total_duration_s": null,
+        "min_aspect": null,
+        "min_count": 1,
+        "min_duration_s": null,
+        "min_side_px": null,
+        "min_total_duration_s": null
+       }
+      ],
+      "mentions": {
+       "audio": "audio {n}",
+       "documented": true,
+       "first_frame": null,
+       "image": "image {n}",
+       "last_frame": null,
+       "video": "video {n}",
+       "voice": "{name}"
+      },
+      "min_total_references": 1,
+      "mixed_media_allowed": true,
+      "mode": "image_to_image",
+      "notes": [],
+      "prompt": {
+       "max_length": 32000,
+       "min_length": 1,
+       "requirement": "required"
+      },
+      "resolutions": {
+       "default": "1K",
+       "values": [
+        "1K",
+        "2K",
+        "4K"
+       ]
+      },
+      "rules": [
+       "transparent_needs_png_or_webp",
+       "compression_needs_jpeg_or_webp"
+      ],
+      "settings": [
+       {
+        "category": "variant",
+        "choices": [
+         "flare",
+         "sunburst",
+         "economy"
+        ],
+        "default": "flare",
+        "description": "Flare and Sunburst are separate models; Economy is the budget route.",
+        "key": "tier",
+        "label": "Tier",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "low",
+         "medium",
+         "high",
+         "xhigh",
+         "max",
+         "auto"
+        ],
+        "default": "medium",
+        "description": "",
+        "key": "quality",
+        "label": "Quality",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "auto",
+         "transparent",
+         "opaque"
+        ],
+        "default": "auto",
+        "description": "Transparent needs PNG or WebP output.",
+        "key": "background",
+        "label": "Background",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "png",
+         "jpeg",
+         "webp"
+        ],
+        "default": "png",
+        "description": "",
+        "key": "output_format",
+        "label": "Output format",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "low",
+         "medium",
+         "high"
+        ],
+        "default": "high",
+        "description": "",
+        "key": "complexity",
+        "label": "Planning complexity",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "content",
+        "choices": [
+         "auto",
+         "low"
+        ],
+        "default": "low",
+        "description": "",
+        "key": "moderation",
+        "label": "Moderation",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [],
+        "default": null,
+        "description": "JPEG / WebP only.",
+        "key": "output_compression",
+        "label": "Compression",
+        "maximum": 100,
+        "minimum": 0,
+        "type": "int"
+       }
+      ],
+      "supported": true,
+      "unavailable_reason": null,
+      "variant_key": null,
+      "variants": []
+     }
+    ],
+    [
+     "sunburst",
+     {
+      "aspect_ratios": {
+       "default": "auto",
+       "values": [
+        "auto",
+        "1:1",
+        "3:2",
+        "2:3",
+        "4:3",
+        "3:4",
+        "5:4",
+        "4:5",
+        "16:9",
+        "9:16",
+        "2:1",
+        "1:2",
+        "21:9",
+        "9:21",
+        "3:1",
+        "1:3"
+       ]
+      },
+      "audio_only_allowed": false,
+      "duration": null,
+      "frames": null,
+      "ids": {
+       "model": "gpt-image-2-6/sunburst-image-to-image",
+       "task_type": null,
+       "version": null
+      },
+      "max_total_references": null,
+      "media": [
+       {
+        "formats": [
+         "jpeg",
+         "jpg",
+         "png",
+         "webp"
+        ],
+        "kind": "image",
+        "max_aspect": null,
+        "max_count": 16,
+        "max_duration_s": null,
+        "max_side_px": null,
+        "max_size_bytes": null,
+        "max_total_duration_s": null,
+        "min_aspect": null,
+        "min_count": 1,
+        "min_duration_s": null,
+        "min_side_px": null,
+        "min_total_duration_s": null
+       }
+      ],
+      "mentions": {
+       "audio": "audio {n}",
+       "documented": true,
+       "first_frame": null,
+       "image": "image {n}",
+       "last_frame": null,
+       "video": "video {n}",
+       "voice": "{name}"
+      },
+      "min_total_references": 1,
+      "mixed_media_allowed": true,
+      "mode": "image_to_image",
+      "notes": [],
+      "prompt": {
+       "max_length": 32000,
+       "min_length": 1,
+       "requirement": "required"
+      },
+      "resolutions": {
+       "default": "1K",
+       "values": [
+        "1K",
+        "2K",
+        "4K"
+       ]
+      },
+      "rules": [
+       "transparent_needs_png_or_webp",
+       "compression_needs_jpeg_or_webp"
+      ],
+      "settings": [
+       {
+        "category": "variant",
+        "choices": [
+         "flare",
+         "sunburst",
+         "economy"
+        ],
+        "default": "flare",
+        "description": "Flare and Sunburst are separate models; Economy is the budget route.",
+        "key": "tier",
+        "label": "Tier",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "low",
+         "medium",
+         "high",
+         "xhigh",
+         "max",
+         "auto"
+        ],
+        "default": "medium",
+        "description": "",
+        "key": "quality",
+        "label": "Quality",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "auto",
+         "transparent",
+         "opaque"
+        ],
+        "default": "auto",
+        "description": "Transparent needs PNG or WebP output.",
+        "key": "background",
+        "label": "Background",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "png",
+         "jpeg",
+         "webp"
+        ],
+        "default": "png",
+        "description": "",
+        "key": "output_format",
+        "label": "Output format",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "low",
+         "medium",
+         "high"
+        ],
+        "default": "high",
+        "description": "",
+        "key": "complexity",
+        "label": "Planning complexity",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "content",
+        "choices": [
+         "auto",
+         "low"
+        ],
+        "default": "low",
+        "description": "",
+        "key": "moderation",
+        "label": "Moderation",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [],
+        "default": null,
+        "description": "JPEG / WebP only.",
+        "key": "output_compression",
+        "label": "Compression",
+        "maximum": 100,
+        "minimum": 0,
+        "type": "int"
+       }
+      ],
+      "supported": true,
+      "unavailable_reason": null,
+      "variant_key": null,
+      "variants": []
+     }
+    ],
+    [
+     "economy",
+     {
+      "aspect_ratios": {
+       "default": "auto",
+       "values": [
+        "auto",
+        "1:1",
+        "16:9",
+        "9:16",
+        "3:2",
+        "2:3",
+        "21:9",
+        "4:3"
+       ]
+      },
+      "audio_only_allowed": false,
+      "duration": null,
+      "frames": null,
+      "ids": {
+       "model": "gpt-image-2-6/economy-image-to-image",
+       "task_type": null,
+       "version": null
+      },
+      "max_total_references": null,
+      "media": [
+       {
+        "formats": [
+         "jpeg",
+         "jpg",
+         "png",
+         "webp"
+        ],
+        "kind": "image",
+        "max_aspect": null,
+        "max_count": 16,
+        "max_duration_s": null,
+        "max_side_px": null,
+        "max_size_bytes": 30000000,
+        "max_total_duration_s": null,
+        "min_aspect": null,
+        "min_count": 1,
+        "min_duration_s": null,
+        "min_side_px": null,
+        "min_total_duration_s": null
+       }
+      ],
+      "mentions": {
+       "audio": "audio {n}",
+       "documented": true,
+       "first_frame": null,
+       "image": "image {n}",
+       "last_frame": null,
+       "video": "video {n}",
+       "voice": "{name}"
+      },
+      "min_total_references": 1,
+      "mixed_media_allowed": true,
+      "mode": "image_to_image",
+      "notes": [],
+      "prompt": {
+       "max_length": 20000,
+       "min_length": 1,
+       "requirement": "required"
+      },
+      "resolutions": null,
+      "rules": [],
+      "settings": [
+       {
+        "category": "variant",
+        "choices": [
+         "flare",
+         "sunburst",
+         "economy"
+        ],
+        "default": "flare",
+        "description": "Flare and Sunburst are separate models; Economy is the budget route.",
+        "key": "tier",
+        "label": "Tier",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "auto",
+         "transparent",
+         "opaque"
+        ],
+        "default": "auto",
+        "description": "Transparent needs PNG or WebP output.",
+        "key": "background",
+        "label": "Background",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       },
+       {
+        "category": "general",
+        "choices": [
+         "png"
+        ],
+        "default": "png",
+        "description": "",
+        "key": "output_format",
+        "label": "Output format",
+        "maximum": null,
+        "minimum": null,
+        "type": "enum"
+       }
+      ],
+      "supported": true,
+      "unavailable_reason": null,
+      "variant_key": null,
+      "variants": []
+     }
+    ]
+   ]
+  },
+  "kie/kling-4.0-flash/omni_reference_to_video": {
+   "aspect_ratios": {
+    "default": null,
+    "values": [
+     "auto",
+     "16:9",
+     "9:16",
+     "1:1",
+     "21:9"
+    ]
+   },
+   "audio_only_allowed": false,
+   "available": true,
+   "duration": {
+    "auto_value": null,
+    "default": 5,
+    "max_s": 20,
+    "min_s": 3
+   },
+   "frames": null,
+   "ids": {
+    "model": "kling-4.0/flash-reference-to-video",
+    "task_type": null,
+    "version": null
+   },
+   "max_total_references": 15,
+   "media": [
+    {
+     "formats": [],
+     "kind": "image",
+     "max_aspect": null,
+     "max_count": 10,
+     "max_duration_s": null,
+     "max_side_px": null,
+     "max_size_bytes": null,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [],
+     "kind": "video",
+     "max_aspect": null,
+     "max_count": 5,
+     "max_duration_s": null,
+     "max_side_px": null,
+     "max_size_bytes": null,
+     "max_total_duration_s": 20,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": null,
+     "min_total_duration_s": 2
+    }
+   ],
+   "mentions": {
+    "audio": "Audio{n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "@image_{n}",
+    "last_frame": null,
+    "video": "@video_{n}",
+    "voice": "@{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "omni_reference_to_video",
+   "notes": [],
+   "prompt": {
+    "max_length": 8000,
+    "min_length": 1,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "720p",
+    "values": [
+     "720p"
+    ]
+   },
+   "rules": [
+    "kling_voice_names",
+    "keep_sound_needs_video"
+   ],
+   "settings": [
+    {
+     "category": "general",
+     "choices": [],
+     "default": false,
+     "description": "Keep the original audio of the reference videos. Only applies when videos are given.",
+     "key": "keep_original_sound",
+     "label": "Keep reference video sound",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  },
+  "kie/minimax-h3-image/image_to_image": {
+   "aspect_ratios": {
+    "default": "auto",
+    "values": [
+     "auto",
+     "1:1",
+     "5:4",
+     "4:3",
+     "3:2",
+     "16:9",
+     "21:9",
+     "4:5",
+     "3:4",
+     "2:3",
+     "9:16"
+    ]
+   },
+   "audio_only_allowed": false,
+   "available": true,
+   "duration": null,
+   "frames": null,
+   "ids": {
+    "model": "minimax-h3/image-edit",
+    "task_type": null,
+    "version": null
+   },
+   "max_total_references": null,
+   "media": [
+    {
+     "formats": [
+      "jpg",
+      "jpeg",
+      "png",
+      "webp",
+      "heic",
+      "bmp"
+     ],
+     "kind": "image",
+     "max_aspect": null,
+     "max_count": 16,
+     "max_duration_s": null,
+     "max_side_px": null,
+     "max_size_bytes": 20000000,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 1,
+     "min_duration_s": null,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "Audio{n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "<Picture {n}>",
+    "last_frame": null,
+    "video": "Video{n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "image_to_image",
+   "notes": [],
+   "prompt": {
+    "max_length": 5000,
+    "min_length": 1,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "2K",
+    "values": [
+     "1K",
+     "2K",
+     "4K"
+    ]
+   },
+   "rules": [],
+   "settings": [
+    {
+     "category": "general",
+     "choices": [],
+     "default": true,
+     "description": "Rewrite the prompt into a detailed description first.",
+     "key": "expand_prompt",
+     "label": "Expand prompt",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "general",
+     "choices": [
+      "png",
+      "jpeg"
+     ],
+     "default": "png",
+     "description": "",
+     "key": "output_format",
+     "label": "Output format",
+     "maximum": null,
+     "minimum": null,
+     "type": "enum"
+    },
+    {
+     "category": "general",
+     "choices": [],
+     "default": null,
+     "description": "Leave empty for a random seed.",
+     "key": "seed",
+     "label": "Seed",
+     "maximum": 2147483647,
+     "minimum": 0,
+     "type": "int"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  },
+  "kie/seedance-2/omni_reference_to_video": {
+   "aspect_ratios": {
+    "default": "16:9",
+    "values": [
+     "1:1",
+     "4:3",
+     "3:4",
+     "16:9",
+     "9:16",
+     "21:9",
+     "adaptive"
+    ]
+   },
+   "audio_only_allowed": false,
+   "available": true,
+   "duration": {
+    "auto_value": -1,
+    "default": 5,
+    "max_s": 15,
+    "min_s": 4
+   },
+   "frames": null,
+   "ids": {
+    "model": "bytedance/seedance-2",
+    "task_type": null,
+    "version": null
+   },
+   "max_total_references": 12,
+   "media": [
+    {
+     "formats": [
+      "jpeg",
+      "jpg",
+      "png",
+      "webp",
+      "bmp",
+      "tiff",
+      "gif"
+     ],
+     "kind": "image",
+     "max_aspect": 2.5,
+     "max_count": 9,
+     "max_duration_s": null,
+     "max_side_px": 6000,
+     "max_size_bytes": 30000000,
+     "max_total_duration_s": null,
+     "min_aspect": 0.4,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": 300,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "mp4",
+      "mov"
+     ],
+     "kind": "video",
+     "max_aspect": 2.5,
+     "max_count": 3,
+     "max_duration_s": 15,
+     "max_side_px": 6000,
+     "max_size_bytes": 50000000,
+     "max_total_duration_s": 15,
+     "min_aspect": 0.4,
+     "min_count": 0,
+     "min_duration_s": 2,
+     "min_side_px": 300,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "wav",
+      "mp3"
+     ],
+     "kind": "audio",
+     "max_aspect": null,
+     "max_count": 3,
+     "max_duration_s": 15,
+     "max_side_px": null,
+     "max_size_bytes": 15000000,
+     "max_total_duration_s": 15,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": 2,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "Audio{n}",
+    "documented": false,
+    "first_frame": null,
+    "image": "Image{n}",
+    "last_frame": null,
+    "video": "Video{n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "omni_reference_to_video",
+   "notes": [],
+   "prompt": {
+    "max_length": 20000,
+    "min_length": 3,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "720p",
+    "values": [
+     "480p",
+     "720p",
+     "1080p",
+     "4k"
+    ]
+   },
+   "rules": [],
+   "settings": [
+    {
+     "category": "general",
+     "choices": [],
+     "default": true,
+     "description": "Generate audio synchronised with the video.",
+     "key": "generate_audio",
+     "label": "Generate audio",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "content",
+     "choices": [],
+     "default": false,
+     "description": "Kie's optional extra content filter. Off by default in the API: results are returned as the model produced them.",
+     "key": "nsfw_checker",
+     "label": "Kie content filter",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  },
+  "kie/wan-3.0/omni_reference_to_video": {
+   "aspect_ratios": {
+    "default": "adaptive",
+    "values": [
+     "adaptive",
+     "16:9",
+     "4:3",
+     "1:1",
+     "3:4",
+     "9:16"
+    ]
+   },
+   "audio_only_allowed": true,
+   "available": true,
+   "duration": {
+    "auto_value": -1,
+    "default": 5,
+    "max_s": 30,
+    "min_s": 2
+   },
+   "frames": null,
+   "ids": {
+    "model": "wan/3-0-video",
+    "task_type": null,
+    "version": null
+   },
+   "max_total_references": null,
+   "media": [
+    {
+     "formats": [
+      "jpeg",
+      "jpg",
+      "png",
+      "bmp",
+      "webp"
+     ],
+     "kind": "image",
+     "max_aspect": 8,
+     "max_count": 10,
+     "max_duration_s": null,
+     "max_side_px": 8000,
+     "max_size_bytes": 20000000,
+     "max_total_duration_s": null,
+     "min_aspect": 0.125,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": 240,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "mp4",
+      "mov"
+     ],
+     "kind": "video",
+     "max_aspect": 8,
+     "max_count": 5,
+     "max_duration_s": 15,
+     "max_side_px": 4096,
+     "max_size_bytes": 100000000,
+     "max_total_duration_s": 15,
+     "min_aspect": 0.125,
+     "min_count": 0,
+     "min_duration_s": 1,
+     "min_side_px": 240,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "wav",
+      "mp3"
+     ],
+     "kind": "audio",
+     "max_aspect": null,
+     "max_count": 5,
+     "max_duration_s": 15,
+     "max_side_px": null,
+     "max_size_bytes": 15000000,
+     "max_total_duration_s": 15,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": 1,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "Audio{n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "Image{n}",
+    "last_frame": null,
+    "video": "Video{n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "omni_reference_to_video",
+   "notes": [],
+   "prompt": {
+    "max_length": 20000,
+    "min_length": null,
+    "requirement": "optional"
+   },
+   "resolutions": {
+    "default": "1080P",
+    "values": [
+     "480P",
+     "720P",
+     "1080P"
+    ]
+   },
+   "rules": [
+    "wan_video_plus_output"
+   ],
+   "settings": [
+    {
+     "category": "general",
+     "choices": [],
+     "default": true,
+     "description": "Include an audio track in the output.",
+     "key": "audio",
+     "label": "Generate audio",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "general",
+     "choices": [],
+     "default": null,
+     "description": "Leave empty for a random seed.",
+     "key": "seed",
+     "label": "Seed",
+     "maximum": 2147483647,
+     "minimum": 0,
+     "type": "int"
+    },
+    {
+     "category": "content",
+     "choices": [],
+     "default": false,
+     "description": "Kie's optional extra content filter. Off by default in the API: results are returned as the model produced them.",
+     "key": "nsfw_checker",
+     "label": "Kie content filter",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  },
+  "piapi/kling-4.0/omni_reference_to_video": {
+   "aspect_ratios": {
+    "default": "auto",
+    "values": [
+     "auto",
+     "16:9",
+     "9:16",
+     "1:1",
+     "21:9"
+    ]
+   },
+   "audio_only_allowed": false,
+   "available": true,
+   "duration": {
+    "auto_value": null,
+    "default": 5,
+    "max_s": 30,
+    "min_s": 3
+   },
+   "frames": null,
+   "ids": {
+    "model": "kling",
+    "task_type": "omni_video_generation",
+    "version": "4.0"
+   },
+   "max_total_references": 15,
+   "media": [
+    {
+     "formats": [],
+     "kind": "image",
+     "max_aspect": null,
+     "max_count": 10,
+     "max_duration_s": null,
+     "max_side_px": null,
+     "max_size_bytes": null,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "mp4"
+     ],
+     "kind": "video",
+     "max_aspect": 2.5,
+     "max_count": 5,
+     "max_duration_s": 30,
+     "max_side_px": null,
+     "max_size_bytes": 314572800,
+     "max_total_duration_s": 30,
+     "min_aspect": 0.4,
+     "min_count": 0,
+     "min_duration_s": 3,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "mp3",
+      "wav",
+      "flac"
+     ],
+     "kind": "audio",
+     "max_aspect": null,
+     "max_count": 3,
+     "max_duration_s": 30,
+     "max_side_px": null,
+     "max_size_bytes": 52428800,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": 5,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "audio_{n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "@image_{n}",
+    "last_frame": null,
+    "video": "@video_{n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "omni_reference_to_video",
+   "notes": [],
+   "prompt": {
+    "max_length": 2500,
+    "min_length": null,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "720p",
+    "values": [
+     "720p",
+     "1080p"
+    ]
+   },
+   "rules": [
+    "keep_audio_needs_video_and_no_audio"
+   ],
+   "settings": [
+    {
+     "category": "general",
+     "choices": [],
+     "default": true,
+     "description": "Generate native audio.",
+     "key": "enable_audio",
+     "label": "Generate audio",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "general",
+     "choices": [],
+     "default": false,
+     "description": "Keep the reference video's original audio. Needs a reference video and audio generation off.",
+     "key": "keep_original_audio",
+     "label": "Keep reference video sound",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  },
+  "piapi/seedance-2.5/omni_reference_to_video": {
+   "aspect_ratios": {
+    "default": "16:9",
+    "values": [
+     "16:9",
+     "9:16",
+     "4:3",
+     "3:4",
+     "21:9",
+     "1:1",
+     "adaptive"
+    ]
+   },
+   "audio_only_allowed": true,
+   "available": true,
+   "duration": {
+    "auto_value": null,
+    "default": 5,
+    "max_s": 30,
+    "min_s": 4
+   },
+   "frames": null,
+   "ids": {
+    "model": "seedance",
+    "task_type": "seedance-2.5",
+    "version": null
+   },
+   "max_total_references": 50,
+   "media": [
+    {
+     "formats": [],
+     "kind": "image",
+     "max_aspect": null,
+     "max_count": 30,
+     "max_duration_s": null,
+     "max_side_px": null,
+     "max_size_bytes": null,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "mp4",
+      "mov"
+     ],
+     "kind": "video",
+     "max_aspect": null,
+     "max_count": 10,
+     "max_duration_s": 30,
+     "max_side_px": null,
+     "max_size_bytes": 200000000,
+     "max_total_duration_s": 30,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": 2,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    },
+    {
+     "formats": [
+      "mp3",
+      "wav"
+     ],
+     "kind": "audio",
+     "max_aspect": null,
+     "max_count": 10,
+     "max_duration_s": 30,
+     "max_side_px": null,
+     "max_size_bytes": 15000000,
+     "max_total_duration_s": 30,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": 2,
+     "min_side_px": null,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "@audio{n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "@image{n}",
+    "last_frame": null,
+    "video": "@video{n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 1,
+   "mixed_media_allowed": true,
+   "mode": "omni_reference_to_video",
+   "notes": [],
+   "prompt": {
+    "max_length": 4000,
+    "min_length": null,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "720p",
+    "values": [
+     "480p",
+     "720p",
+     "1080p"
+    ]
+   },
+   "rules": [],
+   "settings": [
+    {
+     "category": "content",
+     "choices": [],
+     "default": false,
+     "description": "Use PiAPI's -less-restriction task type: a more permissive content review at a higher price, with no retry after a content rejection.",
+     "key": "less_restriction",
+     "label": "Less restriction",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "content",
+     "choices": [],
+     "default": false,
+     "description": "References show real people. Switches to the -less-restriction task type and sends auto_upload_assets so PiAPI ingests the references into its Private Asset Library. Adds up to about 90 seconds and needs a paid PiAPI plan.",
+     "key": "real_people",
+     "label": "Real people in references",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  },
+  "piapi/seedance-2/image_to_video": {
+   "aspect_ratios": {
+    "default": "16:9",
+    "values": [
+     "21:9",
+     "16:9",
+     "4:3",
+     "1:1",
+     "3:4",
+     "9:16",
+     "auto"
+    ]
+   },
+   "audio_only_allowed": false,
+   "available": true,
+   "duration": {
+    "auto_value": null,
+    "default": 5,
+    "max_s": 15,
+    "min_s": 4
+   },
+   "frames": {
+    "first_frame_required": true,
+    "last_frame_allowed": true
+   },
+   "ids": {
+    "model": "seedance",
+    "task_type": "seedance-2",
+    "version": null
+   },
+   "max_total_references": null,
+   "media": [
+    {
+     "formats": [
+      "jpg",
+      "jpeg",
+      "png",
+      "webp",
+      "bmp"
+     ],
+     "kind": "image",
+     "max_aspect": null,
+     "max_count": 2,
+     "max_duration_s": null,
+     "max_side_px": 6000,
+     "max_size_bytes": 30000000,
+     "max_total_duration_s": null,
+     "min_aspect": null,
+     "min_count": 0,
+     "min_duration_s": null,
+     "min_side_px": 300,
+     "min_total_duration_s": null
+    }
+   ],
+   "mentions": {
+    "audio": "@audio{n}",
+    "documented": true,
+    "first_frame": null,
+    "image": "@image{n}",
+    "last_frame": null,
+    "video": "@video{n}",
+    "voice": "{name}"
+   },
+   "min_total_references": 0,
+   "mixed_media_allowed": false,
+   "mode": "image_to_video",
+   "notes": [],
+   "prompt": {
+    "max_length": 4000,
+    "min_length": null,
+    "requirement": "required"
+   },
+   "resolutions": {
+    "default": "480p",
+    "values": [
+     "480p",
+     "720p",
+     "1080p"
+    ]
+   },
+   "rules": [],
+   "settings": [
+    {
+     "category": "general",
+     "choices": [],
+     "default": true,
+     "description": "No audio is generated when off.",
+     "key": "audio",
+     "label": "Generate audio",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "content",
+     "choices": [],
+     "default": false,
+     "description": "Use PiAPI's -less-restriction task type: a more permissive content review at a higher price, with no retry after a content rejection.",
+     "key": "less_restriction",
+     "label": "Less restriction",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    },
+    {
+     "category": "content",
+     "choices": [],
+     "default": false,
+     "description": "References show real people. Switches to the -less-restriction task type and sends auto_upload_assets so PiAPI ingests the references into its Private Asset Library. Adds up to about 90 seconds and needs a paid PiAPI plan.",
+     "key": "real_people",
+     "label": "Real people in references",
+     "maximum": null,
+     "minimum": null,
+     "type": "bool"
+    }
+   ],
+   "supported": true,
+   "unavailable_reason": null,
+   "variant_key": null,
+   "variants": []
+  }
+ }
+}

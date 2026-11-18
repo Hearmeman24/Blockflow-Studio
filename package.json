@@ -1,0 +1,31 @@
+{
+  "name": "blockflow-studio",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "description": "BlockFlow Studio: local visual pipelines for AI image and video generation with your own Kie and PiAPI keys",
+  "keywords": [
+    "ai",
+    "image-generation",
+    "video-generation",
+    "byok",
+    "kie",
+    "piapi",
+    "pipeline"
+  ],
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "npm --prefix frontend run build"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hearmeman24/Blockflow-Studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Hearmeman24/Blockflow-Studio/issues"
+  },
+  "homepage": "https://github.com/Hearmeman24/Blockflow-Studio#readme"
+}

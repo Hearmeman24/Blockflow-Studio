@@ -1,0 +1,208 @@
+{
+  "text_to_image": {
+    "name": "MCP Run",
+    "version": 1,
+    "schema_version": 6,
+    "created_at": "2026-11-15T13:22:51.000Z",
+    "blocks": [
+      {
+        "type": "textToImage",
+        "config": {
+          "provider": "kie",
+          "model": "seedream-5-pro",
+          "prompt": "a lighthouse",
+          "use_upstream_prompt": false,
+          "params": {
+            "duration": null,
+            "resolution": null,
+            "aspect_ratio": "16:9",
+            "settings": {
+              "quality": "high"
+            }
+          }
+        }
+      },
+      {
+        "type": "imageViewer"
+      }
+    ]
+  },
+  "image_to_image": {
+    "name": "MCP Run",
+    "version": 1,
+    "schema_version": 6,
+    "created_at": "2026-11-15T13:22:51.000Z",
+    "blocks": [
+      {
+        "type": "uploadImageToTmpfiles",
+        "config": {
+          "items": [
+            {
+              "id": "mcp-fx-i2i-image-0",
+              "label": "cat.png",
+              "status": "ready",
+              "local": "/outputs/cat.png",
+              "size_bytes": 2048,
+              "width": 1024,
+              "height": 1024
+            }
+          ]
+        }
+      },
+      {
+        "type": "imageToImage",
+        "config": {
+          "provider": "kie",
+          "model": "seedream-5-flash",
+          "prompt": "make Image1 a watercolour",
+          "use_upstream_prompt": false,
+          "params": {
+            "duration": null,
+            "resolution": "1.5K",
+            "aspect_ratio": null,
+            "settings": {}
+          }
+        }
+      },
+      {
+        "type": "imageViewer"
+      }
+    ]
+  },
+  "text_to_video": {
+    "name": "MCP Run",
+    "version": 1,
+    "schema_version": 6,
+    "created_at": "2026-11-15T13:22:51.000Z",
+    "blocks": [
+      {
+        "type": "textToVideo",
+        "config": {
+          "provider": "kie",
+          "model": "seedance-2",
+          "prompt": "a fox in snow",
+          "use_upstream_prompt": false,
+          "params": {
+            "duration": 5,
+            "resolution": "720p",
+            "aspect_ratio": "16:9",
+            "settings": {
+              "generate_audio": true
+            }
+          }
+        }
+      },
+      {
+        "type": "videoViewer"
+      }
+    ]
+  },
+  "image_to_video": {
+    "name": "MCP Run",
+    "version": 1,
+    "schema_version": 6,
+    "created_at": "2026-11-15T13:22:51.000Z",
+    "blocks": [
+      {
+        "type": "uploadImageToTmpfiles",
+        "config": {
+          "items": [
+            {
+              "id": "mcp-fx-i2v-image-0",
+              "label": "first.png",
+              "status": "ready",
+              "local": "/outputs/first.png"
+            },
+            {
+              "id": "mcp-fx-i2v-image-1",
+              "label": "last.jpg",
+              "status": "ready",
+              "url": "https://img.test/last.jpg"
+            }
+          ]
+        }
+      },
+      {
+        "type": "imageToVideo",
+        "config": {
+          "provider": "kie",
+          "model": "seedance-2",
+          "prompt": "the camera pushes in",
+          "use_upstream_prompt": false,
+          "params": {
+            "duration": 5,
+            "resolution": null,
+            "aspect_ratio": null,
+            "settings": {}
+          }
+        }
+      },
+      {
+        "type": "videoViewer"
+      }
+    ]
+  },
+  "omni_reference_to_video": {
+    "name": "MCP Run",
+    "version": 1,
+    "schema_version": 6,
+    "created_at": "2026-11-15T13:22:51.000Z",
+    "blocks": [
+      {
+        "type": "omniReferenceLoader",
+        "config": {
+          "video_items": [
+            {
+              "id": "mcp-fx-omni-video-0",
+              "label": "motion.mp4",
+              "status": "ready",
+              "local": "/outputs/motion.mp4",
+              "duration_s": 4.2
+            }
+          ],
+          "image_items": [
+            {
+              "id": "mcp-fx-omni-image-0",
+              "label": "face.png",
+              "status": "ready",
+              "local": "/outputs/face.png"
+            }
+          ],
+          "audio_items": [
+            {
+              "id": "mcp-fx-omni-audio-0",
+              "label": "beat.mp3",
+              "status": "ready",
+              "local": "/outputs/beat.mp3",
+              "duration_s": 6
+            },
+            {
+              "id": "mcp-fx-omni-audio-1",
+              "label": "anna.wav",
+              "status": "ready",
+              "local": "/outputs/anna.wav"
+            }
+          ]
+        }
+      },
+      {
+        "type": "omniReferenceToVideo",
+        "config": {
+          "provider": "piapi",
+          "model": "seedance-2",
+          "prompt": "@image1 dances like @video1 while Anna sings",
+          "use_upstream_prompt": false,
+          "params": {
+            "duration": 5,
+            "resolution": null,
+            "aspect_ratio": null,
+            "settings": {}
+          }
+        }
+      },
+      {
+        "type": "videoViewer"
+      }
+    ]
+  }
+}
