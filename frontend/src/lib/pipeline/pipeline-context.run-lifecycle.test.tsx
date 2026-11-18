@@ -381,6 +381,36 @@ describe('after a reload with jobs in flight', () => {
     expect(tabState(tab)).toBe('done')
   })
 
+  it('a block the resume does not track ends idle with the interrupted note once the resume settles', async () => {
+    storeReloadedTab([{ id: 'r1', type: 'lc_resume' }, { id: 'p', type: 'lc_gen' }], { r1: 'job-1' })
+    const runtime = persistedRuntime(`lc-${tabCounter + 1}`)
+    runtime.blockStates[1][1].status = 'running'
+    sessionStorage.setItem(`pipeline_runtime_v2_lc-${tabCounter + 1}`, JSON.stringify(runtime))
+    const [tab] = renderTabs([{ stored: true }])
+    await waitFor(() => expect(tabState(tab)).toBe('running'))
+    expect(api(tab).blockStates.get('p')?.status).toBe('running')
+
+    jobStatus.set('job-1', 'COMPLETED')
+    await waitFor(() => expect(api(tab).isRunning).toBe(false))
+    await waitFor(() => expect(api(tab).blockStates.get('p')?.status).toBe('idle'))
+    expect(api(tab).blockStates.get('p')?.statusMessage).toMatch(/Run tracking was interrupted/)
+    expect(api(tab).blockStates.get('r1')?.status).toBe('completed')
+  })
+
+  it('Stop on a resumed tab leaves no block running', async () => {
+    storeReloadedTab([{ id: 'r1', type: 'lc_resume' }, { id: 'p', type: 'lc_gen' }], { r1: 'job-1' })
+    const runtime = persistedRuntime(`lc-${tabCounter + 1}`)
+    runtime.blockStates[1][1].status = 'running'
+    sessionStorage.setItem(`pipeline_runtime_v2_lc-${tabCounter + 1}`, JSON.stringify(runtime))
+    const [tab] = renderTabs([{ stored: true }])
+    await waitFor(() => expect(tabState(tab)).toBe('running'))
+
+    act(() => { tabs().cancelActivePipeline() })
+    await waitFor(() => expect(cancelled).toEqual(['job-1']))
+    await waitFor(() => expect(api(tab).blockStates.get('p')?.status).toBe('cancelled'))
+    expect([...api(tab).blockStates.values()].some((s) => s.status === 'running')).toBe(false)
+  })
+
   it('a run cannot start while the resumed job is in flight', async () => {
     storeReloadedTab([{ id: 'r1', type: 'lc_resume' }, { id: 'g', type: 'lc_gen' }], { r1: 'job-1' })
     const [tab] = renderTabs([{ stored: true }])

@@ -39,13 +39,18 @@ export interface Pipeline {
 // Declared in `@/lib/status`; re-exported for existing imports.
 export type { BlockStatus }
 
-export interface BlockState {
-  status: BlockStatus
+interface BlockStateBase {
   outputs: Record<string, unknown>
-  error?: string
-  /** Custom label shown on the status badge (e.g. "Generating prompt…"). Cleared on status change. */
+  /** The block's status message (e.g. "Generating prompt…"). Cleared on status
+   *  change; where each status shows it is `blockStatusDisplay` (block-status-badge). */
   statusMessage?: string
 }
+
+/** A block's runtime state. Error text exists only on a block in error
+ *  (build one with `blockStateWith` in `./block-state`). */
+export type BlockState =
+  | (BlockStateBase & { status: 'error'; error?: string })
+  | (BlockStateBase & { status: Exclude<BlockStatus, 'error'>; error?: undefined })
 
 // ---- Iteration (multi-item loaders) ----
 

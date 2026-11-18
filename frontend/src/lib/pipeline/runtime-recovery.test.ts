@@ -41,6 +41,15 @@ describe('normalizeRecoveredRuntime after a reload', () => {
     expect(recovered.blockStates[0][1].statusMessage).toMatch(/interrupted/i)
   })
 
+  test('marks a block left running idle even when the run was no longer marked running', () => {
+    const recovered = normalizeRecoveredRuntime(runningRuntime(false), false)
+
+    expect(recovered.isRunning).toBe(false)
+    expect(recovered.blockStates[0][1].status).toBe('idle')
+    expect(recovered.blockStates[0][1].statusMessage).toMatch(/interrupted/i)
+    expect(recovered.blockStates[1][1]).toEqual({ status: 'idle', outputs: {} })
+  })
+
   test('ignores pending jobs that belong to another tab\'s blocks', () => {
     savePendingJobRun('elsewhere', {
       kind: 'image',

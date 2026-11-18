@@ -10,6 +10,7 @@ import {
   stubGenerationFetch,
   type TestBlockProps,
 } from '@/test-utils/byok-harness'
+import { abortPoll } from '@/lib/pipeline/job-poller'
 import { GenerationBlockShell, type GenerationBlockConfig } from './generation-block-shell'
 
 const T2V: GenerationBlockConfig = { mode: 'text_to_video', output: 'video', referenceKinds: [] }
@@ -183,6 +184,18 @@ describe('GenerationBlockShell run', () => {
     await waitFor(() => expect(props.setOutput).toHaveBeenCalledWith('video', expect.objectContaining({ kind: 'video-ref', local: 'https://cdn/r.mp4', url: 'https://cdn/r.mp4' })))
     expect(props.setExecutionStatus).toHaveBeenCalledWith('running')
     expect(props.setExecutionStatus).toHaveBeenLastCalledWith('completed')
+  })
+
+  it('a resumed job stopped by the user leaves the block cancelled, not running or idle', async () => {
+    sessionStorage.setItem('block_r6_pending_jobs_v1', JSON.stringify({
+      kind: 'generation', total: 1, submissionFailures: 0, submitted: [{ idx: 0, jobId: 'job-8' }], startedAt: Date.now(),
+    }))
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ job_id: 'job-8', status: 'RUNNING' })] })
+    const props = blockProps('r6')
+    mount(T2V, props)
+    await waitFor(() => expect(props.setExecutionStatus).toHaveBeenCalledWith('running'))
+    act(() => { abortPoll('r6') })
+    await waitFor(() => expect(props.setExecutionStatus).toHaveBeenLastCalledWith('cancelled'))
   })
 })
 

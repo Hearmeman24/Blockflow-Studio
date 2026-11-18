@@ -475,6 +475,34 @@ describe('a cancelled run', () => {
     expect(savedRun().block_results[1].outputs.image.value).toEqual(generatedRef(second))
   })
 
+  it('a cancelled run that unwinds after a newer run started saves what it did, not the newer run\'s reset states', async () => {
+    const [first, second] = renderFlow([
+      { type: 'rs_gen', config: { prompt: 'first' } }, { type: 'rs_gen', config: { prompt: 'second' } }, { type: 'rs_view' },
+    ])
+    const cancelled = startRun()
+    await isWaiting(first)
+    await release(first)
+    await isWaiting(second)
+    let newer!: Promise<{ hadError: boolean }>
+    await act(async () => {
+      api().cancelPipeline()
+      newer = api().runPipeline()
+      await cancelled
+    })
+
+    const run = savedRun()
+    expect(run.status).toBe('partial')
+    expect(statuses()).toEqual(['completed', 'cancelled', 'idle'])
+    expect(run.block_results[0].outputs.image).toEqual({ kind: 'image', value: generatedRef(first) })
+    expect(run.block_results[1].outputs).toEqual({})
+    // The newer run is running its first block, untouched by the old run's end.
+    expect(api().blockStates.get(first)?.status).toBe('running')
+
+    await isWaiting(first)
+    await cancelRun(newer)
+    expect(saveRun).toHaveBeenCalledTimes(1)
+  })
+
   it('a run that was not cancelled is saved as before, after an earlier run was cancelled', async () => {
     const [gen] = renderFlow([{ type: 'rs_gen', config: { prompt: 'a cat' } }])
     const cancelled = startRun()

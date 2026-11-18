@@ -48,6 +48,8 @@ import { usePipelineTabs, type TabActions } from './tabs-context'
 import { saveRun } from '@/lib/api'
 import type { BlockResult, RunEntry } from '@/lib/types'
 import { hasPendingJobRunForBlock } from './job-pending'
+import { blockStateWith, interruptRunningBlocks, sanitizeBlockState, type RunningBlockEnd } from './block-state'
+import { deriveRunStatus, savedBlockStatus, shouldSaveRun } from './run-outcome'
 import { abortPoll, hasActivePoll, subscribePolls } from './job-poller'
 import {
   canStartRun,
@@ -99,7 +101,11 @@ export function normalizeRecoveredRuntime(
   runtime: PersistedPipelineRuntime,
   tabMarkedRunning: boolean,
 ): PersistedPipelineRuntime {
-  if (tabMarkedRunning) {
+  // Check only this tab's blocks for pending polling runs (not global)
+  const hasPendingJobs = !tabMarkedRunning && runtime.blockStates.some(([id]) => hasPendingJobRunForBlock(id))
+  if (tabMarkedRunning || hasPendingJobs) {
+    // Jobs to rejoin: the tab resumes. A block nothing finishes is ended when
+    // the resume settles (`interruptRunningBlocks`).
     if (runtime.isRunning) return runtime
     const firstRunning = runtime.blockStates.find(([, state]) => state.status === 'running')
     return {
@@ -109,33 +115,10 @@ export function normalizeRecoveredRuntime(
     }
   }
 
-  // Check only this tab's blocks for pending polling runs (not global)
-  const hasPendingJobs = runtime.blockStates.some(([id]) => hasPendingJobRunForBlock(id))
-  if (runtime.isRunning && hasPendingJobs) return runtime
-  if (!runtime.isRunning && hasPendingJobs) {
-    const firstRunning = runtime.blockStates.find(([, state]) => state.status === 'running')
-    return {
-      ...runtime,
-      isRunning: true,
-      runningBlockId: runtime.runningBlockId ?? firstRunning?.[0] ?? null,
-    }
-  }
-  if (!runtime.isRunning) return runtime
-
-  const recoveredStates = runtime.blockStates.map(([id, state]) => {
-    if (state.status !== 'running') return [id, state] as [string, BlockState]
-    return [
-      id,
-      {
-        ...state,
-        status: 'idle',
-        statusMessage: 'Run tracking was interrupted. Check Artifacts for completed outputs.',
-      },
-    ] as [string, BlockState]
-  })
-
+  // Nothing to rejoin: a block still running was interrupted by the reload,
+  // whether or not the run was still marked running when it was stored.
   return {
-    blockStates: recoveredStates,
+    blockStates: [...interruptRunningBlocks(new Map(runtime.blockStates), 'interrupted')],
     isRunning: false,
     runningBlockId: null,
   }
@@ -154,17 +137,13 @@ function loadPipelineRuntime(tabId: string): PersistedPipelineRuntime {
       runningBlockId?: unknown
     }
 
-    const entries = Array.isArray(parsed.blockStates)
-      ? parsed.blockStates.filter(
-          (entry): entry is [string, BlockState] =>
-            Array.isArray(entry) &&
-            entry.length === 2 &&
-            typeof entry[0] === 'string' &&
-            !!entry[1] &&
-            typeof entry[1] === 'object' &&
-            'outputs' in (entry[1] as Record<string, unknown>),
-        )
-      : []
+    // States from this build or another one: an unknown status loads as idle.
+    const entries: Array<[string, BlockState]> = []
+    for (const entry of Array.isArray(parsed.blockStates) ? parsed.blockStates : []) {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string') continue
+      const state = sanitizeBlockState(entry[1])
+      if (state) entries.push([entry[0], state])
+    }
 
     return {
       blockStates: entries,
@@ -193,6 +172,30 @@ interface AccumulatorEntry {
 
 /** Multi-source accumulator: PortKind → list of upstream producers (in pipeline order) */
 type Accumulator = Map<string, AccumulatorEntry[]>
+
+/** The outputs each downstream block made for one iterator item, by block id. */
+type ItemOutputs = Map<string, Record<string, unknown>>
+
+/** How an iterator's last iteration ended: the items, and the outputs of each item that completed. */
+interface IterationRecord {
+  items: unknown[]
+  /** By item index; null for an item that failed, was cancelled or was not reached. */
+  completed: Array<ItemOutputs | null>
+}
+
+/** How one chain (with the branches it launched) ended: the first block error, if any. */
+interface ChainOutcome {
+  error: string | null
+}
+
+function sameItems(a: unknown[], b: unknown[]): boolean {
+  if (a === b) return true
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch {
+    return false
+  }
+}
 
 // ---- Upstream producer info (for source selector UI) ----
 
@@ -366,8 +369,8 @@ interface PipelineContextValue {
   removeBranch: (forkBlockId: string, branchIndex: number) => void
   /** Get valid block types for a position within a branch. */
   getAddableTypesForBranch: (ancestors: PipelineBlock[], chain: PipelineBlock[], atIndex?: number) => NodeTypeDef[]
-  /** Active iteration state for iterator blocks (null when no iteration is running). */
-  iterationState: IterationState | null
+  /** The progress of each iteration in this run, by iterator block id (empty when no run is in flight). */
+  iterationStates: ReadonlyMap<string, IterationState>
   /** Whether this tab's pipeline is running in loop mode. */
   isLooping: boolean
 }
@@ -451,14 +454,18 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
   const [blockStates, setBlockStates] = useState<Map<string, BlockState>>(
     () => new Map(initialRuntime.blockStates),
   )
-  const [iterationState, setIterationState] = useState<IterationState | null>(null)
+  // The progress of every iteration in flight, by iterator block id: iterators
+  // in parallel branches or nested in each other each keep their own.
+  const [iterationStates, setIterationStates] = useState<ReadonlyMap<string, IterationState>>(() => new Map())
+  // How each iterator's last iteration ended, by iterator block id, so a
+  // Continue run re-runs only the items that did not complete. In memory only.
+  const iterationRecordsRef = useRef<Map<string, IterationRecord>>(new Map())
   // Per-tab block selection. Local state only — not persisted; clears
   // automatically when a block is removed from the tree.
   const [selectedBlockId, setSelectedBlockIdState] = useState<string | null>(null)
   const setSelectedBlockId = useCallback((id: string | null) => {
     setSelectedBlockIdState(id)
   }, [])
-  const iterationStateRef = useRef<IterationState | null>(null)
   const pipelineRef = useRef(pipeline)
   const blockStatesRef = useRef(blockStates)
   const executeFns = useRef<Map<string, ExecuteFn>>(new Map())
@@ -498,6 +505,27 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     publishTabRun(tabId, tabRunOf(runPhaseRef.current))
   }, [publishTabRun, tabId])
 
+  // When a resume ends, a block still running has nothing left to finish it.
+  // A resumed block reports its own end in a promise callback after its poll
+  // ends, so the sweep waits one task and then ends only what is left.
+  const leftoverSweepRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const endLeftoverRunningBlocks = useCallback((end: RunningBlockEnd) => {
+    if (leftoverSweepRef.current) clearTimeout(leftoverSweepRef.current)
+    leftoverSweepRef.current = setTimeout(() => {
+      leftoverSweepRef.current = null
+      // A run started since then owns the block states.
+      if (runPhaseRef.current.kind !== 'idle') return
+      const next = interruptRunningBlocks(blockStatesRef.current, end)
+      if (next === blockStatesRef.current) return
+      blockStatesRef.current = next
+      setBlockStates(next)
+      persistRuntimeSnapshot(next)
+    }, 0)
+  }, [persistRuntimeSnapshot])
+  useEffect(() => () => {
+    if (leftoverSweepRef.current) clearTimeout(leftoverSweepRef.current)
+  }, [])
+
   // A resume ends when none of the blocks it tracks still polls or holds a
   // pending job: each poll ends on success, failure or cancel.
   const resuming = runPhase.kind === 'resuming'
@@ -508,10 +536,11 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       if (phase.kind !== 'resuming') return
       if (phase.blockIds.some((id) => hasActivePoll(id) || hasPendingJobRunForBlock(id))) return
       dispatchRun({ type: 'resumeSettled' })
+      endLeftoverRunningBlocks('interrupted')
     }
     settleIfDone()
     return subscribePolls(settleIfDone)
-  }, [dispatchRun, resuming])
+  }, [dispatchRun, endLeftoverRunningBlocks, resuming])
 
   // Wrapper that updates the ref + sessionStorage synchronously so callbacks
   // reading pipelineRef.current during the same render cycle see fresh data.
@@ -885,7 +914,8 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       // Update ref synchronously so rapid status changes aren't lost to batching
       const prev = blockStatesRef.current
       const existing = prev.get(blockId) ?? { status: 'idle' as const, outputs: {} }
-      const nextError = error ?? undefined
+      // Error text belongs to an error status only.
+      const nextError = status === 'error' ? error ?? undefined : undefined
       if (
         existing.status === status &&
         (existing.error ?? undefined) === nextError &&
@@ -895,7 +925,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       }
 
       const next = new Map(prev)
-      next.set(blockId, { ...existing, status, error: nextError, statusMessage: undefined })
+      next.set(blockId, blockStateWith(status, existing.outputs, nextError))
       blockStatesRef.current = next
       setBlockStates(next)
       persistRuntimeSnapshot(next)
@@ -1012,6 +1042,8 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       blockStatesRef.current = next
       setBlockStates(next)
       persistRuntimeSnapshot(next)
+      // A reset block's earlier items no longer stand: Continue runs every item again.
+      iterationRecordsRef.current.clear()
       setOutputHints((prev) => {
         const next = { ...prev }
         for (const id of idsToReset) {
@@ -1058,8 +1090,10 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     for (const id of pollBlockIds) abortPoll(id)
     if (phase.kind === 'running') phase.controller.abort()
     dispatchRun({ type: 'cancel' })
+    // A running run marks the blocks it interrupts itself; a resume has no runner.
+    if (phase.kind === 'resuming') endLeftoverRunningBlocks('cancelled')
     setTabRuntimeInfo(tabId, {})
-  }, [dispatchRun, setTabRuntimeInfo, tabId])
+  }, [dispatchRun, endLeftoverRunningBlocks, setTabRuntimeInfo, tabId])
 
   const runPipeline = useCallback(async (opts?: { continueFromExisting?: boolean }): Promise<{ hadError: boolean }> => {
     if (!canStartRun(runPhaseRef.current)) return { hadError: false }
@@ -1088,6 +1122,9 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     dispatchRun({ type: 'start', runId, controller: runAbortController })
     const startTime = Date.now()
 
+    // A fresh run forgets earlier iterations; a Continue run picks them up.
+    if (!continueMode) iterationRecordsRef.current.clear()
+
     // In continue mode, preserve completed blocks; otherwise reset all
     const freshStates = new Map<string, BlockState>()
     const prevStates = blockStatesRef.current
@@ -1108,10 +1145,46 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     let completedBlockExecutions = 0
     // Blocks that finished an execution in this run; a Continue run carries the rest over.
     const finishedThisRun = new Set<string>()
+    // How many times each block completed in this run: an iterator item collects
+    // only the outputs of blocks that completed while that item ran.
+    const completions = new Map<string, number>()
 
-    const updateIterState = (state: IterationState | null) => {
-      iterationStateRef.current = state
-      setIterationState(state ? { ...state, items: [...state.items] } : null)
+    // This run's own record of what each block did (status and outputs). The
+    // saved run and the iteration read it, so a newer run that resets the
+    // shared block states cannot change what this run saves.
+    const record = new Map<string, BlockState>(freshStates)
+    // Whether this run still owns the tab's block states: false once a newer
+    // run has started, and then this run writes only to its own record.
+    const ownsStates = () => isCurrentRun(runPhaseRef.current, runId)
+
+    const writeStatus = (blockId: string, status: BlockStatus, error?: string) => {
+      const owns = ownsStates()
+      const outputs = (owns ? blockStatesRef.current.get(blockId)?.outputs : undefined)
+        ?? record.get(blockId)?.outputs ?? {}
+      record.set(blockId, blockStateWith(status, outputs, error))
+      if (owns) setBlockStatus(blockId, status, error)
+    }
+    const writeOutput = (blockId: string, portName: string, value: unknown) => {
+      const prev = record.get(blockId) ?? blockStateWith('idle', {})
+      record.set(blockId, { ...prev, outputs: { ...prev.outputs, [portName]: value } })
+      if (ownsStates()) setBlockOutput(blockId, portName, value)
+    }
+    const writeMessage = (blockId: string, message: string) => {
+      if (ownsStates()) setBlockStatusMessage(blockId, message)
+    }
+    /** Downstream blocks start an item idle; they keep their outputs so viewers show earlier items meanwhile. */
+    const resetForItem = (ids: readonly string[]) => {
+      for (const id of ids) record.set(id, blockStateWith('idle', record.get(id)?.outputs ?? {}))
+      if (!ownsStates()) return
+      const next = new Map(blockStatesRef.current)
+      for (const id of ids) next.set(id, blockStateWith('idle', next.get(id)?.outputs ?? {}))
+      blockStatesRef.current = next
+      setBlockStates(next)
+    }
+    const showIteration = (state: IterationState) => {
+      if (!ownsStates()) return
+      const shown = { ...state, items: state.items.map((item) => ({ ...item })) }
+      setIterationStates((prev) => new Map(prev).set(state.blockId, shown))
     }
 
     function extractItemLabel(item: unknown, index: number): string {
@@ -1129,16 +1202,191 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       return `Item ${index + 1}`
     }
 
+    /** The iterator's list, or null when its output is not a list of several items. */
+    function iterationInput(block: PipelineBlock): { portName: string; items: unknown[] } | null {
+      const iterDef = getBlockDef(block.type)
+      if (!iterDef?.iterator) return null
+      // Auto-detect which output port has an array if iteratorOutput is not specified
+      let portName = iterDef.iteratorOutput ?? ''
+      const blockOutputs = record.get(block.id)?.outputs ?? {}
+      if (!portName) {
+        // Find the first output port that contains an array with >1 items
+        for (const port of iterDef.outputs) {
+          const val = blockOutputs[port.name]
+          if (Array.isArray(val) && val.length > 1) {
+            portName = port.name
+            break
+          }
+        }
+        // Fallback to first output port
+        if (!portName) portName = iterDef.outputs[0]?.name ?? ''
+      }
+      const items = blockOutputs[portName]
+      return Array.isArray(items) && items.length > 1 ? { portName, items } : null
+    }
+
+    /** Every block the iteration of `chain[idx]` runs once per item: the rest of the chain and the iterator's branches. */
+    function iterationDownstream(chain: PipelineBlock[], idx: number): PipelineBlock[] {
+      const blocks = [...walkBlocks(chain.slice(idx + 1))]
+      for (const branch of chain[idx].branches ?? []) blocks.push(...walkBlocks(branch))
+      return blocks
+    }
+
+    /**
+     * Whether Continue has work in a completed iterator's iteration: an item
+     * that did not complete last time, or (with no record of the last
+     * iteration, as after a reload) a downstream block that did not complete.
+     */
+    function iterationNeedsContinue(chain: PipelineBlock[], idx: number, items: unknown[]): boolean {
+      const previous = iterationRecordsRef.current.get(chain[idx].id)
+      if (previous && sameItems(previous.items, items)) return previous.completed.some((outputs) => outputs === null)
+      return iterationDownstream(chain, idx).some((b) => {
+        if (b.disabled) return false
+        const status = record.get(b.id)?.status
+        return status !== 'completed' && status !== 'skipped'
+      })
+    }
+
+    /**
+     * Run the rest of `chain` and the iterator's branches once per item of the
+     * iterator `chain[idx]`. An item ends completed, failed (the block's error;
+     * the next item still runs) or skipped (cancelled). Only outputs a block
+     * made for an item are collected; a block that failed, was cancelled or did
+     * not run for it still holds the previous item's output. `resume` (a
+     * Continue run carrying the iterator over without running it) re-uses the
+     * items the last iteration completed with the same list; an iterator that
+     * runs, such as one nested in another's item, runs every item.
+     * Inside an item, the branches run one after another.
+     */
+    async function iterate(
+      chain: PipelineBlock[],
+      idx: number,
+      input: { portName: string; items: unknown[] },
+      resume: boolean,
+    ): Promise<ChainOutcome> {
+      const block = chain[idx]
+      const { portName: iterPortName, items: iterOutput } = input
+      const remainingChain = chain.slice(idx + 1)
+      const iterBranches = block.branches ?? []
+      const downstreamIds = iterationDownstream(chain, idx).map((b) => b.id)
+      const previous = resume ? iterationRecordsRef.current.get(block.id) : undefined
+      const reused = previous && sameItems(previous.items, iterOutput) ? previous.completed : []
+
+      const iterState: IterationState = {
+        blockId: block.id,
+        currentIndex: -1,
+        totalCount: iterOutput.length,
+        items: iterOutput.map((item, i) => ({
+          index: i,
+          label: extractItemLabel(item, i),
+          status: 'pending' as const,
+          thumbnailUrl: typeof item === 'string' ? item : undefined,
+        })),
+      }
+      showIteration(iterState)
+
+      // The outputs collected for each item, and those of the items that completed.
+      const collected: Array<ItemOutputs | null> = iterOutput.map(() => null)
+      const completed: Array<ItemOutputs | null> = iterOutput.map(() => null)
+      let firstError: string | null = null
+
+      for (let itemIdx = 0; itemIdx < iterOutput.length; itemIdx++) {
+        if (signal.aborted) break
+
+        const carried = reused[itemIdx]
+        if (carried) {
+          // Completed in the run this Continue run picks up.
+          collected[itemIdx] = carried
+          completed[itemIdx] = carried
+          iterState.items[itemIdx].status = 'completed'
+          showIteration(iterState)
+          continue
+        }
+
+        iterState.currentIndex = itemIdx
+        iterState.items[itemIdx].status = 'running'
+        showIteration(iterState)
+
+        // Override the iterator block's output to this single item
+        writeOutput(block.id, iterPortName, iterOutput[itemIdx])
+        resetForItem(downstreamIds)
+        const before = new Map(downstreamIds.map((id) => [id, completions.get(id) ?? 0]))
+
+        const outcomes = [await executeChain(remainingChain)]
+        for (const branch of iterBranches) outcomes.push(await executeChain(branch))
+        const itemError = outcomes.find((o) => o.error !== null)?.error ?? null
+
+        const made: ItemOutputs = new Map()
+        for (const id of downstreamIds) {
+          if ((completions.get(id) ?? 0) === before.get(id)) continue
+          const outputs = record.get(id)?.outputs
+          if (outputs) made.set(id, outputs)
+        }
+        collected[itemIdx] = made
+
+        if (signal.aborted) {
+          iterState.items[itemIdx].status = 'skipped'
+          showIteration(iterState)
+          break
+        }
+        if (itemError !== null) {
+          iterState.items[itemIdx].status = 'error'
+          iterState.items[itemIdx].error = itemError
+          firstError ??= itemError
+          hadPartialFailure = true
+          // Skip failed item, continue to next
+        } else {
+          iterState.items[itemIdx].status = 'completed'
+          completed[itemIdx] = made
+        }
+        showIteration(iterState)
+      }
+
+      // Restore the full array as output after all iterations
+      writeOutput(block.id, iterPortName, iterOutput)
+
+      // Restore accumulated downstream outputs, in item order, so artifacts capture all iterations
+      const accumulated = new Map<string, Record<string, unknown[]>>()
+      for (const made of collected) {
+        for (const [bId, outputs] of made ?? []) {
+          let acc = accumulated.get(bId)
+          if (!acc) { acc = {}; accumulated.set(bId, acc) }
+          for (const [portName, value] of Object.entries(outputs)) {
+            if (!acc[portName]) acc[portName] = []
+            // Flatten arrays (e.g. a batch block that outputs 4 URLs)
+            if (Array.isArray(value)) acc[portName].push(...value)
+            else acc[portName].push(value)
+          }
+        }
+      }
+      for (const [bId, ports] of accumulated) {
+        for (const [portName, values] of Object.entries(ports)) {
+          writeOutput(bId, portName, values.length === 1 ? values[0] : values)
+        }
+      }
+
+      if (ownsStates()) iterationRecordsRef.current.set(block.id, { items: iterOutput, completed })
+
+      const failedCount = iterState.items.filter((i) => i.status === 'error').length
+      const completedCount = iterState.items.filter((i) => i.status === 'completed').length
+      const allFailed = completedCount === 0 && failedCount > 0
+      if (allFailed) hadError = true
+      writeMessage(block.id, `${completedCount}/${iterState.totalCount} items completed`)
+      // An item failure is a partial failure of the chain; every item failing is its error.
+      return { error: allFailed ? firstError : null }
+    }
+
     // Recursive chain executor: runs blocks sequentially, launches branches in parallel
-    async function executeChain(chain: PipelineBlock[]): Promise<void> {
-      const pendingBranches: Promise<void>[] = []
+    async function executeChain(chain: PipelineBlock[]): Promise<ChainOutcome> {
+      const pendingBranches: Promise<ChainOutcome>[] = []
+      let chainError: string | null = null
       const forwardOutputs = (block: PipelineBlock, freshInputs: Record<string, unknown>) => {
         const blockDef = getBlockDef(block.type)
         for (const forward of blockDef?.forwards ?? []) {
           const mode = forward.when ?? 'if_present'
           const value = freshInputs[forward.fromInput]
           if (mode === 'always' || value !== undefined) {
-            setBlockOutput(block.id, forward.toOutput, value)
+            writeOutput(block.id, forward.toOutput, value)
           }
         }
       }
@@ -1155,8 +1403,15 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
 
       const markSkippedTree = (root: PipelineBlock) => {
         for (const block of walkBlocks([root])) {
-          setBlockStatus(block.id, 'skipped')
+          writeStatus(block.id, 'skipped')
         }
+      }
+
+      const markCompleted = (blockId: string) => {
+        writeStatus(blockId, 'completed')
+        completedBlockExecutions++
+        finishedThisRun.add(blockId)
+        completions.set(blockId, (completions.get(blockId) ?? 0) + 1)
       }
 
       for (let idx = 0; idx < chain.length; idx++) {
@@ -1164,14 +1419,21 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
 
         const block = chain[idx]
         if (block.disabled) {
-          setBlockStatus(block.id, 'skipped')
+          writeStatus(block.id, 'skipped')
           continue
         }
 
         // In continue mode, skip blocks that already completed with outputs
-        const existingState = blockStatesRef.current.get(block.id)
+        const existingState = record.get(block.id)
         if (continueMode && existingState?.status === 'completed' && Object.keys(existingState.outputs).length > 0) {
           completedBlockExecutions++
+          // A completed iterator whose iteration has unfinished items runs those items again.
+          const input = iterationInput(block)
+          if (input && iterationNeedsContinue(chain, idx, input.items)) {
+            const outcome = await iterate(chain, idx, input, true)
+            chainError ??= outcome.error
+            break
+          }
           // Still launch branches for completed blocks
           if (block.branches) {
             for (const branch of block.branches) {
@@ -1182,7 +1444,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
         }
 
         dispatchRun({ type: 'blockStarted', runId, blockId: block.id })
-        setBlockStatus(block.id, 'running')
+        writeStatus(block.id, 'running')
         const blockDef_ = getNodeType(block.type)
         setTabRuntimeInfo(tabId, { runningBlockLabel: block.label || blockDef_?.label || block.type })
 
@@ -1203,9 +1465,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
             })
             const execResult = await Promise.race([executeFn(freshInputs, signal), cancelRace])
             forwardOutputs(block, freshInputs)
-            setBlockStatus(block.id, 'completed')
-            completedBlockExecutions++
-            finishedThisRun.add(block.id)
+            markCompleted(block.id)
             if (execResult?.partialFailure) {
               hadPartialFailure = true
             }
@@ -1221,167 +1481,30 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
             }
           } else {
             forwardOutputs(block, freshInputs)
-            setBlockStatus(block.id, 'completed')
-            completedBlockExecutions++
-            finishedThisRun.add(block.id)
+            markCompleted(block.id)
             // Let React paint forwarded outputs before the next block starts.
             await waitForPaint(signal)
           }
         } catch (e) {
           if (e instanceof DOMException && e.name === 'AbortError') {
-            // Pipeline was cancelled — don't mark block as errored
-            setBlockStatusMessage(block.id, 'Pipeline cancelled')
+            // A cancel interrupted the block: it ends cancelled, never left running.
+            writeStatus(block.id, 'cancelled')
             break
           }
-          setBlockStatus(block.id, 'error', String(e))
+          const message = String(e)
+          writeStatus(block.id, 'error', message)
           hadError = true
+          chainError ??= message
           break // Stop this chain on error (branches already launched continue)
         }
 
         // After executing this block, check if it's an iterator
-        const iterDef = getBlockDef(block.type)
-        if (iterDef?.iterator) {
-          // Auto-detect which output port has an array if iteratorOutput is not specified
-          let iterPortName = iterDef.iteratorOutput ?? ''
-          const blockOutputs = blockStatesRef.current.get(block.id)?.outputs ?? {}
-          if (!iterPortName) {
-            // Find the first output port that contains an array with >1 items
-            for (const port of iterDef.outputs) {
-              const val = blockOutputs[port.name]
-              if (Array.isArray(val) && val.length > 1) {
-                iterPortName = port.name
-                break
-              }
-            }
-            // Fallback to first output port
-            if (!iterPortName) iterPortName = iterDef.outputs[0]?.name ?? ''
-          }
-          const iterOutput = blockOutputs[iterPortName]
-
-          if (Array.isArray(iterOutput) && iterOutput.length > 1) {
-            // Build the remaining chain (everything after this block)
-            const remainingChain = chain.slice(idx + 1)
-            // Also include branches of the iterator block
-            const iterBranches = block.branches ?? []
-
-            const iterState: IterationState = {
-              blockId: block.id,
-              currentIndex: -1,
-              totalCount: iterOutput.length,
-              items: iterOutput.map((item, i) => ({
-                index: i,
-                label: extractItemLabel(item, i),
-                status: 'pending' as const,
-                thumbnailUrl: typeof item === 'string' ? item : undefined,
-              })),
-            }
-            updateIterState(iterState)
-
-            // Collect all downstream block IDs for output accumulation
-            const downstreamBlockIds = new Set<string>()
-            for (const b of walkBlocks(remainingChain)) downstreamBlockIds.add(b.id)
-            for (const branch of iterBranches) {
-              for (const b of walkBlocks(branch)) downstreamBlockIds.add(b.id)
-            }
-            // Accumulate downstream outputs across iterations
-            const accumulatedOutputs = new Map<string, Record<string, unknown[]>>()
-
-            for (let itemIdx = 0; itemIdx < iterOutput.length; itemIdx++) {
-              if (signal.aborted) break
-
-              iterState.currentIndex = itemIdx
-              iterState.items[itemIdx].status = 'running'
-              updateIterState(iterState)
-
-              // Override the iterator block's output to this single item
-              setBlockOutput(block.id, iterPortName, iterOutput[itemIdx])
-
-              // Reset downstream statuses for this iteration, but preserve completed
-              // outputs so viewers can continue showing prior items while the next
-              // item is still processing.
-              const resetStates = new Map(blockStatesRef.current)
-              for (const b of walkBlocks(remainingChain)) {
-                const existing = resetStates.get(b.id)
-                resetStates.set(b.id, {
-                  status: 'idle',
-                  outputs: existing?.outputs ?? {},
-                })
-              }
-              for (const branch of iterBranches) {
-                for (const b of walkBlocks(branch)) {
-                  const existing = resetStates.get(b.id)
-                  resetStates.set(b.id, {
-                    status: 'idle',
-                    outputs: existing?.outputs ?? {},
-                  })
-                }
-              }
-              blockStatesRef.current = resetStates
-              setBlockStates(resetStates)
-
-              try {
-                // Execute the remaining chain for this item
-                await executeChain(remainingChain)
-                // Execute branches for this item
-                for (const branch of iterBranches) {
-                  await executeChain(branch)
-                }
-                // executeChain ends quietly on a cancel, so ask the run's own signal.
-                const itemCancelled = signal.aborted
-                iterState.items[itemIdx].status = itemCancelled ? 'skipped' : 'completed'
-
-                // Collect downstream outputs from this iteration
-                for (const bId of downstreamBlockIds) {
-                  const state = blockStatesRef.current.get(bId)
-                  if (!state?.outputs) continue
-                  // A block the cancel interrupted still holds the previous item's output.
-                  if (itemCancelled && state.status !== 'completed') continue
-                  let acc = accumulatedOutputs.get(bId)
-                  if (!acc) { acc = {}; accumulatedOutputs.set(bId, acc) }
-                  for (const [portName, value] of Object.entries(state.outputs)) {
-                    if (!acc[portName]) acc[portName] = []
-                    // Flatten arrays (e.g. a batch block that outputs 4 URLs)
-                    if (Array.isArray(value)) acc[portName].push(...value)
-                    else acc[portName].push(value)
-                  }
-                }
-                if (itemCancelled) {
-                  updateIterState(iterState)
-                  break
-                }
-              } catch (e) {
-                if (e instanceof DOMException && e.name === 'AbortError') {
-                  iterState.items[itemIdx].status = 'skipped'
-                  break
-                }
-                iterState.items[itemIdx].status = 'error'
-                iterState.items[itemIdx].error = e instanceof Error ? e.message : String(e)
-                hadPartialFailure = true
-                // Skip failed item, continue to next
-              }
-              updateIterState(iterState)
-            }
-
-            // Restore the full array as output after all iterations
-            setBlockOutput(block.id, iterPortName, iterOutput)
-
-            // Restore accumulated downstream outputs so artifacts capture all iterations
-            for (const [bId, ports] of accumulatedOutputs) {
-              for (const [portName, values] of Object.entries(ports)) {
-                setBlockOutput(bId, portName, values.length === 1 ? values[0] : values)
-              }
-            }
-
-            const failedCount = iterState.items.filter((i) => i.status === 'error').length
-            const completedCount = iterState.items.filter((i) => i.status === 'completed').length
-            if (completedCount === 0 && failedCount > 0) {
-              hadError = true
-            }
-            setBlockStatusMessage(block.id, `${completedCount}/${iterState.totalCount} items completed`)
-
-            // Skip the rest of the chain — iterations already handled it
-            break
-          }
+        const input = iterationInput(block)
+        if (input) {
+          const outcome = await iterate(chain, idx, input, false)
+          chainError ??= outcome.error
+          // Skip the rest of the chain — iterations already handled it
+          break
         }
 
         // Launch all branches of this block in parallel (non-iterator path)
@@ -1393,7 +1516,8 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       }
 
       // Wait for all branches launched from this chain to complete
-      await Promise.all(pendingBranches)
+      const branchOutcomes = await Promise.all(pendingBranches)
+      return { error: chainError ?? branchOutcomes.find((o) => o.error !== null)?.error ?? null }
     }
 
     try {
@@ -1402,15 +1526,18 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
       // ---- Auto-save run to history ----
       const durationMs = Date.now() - startTime
       const wasCancelled = signal.aborted
-      const runStatus: RunEntry['status'] = hadError
-        ? (completedBlockExecutions === 0 ? 'failed' : 'partial')
-        : (hadPartialFailure || wasCancelled ? 'partial' : 'completed')
+      const runStatus = deriveRunStatus({
+        errored: hadError,
+        partialFailure: hadPartialFailure,
+        completedExecutions: completedBlockExecutions,
+        cancelled: wasCancelled,
+      })
 
       let globalIdx = 0
       let generatedThisRun = false
       const blockResults: BlockResult[] = []
       for (const block of walkBlocks(blocks)) {
-        const state = blockStatesRef.current.get(block.id)
+        const state = record.get(block.id)
         const def = getNodeType(block.type)
         const outputs: Record<string, { kind: string; value: unknown }> = {}
         if (state?.outputs && def) {
@@ -1423,15 +1550,13 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
           block_index: globalIdx++,
           block_type: block.type,
           block_label: block.label || def?.label || block.type,
-          // Only a cancel leaves a block running when the run ends.
-          status: state?.status === 'running' ? 'cancelled' : state?.status ?? 'idle',
+          status: savedBlockStatus(state?.status),
           outputs,
         })
         if (finishedThisRun.has(block.id) && holdsGeneratedOutput(outputs)) generatedThisRun = true
       }
 
-      // A cancelled run is kept only for a generation it finished itself: that output was paid for.
-      if (wasCancelled && !generatedThisRun) return { hadError }
+      if (!shouldSaveRun({ cancelled: wasCancelled, generatedThisRun })) return { hadError }
 
       const flowSnapshot = runSnapshot.exportFlow('Pipeline Run')
       const now = new Date()
@@ -1440,7 +1565,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
 
       const run: RunEntry = {
         id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        name: `Pipeline Run \u2014 ${dateStr} ${timeStr}`,
+        name: `Pipeline Run — ${dateStr} ${timeStr}`,
         status: runStatus,
         duration_ms: durationMs,
         flow_snapshot: flowSnapshot as unknown as Record<string, unknown>,
@@ -1455,8 +1580,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     } finally {
       // A run cancelled and replaced by a newer one leaves that run's state alone.
       if (isCurrentRun(runPhaseRef.current, runId)) {
-        iterationStateRef.current = null
-        setIterationState(null)
+        setIterationStates(new Map())
         setTabRuntimeInfo(tabId, {})
       }
       dispatchRun({ type: 'finished', runId, outcome: hadError ? 'failed' : 'completed' })
@@ -1608,6 +1732,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
     // until it ends or is stopped, and the tab bar keeps agreeing with it.
     persistRuntimeSnapshot(emptyStates)
     executeFns.current.clear()
+    iterationRecordsRef.current.clear()
     setOutputHints({})
     return outcome
   }, [persistRuntimeSnapshot, tabId])
@@ -1703,7 +1828,7 @@ export function PipelineProvider({ tabId, flowJson, children }: PipelineProvider
         insertBlockAdjacent,
         removeBranch,
         getAddableTypesForBranch,
-        iterationState,
+        iterationStates,
         isLooping: loopingTabs[tabId] ?? false,
         selectedBlockId,
         setSelectedBlockId,

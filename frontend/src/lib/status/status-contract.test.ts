@@ -24,6 +24,7 @@ import {
   TERMINAL_JOB_STATUSES,
   UPDATE_STATES,
   UPDATE_STEP_STATUSES,
+  isBlockStatus,
   runStatusBadge,
 } from '.'
 import * as types from '@/lib/types'
@@ -66,9 +67,16 @@ describe('status contract', () => {
 })
 
 describe('frontend-only vocabularies', () => {
-  it('a live block status is a saved block status without "cancelled"', () => {
-    expect(BLOCK_STATUSES).toEqual(['idle', 'running', 'completed', 'error', 'skipped'])
-    expect(SAVED_BLOCK_STATUSES.filter((s) => s !== 'cancelled')).toEqual([...BLOCK_STATUSES])
+  it('the live block statuses are the saved block statuses, "cancelled" included', () => {
+    expect(BLOCK_STATUSES).toEqual(['idle', 'running', 'completed', 'error', 'skipped', 'cancelled'])
+    expect([...SAVED_BLOCK_STATUSES]).toEqual([...BLOCK_STATUSES])
+  })
+
+  it('isBlockStatus accepts only the live block statuses', () => {
+    for (const status of BLOCK_STATUSES) expect(isBlockStatus(status)).toBe(true)
+    for (const odd of ['', 'paused', 'RUNNING', 'constructor', 42, null, undefined, {}]) {
+      expect(isBlockStatus(odd)).toBe(false)
+    }
   })
 
   it('generation run statuses, their job mapping and labels keep their exact text', () => {

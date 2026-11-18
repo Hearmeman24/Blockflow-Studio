@@ -26,13 +26,20 @@ export type JobPhase = (typeof JOB_PHASES)[number]
 
 // ---- Pipeline blocks ----
 
-/** A block's live status in the pipeline runner. */
-export const BLOCK_STATUSES = ['idle', 'running', 'completed', 'error', 'skipped'] as const
+/** A block's live status in the pipeline runner. `cancelled`: a cancel
+ * interrupted the block while it was running. */
+export const BLOCK_STATUSES = ['idle', 'running', 'completed', 'error', 'skipped', 'cancelled'] as const
 export type BlockStatus = (typeof BLOCK_STATUSES)[number]
 
-/** `status` of a block in a saved run's `block_results`: a live status, or
- * `cancelled` for a block a cancel left running. Older runs may hold `running`. */
-export const SAVED_BLOCK_STATUSES = [...BLOCK_STATUSES, 'cancelled'] as const
+/** Whether a value read from storage (an older or newer build) is a status this build knows. */
+export function isBlockStatus(value: unknown): value is BlockStatus {
+  return typeof value === 'string' && (BLOCK_STATUSES as readonly string[]).includes(value)
+}
+
+/** `status` of a block in a saved run's `block_results`: the live statuses,
+ * with `cancelled` for a block a cancel interrupted (see `savedBlockStatus`
+ * in `@/lib/pipeline/run-outcome`). Older runs may hold `running`. */
+export const SAVED_BLOCK_STATUSES = ['idle', 'running', 'completed', 'error', 'skipped', 'cancelled'] as const
 export type SavedBlockStatus = (typeof SAVED_BLOCK_STATUSES)[number]
 
 // ---- Saved runs (/api/runs) ----

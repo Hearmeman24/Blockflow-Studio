@@ -463,7 +463,7 @@ export function useGenerationBlock(
         if (err instanceof DOMException && err.name === 'AbortError') {
           cancelResumedGeneration(blockId, resumed.jobId)
           setRun((prev) => ({ ...prev, status: 'cancelled' }))
-          setExecutionStatus?.('idle')
+          setExecutionStatus?.('cancelled')
           return
         }
         const message = err instanceof Error ? err.message : 'The generation failed.'

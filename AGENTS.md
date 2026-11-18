@@ -305,7 +305,10 @@ def apply(body: object = Body(default=None)) -> JSONResponse:
 Block rules: "block" is the product term (not node, step or stage); one global
 **Run Pipeline** button, no per-block run action; `execute` reads the `inputs`
 it is given, not stale state; async work honours the `AbortSignal`; multiple
-pipeline tabs run at once and cancellation is per tab. Widths: `sm` 280,
+pipeline tabs run at once and cancellation is per tab. The runner marks a
+block a cancel interrupts `cancelled`; a block that reports its own status
+(`setExecutionStatus`, e.g. for a job resumed after a reload) ends a stopped
+job as `cancelled` too, never leaving it `running`. Widths: `sm` 280,
 `md` 360, `lg` 440, `huge` 540 px. A card is as tall as its content (the
 reduced layout fixes it at 220, 320, 460 or 580 px); a media loader reporting
 its items through `useMediaItemCount` takes the `md` width while no section

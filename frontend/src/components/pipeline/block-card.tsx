@@ -10,8 +10,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { BlockStatusBadge } from './block-status-badge'
+import { BlockStatusBadge, blockStatusDisplay } from './block-status-badge'
 import { WarningBadge } from '@/components/warning-badge'
+import { AlertPanel } from '@/components/alert-panel'
 import { UnsupportedBlockCard } from './unsupported-block-card'
 import { BlockRoleTile } from './block-role-tile'
 import {
@@ -79,7 +80,7 @@ export function BlockCard({ block, displayNumber }: BlockCardProps) {
     setBlockSource,
     getUpstreamProducers,
     toggleBlockDisabled,
-    iterationState,
+    iterationStates,
     setOutputHint,
     selectedBlockId,
     setSelectedBlockId,
@@ -139,7 +140,8 @@ export function BlockCard({ block, displayNumber }: BlockCardProps) {
   const state = blockStates.get(block.id)
   const status = state?.status ?? 'idle'
   const inputs = getInputsForBlock(block.id)
-  const blockIterState = iterationState?.blockId === block.id ? iterationState : null
+  const blockIterState = iterationStates.get(block.id) ?? null
+  const statusNote = isDisabled ? null : blockStatusDisplay(status, state?.statusMessage).note
   const sizeClass = SIZE_CLASSES[def.size]
   const narrow = mediaItemCount !== null && mediaItemCount <= MEDIA_NARROW_MAX_ITEMS
   const width = SIZE_CLASSES[narrow ? NARROW_SIZE[def.size] : def.size].width
@@ -352,6 +354,12 @@ export function BlockCard({ block, displayNumber }: BlockCardProps) {
                 return <p className="text-xs text-red-400">{err}</p>
               })()}
             </div>
+          )}
+
+          {statusNote && (
+            <AlertPanel variant="info" className="mx-4 mb-2 py-2">
+              <p data-testid="block-status-note" className="text-2xs">{statusNote}</p>
+            </AlertPanel>
           )}
 
           {blockIterState && <IterationProgressPanel iterState={blockIterState} />}
