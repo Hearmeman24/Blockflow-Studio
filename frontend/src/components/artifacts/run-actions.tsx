@@ -13,6 +13,7 @@ import { ChipTooltip } from '@/components/chip-tooltip'
 import { FavoriteButton } from '@/components/favorite-button'
 import { Button } from '@/components/ui/button'
 import { toggleRunFavorite } from '@/lib/api'
+import { useMutation } from '@/lib/mutation'
 import { usePipelineTabs } from '@/lib/pipeline/tabs-context'
 import type { RunEntry } from '@/lib/types'
 
@@ -26,24 +27,43 @@ export function useRestoreRun(): (run: RunEntry) => void {
   }
 }
 
-/** The run's favourite state, kept in step with the server's value. */
-export function useRunFavorite(run: RunEntry, onToggled?: () => void): { fav: boolean; toggle: () => Promise<void> } {
+const FAVORITE_FAILED = 'Could not change the favorite. Try again.'
+
+/**
+ * The run's favourite state, kept in step with the server's value. The route
+ * is a toggle, so one request at a time: the star changes at once, a click
+ * while a request is pending is ignored, and a failure puts the star back and
+ * says so.
+ */
+export function useRunFavorite(run: RunEntry, onToggled?: () => void): { fav: boolean; pending: boolean; toggle: () => Promise<void> } {
   const server = run.favorited ?? false
   const [fav, setFav] = useState(server)
   const [seen, setSeen] = useState(server)
-  // Follow a new server value (after a refresh) without an effect.
-  if (seen !== server) {
+  const mutation = useMutation(async (before: boolean) => {
+    const res = await toggleRunFavorite(run.id)
+    if (!res?.ok) throw new Error(typeof res?.error === 'string' ? res.error : FAVORITE_FAILED)
+    return { favorited: Boolean(res.favorited), before }
+  })
+  // Follow a new server value (after a refresh) without an effect; not while
+  // a toggle is in flight, whose answer is newer.
+  if (seen !== server && !mutation.pending) {
     setSeen(server)
     setFav(server)
   }
   const toggle = async () => {
-    const res = await toggleRunFavorite(run.id)
-    if (res?.ok) {
-      setFav(Boolean(res.favorited))
+    if (mutation.pending) return
+    const before = fav
+    setFav(!before)
+    const result = await mutation.run(before)
+    if (result.status === 'done') {
+      setFav(result.value.favorited)
       onToggled?.()
+    } else if (result.status === 'failed') {
+      setFav(before)
+      toast.error(FAVORITE_FAILED)
     }
   }
-  return { fav, toggle }
+  return { fav, pending: mutation.pending, toggle }
 }
 
 export function RestoreButton({ name, onRestore, className }: { name: string; onRestore: () => void; className?: string }) {

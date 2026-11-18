@@ -21,7 +21,7 @@ vi.mock('@/lib/hooks', () => ({
     useRunsArgs.push(args)
     return { runs: [], total: 0, isLoading: false, error: null, mutate: vi.fn() }
   },
-  useMcpJobs: () => ({ jobs: [], mutate: vi.fn() }),
+  useMcpJobs: () => ({ jobs: [], resource: { kind: 'ready', data: { ok: true, jobs: [] } }, mutate: vi.fn() }),
   useMcpStream: () => {},
 }))
 

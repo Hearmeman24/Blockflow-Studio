@@ -371,6 +371,82 @@ describe('create: Create character', () => {
   })
 })
 
+describe('create: hand-off after a partial failure', () => {
+  const failWalk = () => {
+    const realUpload = vi.mocked(api.uploadCharacterMedia).getMockImplementation()!
+    vi.mocked(api.uploadCharacterMedia).mockImplementation(async (id, file, kind, meta) => {
+      if (file.name === 'walk.mp4') throw new Error('File is too large.')
+      return realUpload(id, file, kind, meta)
+    })
+    return realUpload
+  }
+
+  it('keeps the failures when the list does not hold the new character yet', async () => {
+    const realUpload = vi.mocked(api.uploadCharacterMedia).getMockImplementation()!
+    vi.mocked(api.uploadCharacterMedia).mockImplementation(async (id, file, kind, meta) => {
+      if (file.name !== 'walk.mp4') return realUpload(id, file, kind, meta)
+      // A list read started before the create answers now, without the new character.
+      vi.mocked(api.listCharacters).mockResolvedValueOnce([])
+      // Past SWR's focus throttle, so the focus revalidates the list.
+      const now = Date.now()
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 60_000)
+      window.dispatchEvent(new Event('focus'))
+      await waitFor(() => expect(api.listCharacters).toHaveBeenCalledTimes(2))
+      clock.mockRestore()
+      await new Promise((r) => setTimeout(r, 20))
+      throw new Error('File is too large.')
+    })
+    await toLooks()
+    fireEvent.drop(within(region('Looks')).getByTestId('loader-drop-zone'), { dataTransfer: { files: [png('side.png'), mp4('walk.mp4')] } })
+    await within(region('Looks')).findByLabelText('walk.mp4')
+    await userEvent.click(button('Create character'))
+    await waitFor(() => expect(params().get('edit')).toBe('1'))
+    const panel = await inDialog().findByRole('alert')
+    expect(panel).toHaveTextContent('walk.mp4: File is too large.')
+    expect(params().get('id')).toBe('new1')
+    // Its steps wait for the character; the title keeps the name.
+    expect(screen.getByRole('dialog', { name: 'Edit Zoë "Ångström" 李' })).toBeInTheDocument()
+    expect(inDialog().getByTestId('wizard-waiting')).toBeInTheDocument()
+    // Retry still knows the character, and its answer brings it back into the list.
+    vi.mocked(api.uploadCharacterMedia).mockImplementation(realUpload)
+    await userEvent.click(within(panel).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(inDialog().queryByRole('alert')).toBeNull())
+    expect(api.uploadCharacterMedia).toHaveBeenLastCalledWith('new1', expect.objectContaining({ name: 'walk.mp4' }), 'video', expect.anything())
+    expect(await screen.findByRole('dialog', { name: 'Edit Zoë "Ångström" 李' })).toBeInTheDocument()
+  })
+
+  it('Done with files still not added asks first; Keep editing keeps them', async () => {
+    failWalk()
+    await toLooks()
+    fireEvent.drop(within(region('Looks')).getByTestId('loader-drop-zone'), { dataTransfer: { files: [mp4('walk.mp4')] } })
+    await within(region('Looks')).findByLabelText('walk.mp4')
+    await userEvent.click(button('Create character'))
+    await screen.findByRole('dialog', { name: 'Edit Zoë "Ångström" 李' })
+    await userEvent.click(button('Done'))
+    const ask = await screen.findByRole('alertdialog', { name: 'Close without the files that were not added?' })
+    expect(ask).toHaveTextContent('walk.mp4')
+    await userEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }))
+    expect(screen.getByRole('dialog', { name: 'Edit Zoë "Ångström" 李' })).toBeInTheDocument()
+    expect(inDialog().getByRole('alert')).toHaveTextContent('walk.mp4: File is too large.')
+    expect(params().get('edit')).toBe('1')
+  })
+
+  it('Done with files still not added closes after "Close"', async () => {
+    failWalk()
+    await toLooks()
+    fireEvent.drop(within(region('Looks')).getByTestId('loader-drop-zone'), { dataTransfer: { files: [mp4('walk.mp4')] } })
+    await within(region('Looks')).findByLabelText('walk.mp4')
+    await userEvent.click(button('Create character'))
+    await screen.findByRole('dialog', { name: 'Edit Zoë "Ångström" 李' })
+    await userEvent.click(button('Done'))
+    const ask = await screen.findByRole('alertdialog')
+    await userEvent.click(within(ask).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(params().get('edit')).toBeNull()
+    expect(params().get('id')).toBe('new1')
+  })
+})
+
 describe('create: closing', () => {
   it('with nothing staged, Cancel just closes and removes ?new', async () => {
     await openNew('new=1')

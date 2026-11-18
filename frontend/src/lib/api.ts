@@ -43,20 +43,28 @@ export async function fetchRuns(
   params.set('hide_partial', hidePartial ? 'true' : 'false')
   if (source) params.set('source', source)
   if (character) params.set('character', character)
-  const res = await fetch(`${BASE}/api/runs?${params}`)
-  return res.json()
+  return okJson(await fetch(`${BASE}/api/runs?${params}`))
+}
+
+/** The JSON body of an OK answer. A non-OK answer is an error even without
+ * `ok: false` (FastAPI answers `{detail}`), so it never reads as an empty list. */
+async function okJson(res: Response) {
+  const body = await res.json().catch(() => null)
+  if (!res.ok || !body || typeof body !== 'object') {
+    const detail = typeof body?.detail === 'string' ? body.detail : typeof body?.error === 'string' ? body.error : `HTTP ${res.status}`
+    throw new Error(detail)
+  }
+  return body
 }
 
 /** Jobs submitted through the MCP server (active + recent), newest first. */
 export async function fetchMcpJobs(limit = 50): Promise<{ ok: boolean; jobs: JobSnapshot[] }> {
   const params = new URLSearchParams({ source: 'mcp', limit: String(limit) })
-  const res = await fetch(`${BASE}/api/jobs?${params}`)
-  return res.json()
+  return okJson(await fetch(`${BASE}/api/jobs?${params}`))
 }
 
 export async function toggleRunFavorite(id: string) {
-  const res = await fetch(`${BASE}/api/runs/${encodeURIComponent(id)}/favorite`, { method: 'PATCH' })
-  return res.json()
+  return okJson(await fetch(`${BASE}/api/runs/${encodeURIComponent(id)}/favorite`, { method: 'PATCH' }))
 }
 
 export async function fetchRunById(id: string) {

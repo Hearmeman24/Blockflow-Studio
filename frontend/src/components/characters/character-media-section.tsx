@@ -10,7 +10,7 @@
  * under the grid they belong to; a refused change (remove, move, star) is a
  * toast.
  */
-import { useId, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { ArrowLeft, ArrowRight, Loader2, Plus, Star, X, XCircle } from 'lucide-react'
 import { AlertPanel } from '@/components/alert-panel'
@@ -96,9 +96,11 @@ export function CharacterMediaSection({ source, kinds, title, addLabel, addText,
   const count = kinds.reduce((n, k) => n + source.items(k).length, 0)
 
   const kindOf = (f: File) => kinds.find((k) => isKindFile(k, f))
+  // Uploads of every drop or pick, one after another in the order given.
+  const uploads = useRef<Promise<void>>(Promise.resolve())
 
-  const addFiles = async (files: File[]) => {
-    if (files.length === 0) return
+  const addFiles = (files: File[]) => {
+    if (files.length === 0) return uploads.current
     const accepted = files.flatMap((f) => {
       const kind = kindOf(f)
       return kind ? [{ file: f, kind }] : []
@@ -106,6 +108,11 @@ export function CharacterMediaSection({ source, kinds, title, addLabel, addText,
     setProblems(files.filter((f) => !kindOf(f)).map((f) => `${f.name} is not ${articleFor(kinds)} file.`))
     const entries = accepted.map(({ file, kind }) => ({ key: `pending-${++pendingSeq}`, name: file.name, kind }))
     setPending((prev) => [...prev, ...entries])
+    uploads.current = uploads.current.then(() => upload(accepted, entries))
+    return uploads.current
+  }
+
+  const upload = async (accepted: { file: File; kind: CharacterMediaKind }[], entries: Pending[]) => {
     // One at a time, so files keep their order and each response holds the ones before it.
     for (const [i, { file, kind }] of accepted.entries()) {
       try {
@@ -130,16 +137,12 @@ export function CharacterMediaSection({ source, kinds, title, addLabel, addText,
     void task().catch((err) => toast.error(`Could not ${action}: ${errorMessage(err)}`))
   }
   const remove = (m: SourceItem) => run(`remove ${m.label}`, () => source.remove(m))
-  /** Swap with the next movable neighbour; locked items keep their places. */
+  /** Swap with the next movable neighbour; locked items keep their places. The source builds
+   * the order when the move runs, so two quick moves build on each other. */
   const move = (m: SourceItem, movable: SourceItem[], delta: -1 | 1) => {
     const from = movable.indexOf(m)
-    const neighbour = movable[from + delta]
-    if (from < 0 || !neighbour) return
-    const ids = source.items(m.kind).map((x) => x.id)
-    const a = ids.indexOf(m.id)
-    const b = ids.indexOf(neighbour.id)
-    ;[ids[a], ids[b]] = [ids[b], ids[a]]
-    run(`move ${m.label}`, () => source.reorder(m.kind, ids))
+    if (from < 0 || !movable[from + delta]) return
+    run(`move ${m.label}`, () => source.move(m, delta, lockedIds))
   }
   const toggleDefault = (m: SourceItem) => {
     const kind = m.kind as 'image' | 'audio'

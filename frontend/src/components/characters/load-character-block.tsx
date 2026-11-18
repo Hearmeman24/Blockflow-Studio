@@ -64,12 +64,12 @@ function CharacterName({ character }: { character: Character }) {
 }
 
 function CharacterPicker({ state }: { state: LoadCharacterState }) {
-  const { characters, error, isLoading, retry, character, choose } = state
-  if (!characters && error && !isLoading) {
+  const { resource, retry, character, choose } = state
+  if (resource.kind === 'error') {
     return (
       <div role="alert">
         <AlertPanel variant="error" icon={<XCircle aria-hidden className="size-3.5" />}>
-          <p>{error.message}</p>
+          <p>{resource.message}</p>
           <div className="pt-0.5">
             <Button type="button" variant="outline" size="xs" onClick={retry}><RefreshCw aria-hidden />Retry</Button>
           </div>
@@ -77,7 +77,8 @@ function CharacterPicker({ state }: { state: LoadCharacterState }) {
       </div>
     )
   }
-  if (!characters) return <Skeleton data-testid="character-picker-loading" className="h-7 w-full" />
+  if (resource.kind === 'loading') return <Skeleton data-testid="character-picker-loading" className="h-7 w-full" />
+  const characters = resource.data
   if (characters.length === 0) {
     return (
       <EmptyState

@@ -12,6 +12,7 @@
 import type { LoaderItem, LoaderKind } from '@/lib/byok/loader-items'
 import { fileLabel } from '@/lib/byok/references'
 import type { HealthTarget } from '@/lib/byok/reference-health'
+import type { Resource } from '@/lib/resource'
 import type { Character, CharacterMedia, CharacterMediaKind } from './types'
 import { defaultAudio, defaultFace } from './use-characters'
 
@@ -59,6 +60,26 @@ function idList(raw: unknown): string[] {
 }
 
 // ---- Restoring saved config ----
+
+/**
+ * Where the chosen character stands: none chosen; the list still loading or
+ * failed to load (the snapshot's name stands in, and nothing is treated as
+ * deleted); live; or deleted (only a loaded list can say so).
+ */
+export type CharacterPresence =
+  | { kind: 'none' }
+  | { kind: 'loading'; name: string }
+  | { kind: 'error'; name: string; message: string }
+  | { kind: 'live'; character: Character }
+  | { kind: 'deleted'; name: string }
+
+export function characterPresence(characterId: string | null, list: Resource<readonly Character[]>, snapshotName: string): CharacterPresence {
+  if (!characterId) return { kind: 'none' }
+  if (list.kind === 'loading') return { kind: 'loading', name: snapshotName }
+  if (list.kind === 'error') return { kind: 'error', name: snapshotName, message: list.message }
+  const character = list.data.find((c) => c.id === characterId)
+  return character ? { kind: 'live', character } : { kind: 'deleted', name: snapshotName }
+}
 
 export function restoreCharacterId(raw: unknown): string | null {
   return typeof raw === 'string' && raw ? raw : null

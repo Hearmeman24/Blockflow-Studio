@@ -13,9 +13,15 @@
  * files and a Retry.
  *
  * Edit mode shows the same steps for a saved character, live: every change
- * is saved at once, and Done closes.
+ * is saved at once, and Done closes (after asking, while files from the
+ * create are still not added).
+ *
+ * The phase is one state (`wizard-phase.ts`). After a partial create the
+ * wizard keeps the new character's id itself, so the hand-off from `?new=1`
+ * to `?edit=1&id=` does not depend on the page resolving the character in
+ * the same render.
  */
-import { useCallback, useId, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useId, useReducer, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { ImageUp, UserPlus, XCircle } from 'lucide-react'
 import { AlertPanel } from '@/components/alert-panel'
@@ -32,6 +38,7 @@ import {
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 import { DropTarget, REVEAL } from '@/components/byok/media-loader'
 import { MediaThumb } from '@/components/byok/media-thumb'
 import { kindAccent } from '@/lib/byok/kind-accent'
@@ -45,19 +52,16 @@ import { CharacterMediaSection, errorMessage } from './character-media-section'
 import { CharacterPortrait } from './character-portrait'
 import { useLiveMediaSource, useStagedMedia, type MediaSource, type StagedFile } from './media-source'
 import { nonBlank, useAutosaveField } from './use-autosave-field'
+import { EDITING, handedOffId, isBusy, progressLabel, wizardPhaseReducer, type WizardFailure } from './wizard-phase'
 
 const STEPS = ['Face and name', 'Looks', 'Audio'] as const
 const NAME_MAX = 80
 const NEEDS_FACE_AND_NAME = 'Add a face and a name first'
 
-interface Failure {
-  item: StagedFile
-  error: string
-}
-
 export interface CharacterWizardProps {
   mode: 'create' | 'edit'
-  /** The character being edited (edit mode). */
+  /** The character being edited (edit mode). After a partial create it may be
+   * missing for a moment, until the list holds the new character. */
   character?: Character
   state: CharactersState
   onClose: () => void
@@ -72,21 +76,26 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
   const [name, setName] = useState('')
   const staged = useStagedMedia()
   const [faceProblem, setFaceProblem] = useState<string | null>(null)
-  const [progress, setProgress] = useState<string | null>(null)
-  const [createError, setCreateError] = useState<string | null>(null)
-  const [failures, setFailures] = useState<{ characterId: string; list: Failure[] } | null>(null)
-  const [retrying, setRetrying] = useState(false)
+  const [phase, dispatch] = useReducer(wizardPhaseReducer, EDITING)
   const [confirmingDiscard, setConfirmingDiscard] = useState(false)
   const nextHintId = useId()
 
-  const editing = mode === 'edit' && !!character
-  const busy = progress !== null
+  // After a partial create, the character the wizard created (the page may not hold it yet).
+  const handoffId = handedOffId(phase)
+  const live = character ?? (handoffId ? state.characters?.find((c) => c.id === handoffId) : undefined)
+  const editing = (mode === 'edit' && !!live) || handoffId !== null
+  const busy = isBusy(phase)
+  const progress = progressLabel(phase)
+  const failures = phase.kind === 'partial' || phase.kind === 'retrying' ? phase.failures : []
+  const retrying = phase.kind === 'retrying'
+  const createError = phase.kind === 'editing' ? phase.error : null
   const ready = editing || (!!staged.face && nonBlank(name))
   const dirty = !editing && (staged.hasFiles || nonBlank(name))
 
   const requestClose = () => {
-    if (busy) return
-    if (dirty) setConfirmingDiscard(true)
+    if (busy || retrying) return
+    if (phase.kind === 'partial') dispatch({ type: 'close_requested' })
+    else if (dirty) setConfirmingDiscard(true)
     else onClose()
   }
   const discard = () => {
@@ -103,24 +112,23 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
   // ---- create ----
 
   const create = async () => {
-    if (!ready || busy || editing || !staged.face) return
+    if (!ready || busy || editing || !staged.face || phase.kind !== 'editing') return
     const face = staged.face
-    setCreateError(null)
-    setProgress('Creating…')
+    dispatch({ type: 'create_started' })
     let created: Character
     try {
       created = await state.create({ name: name.trim(), face: face.file, meta: { width: face.meta.width, height: face.meta.height } })
     } catch (err) {
-      setCreateError(errorMessage(err))
-      setProgress(null)
+      dispatch({ type: 'create_failed', message: errorMessage(err) })
       return
     }
     const { files, starredAudioId } = staged
     const queue = [...files.image, ...files.video, ...files.audio]
-    const failed: Failure[] = []
+    dispatch({ type: 'created', characterId: created.id, total: queue.length })
+    const failed: WizardFailure[] = []
     const uploaded = new Map<string, string>()
     for (const [i, item] of queue.entries()) {
-      setProgress(`Adding ${i + 1} of ${queue.length}…`)
+      dispatch({ type: 'upload_started', index: i })
       try {
         const { media } = await state.uploadMedia(created.id, item.file, item.kind, item.meta)
         uploaded.set(item.id, media.id)
@@ -137,30 +145,29 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
         toast.error(`Could not set the default audio: ${errorMessage(err)}`)
       }
     }
-    setProgress(null)
+    dispatch({ type: 'uploads_finished', failures: failed })
     if (failed.length === 0) {
       staged.clear()
       toast.success(`Created ${created.name}`)
       onCreated(created.id)
     } else {
-      setFailures({ characterId: created.id, list: failed })
       onPartial(created.id)
     }
   }
 
   const retryFailures = async () => {
-    if (!failures || retrying) return
-    setRetrying(true)
-    const still: Failure[] = []
-    for (const f of failures.list) {
+    if (phase.kind !== 'partial') return
+    const { characterId } = phase
+    dispatch({ type: 'retry_started' })
+    const still: WizardFailure[] = []
+    for (const f of phase.failures) {
       try {
-        await state.uploadMedia(failures.characterId, f.item.file, f.item.kind, f.item.meta)
+        await state.uploadMedia(characterId, f.item.file, f.item.kind, f.item.meta)
       } catch (err) {
         still.push({ item: f.item, error: errorMessage(err) })
       }
     }
-    setFailures(still.length > 0 ? { characterId: failures.characterId, list: still } : null)
-    setRetrying(false)
+    dispatch({ type: 'retry_finished', failures: still })
   }
 
   // ---- step 1: the staged face ----
@@ -186,7 +193,9 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
 
   // ---- layout ----
 
-  const title = editing ? `Edit ${character.name}` : 'New character'
+  const title = editing ? `Edit ${live?.name ?? name.trim()}` : 'New character'
+  // The new character is not in the list yet: its steps wait for it.
+  const waiting = <Skeleton data-testid="wizard-waiting" className="h-48 w-full rounded-xl" />
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) requestClose() }}>
@@ -212,7 +221,7 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {step === 0 && (
             editing
-              ? <EditFaceAndName key={character.id} character={character} state={state} />
+              ? live ? <EditFaceAndName key={live.id} character={live} state={state} /> : waiting
               : (
                 <FaceAndName
                   face={staged.face}
@@ -228,12 +237,12 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
           )}
           {step === 1 && (
             editing
-              ? <LiveLooks character={character} state={state} />
+              ? live ? <LiveLooks character={live} state={state} /> : waiting
               : <Looks source={staged.source} faceId={staged.face?.id ?? null} />
           )}
           {step === 2 && (
             editing
-              ? <LiveAudioStep character={character} state={state} />
+              ? live ? <LiveAudioStep character={live} state={state} /> : waiting
               : <AudioStep source={staged.source} />
           )}
         </div>
@@ -244,11 +253,11 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
               <AlertPanel variant="error" icon={<XCircle aria-hidden className="size-3.5" />}>{createError}</AlertPanel>
             </div>
           )}
-          {failures && failures.list.length > 0 && (
+          {failures.length > 0 && (
             <div role="alert">
               <AlertPanel variant="error" title="Some files were not added" icon={<XCircle aria-hidden className="size-3.5" />}>
                 <ul className="space-y-0.5">
-                  {failures.list.map((f) => <li key={f.item.id}>{`${f.item.label}: ${f.error}`}</li>)}
+                  {failures.map((f) => <li key={f.item.id}>{`${f.item.label}: ${f.error}`}</li>)}
                 </ul>
                 <div className="pt-1">
                   <Button type="button" variant="outline" size="xs" onClick={() => void retryFailures()} disabled={retrying}>
@@ -282,7 +291,7 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
               )}
               {!ready && <span id={nextHintId} className="sr-only">{NEEDS_FACE_AND_NAME}</span>}
               {editing ? (
-                <Button type="button" onClick={onClose}>Done</Button>
+                <Button type="button" onClick={requestClose} aria-disabled={retrying ? true : undefined}>Done</Button>
               ) : step > 0 && (
                 <Button
                   type="button"
@@ -307,6 +316,24 @@ export function CharacterWizard({ mode, character, state, onClose, onCreated, on
           <AlertDialogFooter>
             <AlertDialogCancel>Keep editing</AlertDialogCancel>
             <AlertDialogAction className={buttonVariants({ variant: 'destructive' })} onClick={discard}>Discard</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={phase.kind === 'partial' && phase.confirmingClose}
+        onOpenChange={(open) => { if (!open) dispatch({ type: 'close_cancelled' }) }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Close without the files that were not added?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {`Not added: ${failures.map((f) => f.item.label).join(', ')}. You can add them later from Edit.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction onClick={() => { staged.clear(); onClose() }}>Close</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

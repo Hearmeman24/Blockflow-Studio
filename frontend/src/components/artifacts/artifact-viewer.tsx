@@ -8,6 +8,11 @@
  * the settings used, the prompt with Copy, the references, and the Restore and
  * Favorite actions. Below medium width the panes stack and the dialog scrolls.
  * ←/→ move through the runs on the page without closing the dialog.
+ *
+ * The open run is named by its id, not its position, so a refresh that adds
+ * runs above it does not switch it. When it leaves the list (its favourite
+ * turned off under "Favorites only", say) it stays shown until closed, and
+ * the arrows go to the runs that were beside it.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronLeft, ChevronRight, FileText, Music } from 'lucide-react'
@@ -29,9 +34,9 @@ import { CopyPromptButton, FavoriteRunButton, RestoreButton, useRestoreRun, useR
 export interface ArtifactViewerProps {
   /** The runs on the current page, in grid order. */
   runs: readonly RunEntry[]
-  /** The run shown, or null when the viewer is closed. */
-  index: number | null
-  onIndexChange: (index: number | null) => void
+  /** The id of the run shown, or null when the viewer is closed. */
+  openId: string | null
+  onOpenChange: (id: string | null) => void
   onFavoriteToggled?: () => void
 }
 
@@ -40,17 +45,24 @@ function ownsArrowKeys(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (target.matches('input, textarea, video, audio, [role="slider"]') || target.isContentEditable)
 }
 
-export function ArtifactViewer({ runs, index, onIndexChange, onFavoriteToggled }: ArtifactViewerProps) {
-  const run = index !== null ? runs[index] : undefined
+export function ArtifactViewer({ runs, openId, onOpenChange, onFavoriteToggled }: ArtifactViewerProps) {
+  // The open run as last seen in the list, and where it was.
+  const [last, setLast] = useState<{ run: RunEntry; index: number } | null>(null)
+  const found = openId === null ? -1 : runs.findIndex((r) => r.id === openId)
+  if (found >= 0 && (last?.run !== runs[found] || last.index !== found)) setLast({ run: runs[found], index: found })
+  const detached = found < 0 && openId !== null && last?.run.id === openId ? last : null
+  const run = found >= 0 ? runs[found] : detached?.run
+  const prevRun = found >= 0 ? runs[found - 1] : detached ? runs[detached.index - 1] : undefined
+  const nextRun = found >= 0 ? runs[found + 1] : detached ? runs[detached.index] : undefined
+
   const shownId = useRef<string | null>(null)
   useEffect(() => {
     if (run) shownId.current = run.id
   }, [run])
 
   const go = (delta: number) => {
-    if (index === null) return
-    const next = index + delta
-    if (next >= 0 && next < runs.length) onIndexChange(next)
+    const target = delta < 0 ? prevRun : nextRun
+    if (target) onOpenChange(target.id)
   }
 
   // ←/→ on the whole document while open: focus can drop to the page when the
@@ -72,7 +84,7 @@ export function ArtifactViewer({ runs, index, onIndexChange, onFavoriteToggled }
   }, [open])
 
   return (
-    <Dialog open={!!run} onOpenChange={(open) => { if (!open) onIndexChange(null) }}>
+    <Dialog open={!!run} onOpenChange={(open) => { if (!open) onOpenChange(null) }}>
       {run && (
         <DialogContent
           onCloseAutoFocus={(e) => {
@@ -98,7 +110,7 @@ export function ArtifactViewer({ runs, index, onIndexChange, onFavoriteToggled }
               variant="outline"
               size="icon"
               aria-label="Previous run"
-              disabled={index === null || index <= 0}
+              disabled={!prevRun}
               onClick={() => go(-1)}
               className="bg-background/70 absolute left-2 top-1/2 -translate-y-1/2 backdrop-blur-sm"
             >
@@ -109,7 +121,7 @@ export function ArtifactViewer({ runs, index, onIndexChange, onFavoriteToggled }
               variant="outline"
               size="icon"
               aria-label="Next run"
-              disabled={index === null || index >= runs.length - 1}
+              disabled={!nextRun}
               onClick={() => go(1)}
               className="bg-background/70 absolute right-2 top-1/2 -translate-y-1/2 backdrop-blur-sm"
             >
@@ -121,7 +133,7 @@ export function ArtifactViewer({ runs, index, onIndexChange, onFavoriteToggled }
               key={run.id}
               run={run}
               onFavoriteToggled={onFavoriteToggled}
-              onClose={() => onIndexChange(null)}
+              onClose={() => onOpenChange(null)}
             />
           </aside>
         </DialogContent>

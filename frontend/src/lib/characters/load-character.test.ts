@@ -3,6 +3,7 @@ import { itemsToOutput } from '@/lib/byok/loader-items'
 import {
   EMPTY_SELECTION,
   buildSnapshot,
+  characterPresence,
   defaultSelection,
   deselectMedia,
   restoreCharacterId,
@@ -210,3 +211,25 @@ describe('counts and flow targets', () => {
     expect(snapshotTargets({ selection: 'bad', snapshot: 7 })).toEqual([])
   })
 })
+
+describe('characterPresence', () => {
+  const list = { kind: 'ready' as const, data: [MIA] }
+  it('no character chosen', () => {
+    expect(characterPresence(null, list, 'Mia')).toEqual({ kind: 'none' })
+    expect(characterPresence(null, { kind: 'error', message: 'down' }, '')).toEqual({ kind: 'none' })
+  })
+  it('the list is loading: the snapshot name stands in', () => {
+    expect(characterPresence('c1', { kind: 'loading' }, 'Old Mia')).toEqual({ kind: 'loading', name: 'Old Mia' })
+  })
+  it('the list failed: an error, not loading and not deleted', () => {
+    expect(characterPresence('c1', { kind: 'error', message: 'Could not load characters (HTTP 502).' }, 'Old Mia'))
+      .toEqual({ kind: 'error', name: 'Old Mia', message: 'Could not load characters (HTTP 502).' })
+  })
+  it('live, with its own name', () => {
+    expect(characterPresence('c1', list, 'Old Mia')).toEqual({ kind: 'live', character: MIA })
+  })
+  it('deleted only when a loaded list lacks it', () => {
+    expect(characterPresence('gone', list, 'Old Mia')).toEqual({ kind: 'deleted', name: 'Old Mia' })
+  })
+})
+

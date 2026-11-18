@@ -33,14 +33,14 @@ export function artifactsHref(characterId: string): string {
 
 export function CharacterGenerated({ character, runs: state }: { character: Character; runs: CharacterRunsState }) {
   const { runs, isLoading, isLoadingMore, error, retry, loadMore, hasMore, refresh } = state
-  const [viewerIndex, setViewerIndex] = useState<number | null>(null)
-  const shownIndex = viewerIndex !== null && viewerIndex < runs.length ? viewerIndex : null
+  // The open run by id, so loading more or a refresh does not switch it.
+  const [openRunId, setOpenRunId] = useState<string | null>(null)
 
-  const tiles: MasonryItem[] = useMemo(() => runs.map((run, i): MasonryItem => ({
+  const tiles: MasonryItem[] = useMemo(() => runs.map((run): MasonryItem => ({
     key: `run-${run.id}`,
     aspect: runAspect(run),
     render: ({ reportAspect }) => (
-      <ArtifactTile run={run} onAspect={reportAspect} onFavoriteToggled={refresh} onOpen={() => setViewerIndex(i)} />
+      <ArtifactTile run={run} onAspect={reportAspect} onFavoriteToggled={refresh} onOpen={() => setOpenRunId(run.id)} />
     ),
   })), [runs, refresh])
 
@@ -73,7 +73,7 @@ export function CharacterGenerated({ character, runs: state }: { character: Char
     body = (
       <>
         <MasonryGrid items={tiles} label={`Made with ${character.name}`} />
-        <ArtifactViewer runs={runs} index={shownIndex} onIndexChange={setViewerIndex} onFavoriteToggled={refresh} />
+        <ArtifactViewer runs={runs} openId={openRunId} onOpenChange={setOpenRunId} onFavoriteToggled={refresh} />
         {error && (
           <AlertPanel variant="error" title="Could not load more">{error.message}</AlertPanel>
         )}

@@ -54,6 +54,7 @@ import {
 } from '@/lib/prompt-writer/types'
 import { useWriterProviders } from '@/lib/prompt-writer/use-writer-providers'
 import type { BlockComponentProps } from '@/lib/pipeline/registry'
+import type { BlockStatus } from '@/lib/status'
 import { useSessionState } from '@/lib/use-session-state'
 import { cn } from '@/lib/utils'
 import { WriterModelField } from './writer-model-field'
@@ -64,9 +65,23 @@ export const PROMPT_OUTPUT_PORT = 'prompt'
 type RunState =
   | { status: 'idle' }
   | { status: 'running'; provider: string }
-  | { status: 'success'; message: string }
+  /** `idea` is the user prompt the result was written for. */
+  | { status: 'success'; message: string; idea: string }
   | { status: 'cancelled' }
   | { status: 'error'; kind: WriterErrorKind; message: string }
+
+/**
+ * What the pipeline runner shows for each state of this block's own run: the
+ * execute function resolves only for `success` (completed), and rejects for
+ * `cancelled` and `error`, so the two never disagree.
+ */
+export const RUNNER_STATUS: Record<RunState['status'], BlockStatus> = {
+  idle: 'idle',
+  running: 'running',
+  success: 'completed',
+  cancelled: 'cancelled',
+  error: 'error',
+}
 
 const ERROR_TITLES: Record<WriterErrorKind, string> = {
   validation: 'Check the block before running',
@@ -151,10 +166,15 @@ export function PromptWriterBlock({
     setRawSend((prev: unknown) => ({ ...normalizeSendMedia(prev), [kind]: on }))
 
   useEffect(() => {
+    /** End the run: show `next`, and settle the way the runner's status for it says. */
+    const settle = (next: RunState, err?: unknown) => {
+      setRun(next)
+      if (RUNNER_STATUS[next.status] !== 'completed') throw err
+    }
     registerExecute(async (freshInputs, signal) => {
       if (settings.keep_result && resultText.trim()) {
         setOutput(PROMPT_OUTPUT_PORT, resultText)
-        setRun({ status: 'success', message: 'Kept the existing result.' })
+        settle({ status: 'success', message: 'Kept the existing result.', idea: ideaText })
         return
       }
       try {
@@ -193,16 +213,12 @@ export function PromptWriterBlock({
         if (!res.ok) throw new WriterRunError(res.kind, res.message)
         setResult(res.text)
         setOutput(PROMPT_OUTPUT_PORT, res.text)
-        setRun({ status: 'success', message: `Written by ${current?.label ?? providerId}.` })
+        settle({ status: 'success', message: `Written by ${current?.label ?? providerId}.`, idea: ideaText })
       } catch (err) {
-        if (isAbort(err, signal)) {
-          setRun({ status: 'cancelled' })
-          throw err
-        }
+        if (isAbort(err, signal)) settle({ status: 'cancelled' }, err)
         const kind = err instanceof WriterRunError ? err.kind : 'provider_failure'
         const message = err instanceof Error ? err.message : String(err)
-        setRun({ status: 'error', kind, message })
-        throw err instanceof Error ? err : new Error(message)
+        settle({ status: 'error', kind, message }, err instanceof Error ? err : new Error(message))
       }
     })
   })
@@ -312,7 +328,7 @@ export function PromptWriterBlock({
         onKeepChange={(keep) => update({ keep_result: keep })}
       />
 
-      <RunStatus run={run} onRecheck={() => void state.recheck()} />
+      <RunStatus run={run} idea={ideaText} onRecheck={() => void state.recheck()} />
     </div>
   )
 }
@@ -585,8 +601,10 @@ function ResultField({ id, value, onChange, keep, onKeepChange }: {
   )
 }
 
-function RunStatus({ run, onRecheck }: { run: RunState; onRecheck: () => void }) {
+function RunStatus({ run, idea, onRecheck }: { run: RunState; idea: string; onRecheck: () => void }) {
   if (run.status === 'idle') return null
+  // The user prompt changed since: the result shown was written for another one.
+  const stale = run.status === 'success' && run.idea !== idea
   return (
     <div role="status" aria-live="polite" className="space-y-1.5" data-testid="run-status">
       {run.status === 'running' && (
@@ -595,10 +613,16 @@ function RunStatus({ run, onRecheck }: { run: RunState; onRecheck: () => void })
           <span className="text-muted-foreground truncate text-3xs">Waiting for {run.provider}…</span>
         </div>
       )}
-      {run.status === 'success' && (
+      {run.status === 'success' && !stale && (
         <div className="flex items-center gap-2">
           <StatusBadge variant="success">Done</StatusBadge>
           <span className="text-muted-foreground truncate text-3xs">{run.message}</span>
+        </div>
+      )}
+      {stale && (
+        <div className="flex items-center gap-2">
+          <StatusBadge variant="neutral">Out of date</StatusBadge>
+          <span className="text-muted-foreground truncate text-3xs">Written for an earlier user prompt.</span>
         </div>
       )}
       {run.status === 'cancelled' && <StatusBadge variant="neutral">Cancelled</StatusBadge>}

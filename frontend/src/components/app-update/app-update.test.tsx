@@ -14,6 +14,8 @@ import type { UpdateProgress, UpdateStatus } from '@/lib/app-update/client'
 
 vi.mock('@/lib/settings/client', () => ({ setAppPref: vi.fn().mockResolvedValue(undefined) }))
 import * as settingsClient from '@/lib/settings/client'
+const toastMocks = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }))
+vi.mock('sonner', () => ({ toast: toastMocks }))
 
 const XSS = '<script>window.__pwned = true</script><img src=x onerror="window.__pwned=true"> Fixed **bugs**'
 
@@ -71,6 +73,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  toastMocks.error.mockReset()
   vi.unstubAllGlobals()
   vi.useRealTimers()
   delete (window as unknown as { __pwned?: boolean }).__pwned
@@ -138,6 +141,16 @@ describe('UpdateIndicator', () => {
     await user.click(await screen.findByRole('button', { name: label }))
     await waitFor(() => expect(screen.queryByRole('button', { name: /update available/i })).not.toBeInTheDocument())
     expect(calls.find((c) => c.url === '/api/app/update/dismiss')?.body).toEqual({ tag: 'v0.2.0', action })
+  })
+
+  test('a failed dismissal says so and keeps the notice', async () => {
+    const user = userEvent.setup()
+    routes['POST /api/app/update/dismiss'] = () => ({ status: 500, body: { detail: 'boom' } })
+    wrap(<UpdateIndicator />)
+    await user.click(await screen.findByRole('button', { name: /update available/i }))
+    await user.click(await screen.findByRole('button', { name: 'Remind me later' }))
+    await waitFor(() => expect(toastMocks.error).toHaveBeenCalledWith('Could not hide the update notice. Try again.'))
+    expect(screen.getByRole('button', { name: /update available/i })).toBeInTheDocument()
   })
 })
 
@@ -237,6 +250,55 @@ describe('update flow', () => {
     expect(within(dialog).queryByRole('button', { name: 'Reload' })).not.toBeInTheDocument()
   })
 
+  test('a slow progress check from the page load does not replace the update just started', async () => {
+    const user = userEvent.setup()
+    let resolveMount!: (v: { body: unknown }) => void
+    let first = true
+    routes['GET /api/app/update/progress'] = () => {
+      if (first) { first = false; return new Promise((r) => { resolveMount = r }) }
+      return { body: progress('running') }
+    }
+    routes['POST /api/app/update/apply'] = () => ({ status: 202, body: progress('running') })
+    wrap(<UpdateIndicator />)
+    const confirm = await openConfirm(user)
+    await user.click(within(confirm).getByRole('button', { name: 'Update and restart' }))
+    await screen.findByRole('dialog', { name: /Updating to v0.2.0/ })
+    // The earlier update's finished report, not yet acknowledged, answers late.
+    await act(async () => resolveMount({ body: progress('done', { tag: 'v0.1.15', to_version: '0.1.15' }) }))
+    expect(screen.getByRole('dialog', { name: /Updating to v0.2.0/ })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Updated to v0.1.15' })).not.toBeInTheDocument()
+  })
+
+  test('a failed acknowledge keeps the report open and Close tries again', async () => {
+    const user = userEvent.setup()
+    routes['GET /api/app/update/progress'] = () => ({ body: progress('failed', { error: 'npm ci failed.' }) })
+    routes['POST /api/app/update/progress/ack'] = () => ({ status: 500, body: { detail: 'boom' } })
+    wrap(<UpdateIndicator />)
+    const dialog = await screen.findByRole('dialog', { name: 'Update failed' })
+    await user.click(within(dialog).getAllByRole('button', { name: 'Close' })[0])
+    expect(await within(dialog).findByText('Could not close the update report. Try again.')).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Update failed' })).toBeInTheDocument()
+    routes['POST /api/app/update/progress/ack'] = () => ({ body: progress('idle') })
+    await user.click(within(dialog).getAllByRole('button', { name: 'Close' })[0])
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Update failed' })).not.toBeInTheDocument())
+    expect(calls.filter((c) => c.url === '/api/app/update/progress/ack')).toHaveLength(2)
+  })
+
+  test('Reload waits for the acknowledge; a failure is shown and nothing reloads', async () => {
+    const user = userEvent.setup()
+    const reload = vi.fn()
+    routes['GET /api/app/update/progress'] = () => ({ body: progress('done', { steps: [] }) })
+    routes['POST /api/app/update/progress/ack'] = () => 'network-error'
+    wrap(<UpdateIndicator />, reload)
+    const dialog = await screen.findByRole('dialog', { name: 'Updated to v0.2.0' })
+    await user.click(within(dialog).getByRole('button', { name: 'Reload' }))
+    expect(await within(dialog).findByText('Could not close the update report. Try again.')).toBeInTheDocument()
+    expect(reload).not.toHaveBeenCalled()
+    routes['POST /api/app/update/progress/ack'] = () => ({ body: progress('idle') })
+    await user.click(within(dialog).getByRole('button', { name: 'Reload' }))
+    await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+  })
+
   test('progress is announced politely', async () => {
     routes['GET /api/app/update/progress'] = () => ({ body: progress('running') })
     wrap(<UpdateIndicator />)
@@ -285,5 +347,14 @@ describe('Settings → Updates', () => {
     wrap(<UpdatesSetting />)
     await user.click(await screen.findByRole('button', { name: 'Update now' }))
     expect(await screen.findByRole('alertdialog')).toHaveTextContent('Update to v0.2.0?')
+  })
+
+  test('a failed "show the notice again" says so', async () => {
+    const user = userEvent.setup()
+    routes['GET /api/app/update'] = () => ({ body: status({ notify: false, dismissed: 'skipped' }) })
+    routes['POST /api/app/update/dismiss'] = () => 'network-error'
+    wrap(<UpdatesSetting />)
+    await user.click(await screen.findByRole('button', { name: 'Show the update notice again' }))
+    await waitFor(() => expect(toastMocks.error).toHaveBeenCalledWith('Could not show the update notice again. Try again.'))
   })
 })

@@ -11,11 +11,13 @@
  *
  * On mount it asks the backend for the last update's progress, so a page
  * that reloaded mid-update (the dev server restarts) picks the view back up.
- * While BlockFlow restarts, the version route is polled until the new
- * backend answers.
+ * While BlockFlow restarts, the version route is polled until the backend
+ * answers, then the progress says what happened. What the dialogs show is one
+ * state (`update-view.ts`); the effects below only dispatch events to it.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState, type ReactNode } from 'react'
 import useSWR from 'swr'
+import { toast } from 'sonner'
 import { CheckCircle2, Circle, CircleSlash, Loader2, XCircle } from 'lucide-react'
 import { AlertPanel } from '@/components/alert-panel'
 import {
@@ -38,13 +40,24 @@ import {
   fetchUpdateStatus,
   fetchVersion,
   UPDATE_STATUS_URL,
-  type Blocker,
-  type UpdateProgress,
   type UpdateStatus,
   type UpdateStep,
 } from '@/lib/app-update/client'
-import { ACTIVE_UPDATE_STATES } from '@/lib/status'
+import { createRequestGate } from '@/lib/resource'
 import { cn } from '@/lib/utils'
+import {
+  CLOSED,
+  canCloseProgress,
+  isActiveProgress,
+  needsManualRestart,
+  progressHeadline,
+  readRestart,
+  updateViewReducer,
+  type CloseThen,
+  type UpdateView,
+} from './update-view'
+
+type ProgressState = Extract<UpdateView, { kind: 'progress' }>
 
 export const STATUS_REFRESH_MS = 60 * 60 * 1000
 export const PROGRESS_POLL_MS = 1000
@@ -78,8 +91,6 @@ export function useAppUpdate(): AppUpdateContextValue {
   return ctx
 }
 
-const ACTIVE: ReadonlySet<string> = new Set(ACTIVE_UPDATE_STATES)
-
 function StepIcon({ status }: { status: UpdateStep['status'] }) {
   if (status === 'done') return <CheckCircle2 aria-hidden className="text-success size-4" />
   if (status === 'failed') return <XCircle aria-hidden className="text-destructive size-4" />
@@ -104,30 +115,22 @@ function Commands({ commands }: { commands: string[] }) {
   )
 }
 
-function headline(p: UpdateProgress, reconnecting: boolean, gaveUp: boolean): string {
-  if (p.state === 'running') return `Updating to ${p.tag ?? 'the new version'}…`
-  if (p.state === 'restarting') return gaveUp ? 'BlockFlow has not come back yet' : reconnecting ? 'Restarting BlockFlow…' : 'Restarting…'
-  if (p.state === 'done') return p.restart?.required && !p.restart.automatic ? 'Updated, restart needed' : `Updated to ${p.tag}`
-  if (p.state === 'rolled_back') return 'Update undone'
-  if (p.state === 'failed') return 'Update failed'
-  return 'Update'
-}
-
 function ProgressView({
-  progress, reconnecting, gaveUp, onClose, onReload,
+  view, onClose, onReload,
 }: {
-  progress: UpdateProgress
-  reconnecting: boolean
-  gaveUp: boolean
+  view: ProgressState
   onClose: () => void
   onReload: () => void
 }) {
   const [showLog, setShowLog] = useState(false)
-  const active = ACTIVE.has(progress.state)
+  const { progress, connection, closing } = view
+  const gaveUp = connection === 'gave_up'
+  const active = isActiveProgress(progress)
   const current = progress.steps.find((s) => s.id === progress.step)
-  const title = headline(progress, reconnecting, gaveUp)
+  const title = progressHeadline(view)
   const announcement = active ? `${title} ${current ? current.label : ''}` : `${title}. ${progress.error ?? progress.message ?? ''}`
-  const manualRestart = progress.state === 'done' && progress.restart?.required && !progress.restart.automatic
+  const manualRestart = needsManualRestart(progress)
+  const busy = closing.kind === 'pending'
   return (
     <>
       <DialogHeader>
@@ -193,11 +196,12 @@ function ProgressView({
           </pre>
         )}
       </div>
+      {closing.kind === 'error' && <AlertPanel variant="error">{closing.message}</AlertPanel>}
       <DialogFooter>
         {active && !gaveUp && <p className="text-muted-foreground text-xs">Keep this tab open. BlockFlow restarts by itself.</p>}
-        {progress.state === 'done' && !manualRestart && <Button type="button" onClick={onReload}>Reload</Button>}
+        {progress.state === 'done' && !manualRestart && <Button type="button" disabled={busy} onClick={onReload}>Reload</Button>}
         {(!active || gaveUp) && (
-          <Button type="button" variant={progress.state === 'done' && !manualRestart ? 'outline' : 'default'} onClick={onClose}>
+          <Button type="button" variant={progress.state === 'done' && !manualRestart ? 'outline' : 'default'} disabled={busy} onClick={onClose}>
             Close
           </Button>
         )}
@@ -206,93 +210,90 @@ function ProgressView({
   )
 }
 
+const ACK_FAILED = 'Could not close the update report. Try again.'
+const DISMISS_FAILED: Record<'skip' | 'later' | 'clear', string> = {
+  skip: 'Could not hide the update notice. Try again.',
+  later: 'Could not hide the update notice. Try again.',
+  clear: 'Could not show the update notice again. Try again.',
+}
+
 export function AppUpdateProvider({ children, reload }: { children: ReactNode; reload?: () => void }) {
   const { data: status, error, isLoading, mutate } = useSWR<UpdateStatus, Error>(UPDATE_STATUS_URL, fetchUpdateStatus, {
     refreshInterval: STATUS_REFRESH_MS, revalidateOnFocus: false, shouldRetryOnError: false,
   })
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  const [blockers, setBlockers] = useState<Blocker[]>([])
-  const [starting, setStarting] = useState(false)
-  const [startError, setStartError] = useState<string | null>(null)
-  const [progress, setProgress] = useState<UpdateProgress | null>(null)
-  const [reconnecting, setReconnecting] = useState(false)
-  const [gaveUp, setGaveUp] = useState(false)
-  const restartStarted = useRef<number | null>(null)
+  const [view, dispatch] = useReducer(updateViewReducer, CLOSED)
+  // The page-load progress read is stale once an update is started here.
+  const [resumeGate] = useState(createRequestGate)
 
   // Resume a view the page lost (reload during an update, or a finished update to report).
   useEffect(() => {
     let cancelled = false
+    const token = resumeGate.begin()
     fetchProgress()
-      .then((p) => { if (!cancelled && p.state !== 'idle') setProgress(p) })
+      .then((p) => { if (!cancelled && resumeGate.isCurrent(token)) dispatch({ type: 'progress_resumed', progress: p }) })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [])
+  }, [resumeGate])
 
   // Poll while an update runs; poll the version while BlockFlow restarts.
-  const state = progress?.state
-  const target = progress?.to_version
+  const state = view.kind === 'progress' ? view.progress.state : null
   useEffect(() => {
     if (state !== 'running' && state !== 'restarting') return
     let cancelled = false
+    const since = Date.now()
     const tick = async () => {
       if (state === 'running') {
         try {
           const p = await fetchProgress()
-          if (!cancelled) setProgress(p)
+          if (!cancelled) dispatch({ type: 'progress_read', progress: p })
         } catch { /* the backend may be busy; try again */ }
         return
       }
-      restartStarted.current ??= Date.now()
-      try {
-        const v = await fetchVersion()
-        if (cancelled) return
-        if (v.version === target) {
-          setReconnecting(false)
-          const p = await fetchProgress()
-          if (!cancelled) setProgress(p)
-          return
-        }
-      } catch {
-        if (!cancelled) setReconnecting(true)
-      }
-      if (!cancelled && Date.now() - (restartStarted.current ?? Date.now()) > RESTART_GIVE_UP_MS) setGaveUp(true)
+      const events = await readRestart({ fetchVersion, fetchProgress })
+      if (cancelled) return
+      for (const event of events) dispatch(event)
+      if (Date.now() - since > RESTART_GIVE_UP_MS) dispatch({ type: 'restart_timed_out' })
     }
     const id = setInterval(() => void tick(), state === 'running' ? PROGRESS_POLL_MS : RESTART_POLL_MS)
     return () => { cancelled = true; clearInterval(id) }
-  }, [state, target])
+  }, [state])
 
+  const starting = view.kind === 'confirm' && view.phase.kind === 'starting'
   const start = useCallback(async (allowActiveJobs: boolean) => {
     const tag = status?.latest?.tag
-    if (!tag) return
-    setStarting(true)
-    setStartError(null)
+    if (!tag || starting) return
+    resumeGate.invalidate()
+    dispatch({ type: 'start_requested' })
     try {
       const res = await applyUpdate(tag, allowActiveJobs)
-      if (res.ok) {
-        setConfirmOpen(false)
-        setBlockers([])
-        restartStarted.current = null
-        setGaveUp(false)
-        setProgress(res.progress)
-      } else if (res.blockers.length) {
-        setBlockers(res.blockers)
-      } else {
-        setStartError(res.detail)
-      }
+      if (res.ok) dispatch({ type: 'start_succeeded', progress: res.progress })
+      else if (res.blockers.length) dispatch({ type: 'start_blocked', blockers: res.blockers })
+      else dispatch({ type: 'start_failed', message: res.detail })
     } catch {
-      setStartError('Could not reach BlockFlow to start the update.')
-    } finally {
-      setStarting(false)
+      dispatch({ type: 'start_failed', message: 'Could not reach BlockFlow to start the update.' })
     }
-  }, [status?.latest?.tag])
+  }, [status?.latest?.tag, starting, resumeGate])
 
-  const closeProgress = useCallback(async () => {
-    setProgress(null)
-    setGaveUp(false)
-    restartStarted.current = null
-    await acknowledgeProgress().catch(() => {})
-    await mutate()
-  }, [mutate])
+  // Closing the report acknowledges it, so it does not come back on the next
+  // page load. A failed acknowledge keeps the dialog open; Close tries again.
+  const closeProgress = useCallback(async (then: CloseThen) => {
+    if (!canCloseProgress(view)) return
+    dispatch({ type: 'close_requested', then })
+    try {
+      await acknowledgeProgress()
+    } catch {
+      // While BlockFlow has not come back the backend cannot answer; closing must still work.
+      if (view.kind === 'progress' && view.connection === 'gave_up' && then === 'close') {
+        dispatch({ type: 'close_done' })
+        return
+      }
+      dispatch({ type: 'close_failed', message: ACK_FAILED })
+      return
+    }
+    dispatch({ type: 'close_done' })
+    if (then === 'reload') (reload ?? (() => window.location.reload()))()
+    else await mutate().catch(() => undefined)
+  }, [view, mutate, reload])
 
   const value = useMemo<AppUpdateContextValue>(() => ({
     status, error, isLoading,
@@ -300,23 +301,28 @@ export function AppUpdateProvider({ children, reload }: { children: ReactNode; r
     refresh: async () => { await mutate() },
     dismiss: async (action) => {
       const tag = status?.latest?.tag
-      if (tag) await mutate(dismissUpdate(tag, action), { revalidate: false })
+      if (!tag) return
+      try {
+        await mutate(dismissUpdate(tag, action), { revalidate: false })
+      } catch {
+        toast.error(DISMISS_FAILED[action])
+      }
     },
-    requestUpdate: () => {
-      setBlockers([])
-      setStartError(null)
-      setConfirmOpen(true)
-    },
-    updating: !!progress && ACTIVE.has(progress.state),
-  }), [status, error, isLoading, mutate, progress])
+    requestUpdate: () => dispatch({ type: 'confirm_opened' }),
+    updating: view.kind === 'progress' && isActiveProgress(view.progress),
+  }), [status, error, isLoading, mutate, view])
 
+  const phase = view.kind === 'confirm' ? view.phase : null
+  const blockers = phase && phase.kind !== 'idle' ? phase.blockers : []
   const onlyActiveJobs = blockers.length > 0 && blockers.every((b) => b.code === 'active_jobs')
+  const startError = phase?.kind === 'error' ? phase.message : null
   const latest = status?.latest
+  const closable = canCloseProgress(view)
 
   return (
     <AppUpdateContext.Provider value={value}>
       {children}
-      <AlertDialog open={confirmOpen} onOpenChange={(open) => { if (!starting) setConfirmOpen(open) }}>
+      <AlertDialog open={view.kind === 'confirm'} onOpenChange={(open) => { if (!open) dispatch({ type: 'confirm_cancelled' }) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Update to {latest?.tag}?</AlertDialogTitle>
@@ -341,7 +347,7 @@ export function AppUpdateProvider({ children, reload }: { children: ReactNode; r
                 Update anyway
               </Button>
             ) : (
-              <Button type="button" disabled={starting || (blockers.length > 0 && !onlyActiveJobs)} onClick={() => void start(false)}>
+              <Button type="button" disabled={starting || phase?.kind === 'blocked'} onClick={() => void start(false)}>
                 {starting && <Loader2 aria-hidden className="size-4 animate-spin motion-reduce:animate-none" />}
                 Update and restart
               </Button>
@@ -349,14 +355,10 @@ export function AppUpdateProvider({ children, reload }: { children: ReactNode; r
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <Dialog open={!!progress} onOpenChange={(open) => {
-        if (!open && progress && (!ACTIVE.has(progress.state) || gaveUp)) void closeProgress()
-      }}>
-        <DialogContent showCloseButton={!!progress && (!ACTIVE.has(progress.state) || gaveUp)} className="sm:max-w-lg">
-          {progress && (
-            <ProgressView progress={progress} reconnecting={reconnecting} gaveUp={gaveUp}
-              onClose={() => void closeProgress()}
-              onReload={() => { void acknowledgeProgress().catch(() => {}).finally(() => (reload ?? (() => window.location.reload()))()) }} />
+      <Dialog open={view.kind === 'progress'} onOpenChange={(open) => { if (!open) void closeProgress('close') }}>
+        <DialogContent showCloseButton={closable || (view.kind === 'progress' && view.closing.kind === 'pending')} className="sm:max-w-lg">
+          {view.kind === 'progress' && (
+            <ProgressView view={view} onClose={() => void closeProgress('close')} onReload={() => void closeProgress('reload')} />
           )}
         </DialogContent>
       </Dialog>

@@ -17,6 +17,7 @@ import {
   LOAD_CHARACTER_KEYS,
   hasLegacyVoice,
   buildSnapshot,
+  characterPresence,
   defaultSelection,
   deselectMedia,
   restoreCharacterId,
@@ -71,12 +72,10 @@ export function useLoadCharacter(props: BlockComponentProps) {
 
   const list = useCharacters()
   const { characters } = list
-  const character = useMemo(
-    () => (characterId && characters ? characters.find((c) => c.id === characterId) ?? null : null),
-    [characterId, characters],
-  )
   // Only a loaded list can say the character is gone; while loading or after a failed load the snapshot stands in.
-  const deleted = Boolean(characterId && characters && !character)
+  const presence = useMemo(() => characterPresence(characterId, list.resource, snapshot.name), [characterId, list.resource, snapshot.name])
+  const character = presence.kind === 'live' ? presence.character : null
+  const deleted = presence.kind === 'deleted'
   const name = character?.name ?? snapshot.name
 
   // Keep the snapshot in step with the live character and selection.
@@ -127,6 +126,7 @@ export function useLoadCharacter(props: BlockComponentProps) {
   return {
     ...list,
     characterId,
+    presence,
     character,
     deleted,
     name,

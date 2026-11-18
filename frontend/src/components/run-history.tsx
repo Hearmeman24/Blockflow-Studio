@@ -20,6 +20,17 @@ import { runAspect } from '@/lib/artifacts/run-media'
 import type { JobSnapshot } from '@/lib/types'
 
 const PAGE_SIZE = ARTIFACTS_PAGE_SIZE
+
+export type ArtifactsListStatus = 'loading' | 'error' | 'empty' | 'ready'
+
+/** What the list shows, decided once. An error wins over runs kept from the previous page. */
+export function artifactsListStatus({ isLoading, error, runs, placeholders }: {
+  isLoading: boolean; error: unknown; runs: number; placeholders: number
+}): ArtifactsListStatus {
+  if (isLoading) return 'loading'
+  if (error) return 'error'
+  return runs === 0 && placeholders === 0 ? 'empty' : 'ready'
+}
 const NO_JOBS: JobSnapshot[] = []
 
 /** Mixed shapes for the loading skeleton, so it reads as a masonry grid. */
@@ -40,6 +51,8 @@ export function RunHistory() {
   const urlQuery = searchParams.get('q') ?? ''
   const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10) || 1)
 
+  // The search box is a draft; after a pause it is written to the URL, and
+  // the URL's `q` is what is searched (so Clear filters and Back apply at once).
   const [promptDraft, setPromptDraft] = useState(urlQuery)
   const [debouncedQuery, setDebouncedQuery] = useState(urlQuery)
 
@@ -69,10 +82,10 @@ export function RunHistory() {
   const mcpView = source === 'mcp'
   // SSE drives live updates in MCP view; the 15s poll is a fallback if the stream buffers.
   const { runs, total, isLoading, error, mutate } = useRuns(
-    PAGE_SIZE, offset, favoritesOnly, mediaKind, debouncedQuery, hidePartial, source,
+    PAGE_SIZE, offset, favoritesOnly, mediaKind, urlQuery, hidePartial, source,
     mcpView ? 15000 : 0, character,
   )
-  const { jobs: mcpJobs, mutate: mutateJobs } = useMcpJobs(mcpView)
+  const { jobs: mcpJobs, resource: mcpJobsResource, mutate: mutateJobs } = useMcpJobs(mcpView)
   useMcpStream(mcpView, () => { mutate(); mutateJobs() })
 
   const activeJobs = useMemo(() => mcpJobs.filter(isActiveJob), [mcpJobs])
@@ -84,11 +97,11 @@ export function RunHistory() {
   const endIndex = total === 0 ? 0 : offset + runs.length
   const canGoPrev = page > 1
   const canGoNext = page < totalPages
-  const hasFilters = activeFilters(filters).length > 0 || debouncedQuery !== ''
+  const hasFilters = activeFilters(filters).length > 0 || urlQuery !== ''
+  const list = artifactsListStatus({ isLoading, error, runs: runs.length, placeholders: placeholders.length })
 
-  // The run open in the viewer, as an index into this page's runs.
-  const [viewerIndex, setViewerIndex] = useState<number | null>(null)
-  const shownIndex = viewerIndex !== null && viewerIndex < runs.length ? viewerIndex : null
+  // The run open in the viewer, by id: a refresh that adds runs does not switch it.
+  const [openRunId, setOpenRunId] = useState<string | null>(null)
 
   const tiles: MasonryItem[] = useMemo(() => [
     ...placeholders.map((job): MasonryItem => ({
@@ -96,20 +109,22 @@ export function RunHistory() {
       aspect: jobAspect(job),
       render: () => <McpJobTile job={job} />,
     })),
-    ...runs.map((run, i): MasonryItem => ({
+    ...runs.map((run): MasonryItem => ({
       key: `run-${run.id}`,
       aspect: runAspect(run),
       render: ({ reportAspect }) => (
-        <ArtifactTile run={run} onAspect={reportAspect} onFavoriteToggled={() => mutate()} onOpen={() => setViewerIndex(i)} />
+        <ArtifactTile run={run} onAspect={reportAspect} onFavoriteToggled={() => mutate()} onOpen={() => setOpenRunId(run.id)} />
       ),
     })),
   ], [placeholders, runs, mutate])
 
+  // A later page that came back empty (runs were removed) steps back one
+  // page. Only a real empty answer: an error or a load in progress is not one.
   useEffect(() => {
-    if (!isLoading && page > 1 && runs.length === 0) {
-      updateParams({ page: String(Math.max(1, page - 1)) })
+    if (list === 'empty' && page > 1) {
+      updateParams({ page: String(page - 1) })
     }
-  }, [isLoading, page, runs.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [list, page]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const setPage = (p: number) => updateParams({ page: p === 1 ? null : String(p) })
   // Any filter change goes back to page 1.
@@ -154,9 +169,18 @@ export function RunHistory() {
 
       <ArtifactsToolbar search={promptDraft} onSearchChange={setPromptDraft} filters={filters} onFiltersChange={setFilters} />
 
-      {isLoading ? (
+      {mcpView && mcpJobsResource.kind === 'error' && (
+        <AlertPanel variant="warning">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p>Could not load the generations in progress.</p>
+            <Button type="button" variant="outline" size="xs" onClick={() => void mutateJobs()}>Retry</Button>
+          </div>
+        </AlertPanel>
+      )}
+
+      {list === 'loading' ? (
         <MasonryGrid items={SKELETON_ITEMS} label="Loading artifacts" />
-      ) : error ? (
+      ) : list === 'error' ? (
         <div className="py-8 space-y-3">
           <AlertPanel variant="error" title="Failed to load artifacts">
             {error instanceof Error ? error.message : String(error)}
@@ -167,20 +191,20 @@ export function RunHistory() {
             </Button>
           </div>
         </div>
-      ) : runs.length === 0 && placeholders.length === 0 ? (
+      ) : list === 'empty' ? (
         <EmptyState
           title={hasFilters ? 'No runs match these filters.' : mcpView ? 'No MCP generations yet.' : 'No pipeline runs yet.'}
           description={hasFilters ? undefined : mcpView ? 'Ask Claude to generate via the BlockFlow MCP — results appear here live.' : 'Run a pipeline from the Generate page to see results here.'}
           action={hasFilters ? (
-            <button type="button" className="text-sm underline hover:text-foreground text-muted-foreground/70" onClick={clearAll}>
+            <Button type="button" variant="link" size="sm" className="text-muted-foreground/70 hover:text-foreground underline" onClick={clearAll}>
               Clear filters
-            </button>
+            </Button>
           ) : undefined}
         />
       ) : (
         <>
           <MasonryGrid items={tiles} label="Artifacts" />
-          <ArtifactViewer runs={runs} index={shownIndex} onIndexChange={setViewerIndex} onFavoriteToggled={() => mutate()} />
+          <ArtifactViewer runs={runs} openId={openRunId} onOpenChange={setOpenRunId} onFavoriteToggled={() => mutate()} />
           {(totalPages > 1 || page > 1) && (
             <div className="flex justify-end">
               {prevNextButtons}

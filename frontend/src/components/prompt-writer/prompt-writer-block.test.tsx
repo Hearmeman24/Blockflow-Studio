@@ -15,7 +15,7 @@ import { getBlockPickerGroups } from '@/components/pipeline/block-picker-groups'
 import { getBlockDef, getStarterTypes, registerBlockDef, type BlockComponentProps } from '@/lib/pipeline/registry'
 import { DEFAULT_VIDEO_SYSTEM_PROMPT } from '@/lib/prompt-writer/config'
 import type { WriterProviderStatus } from '@/lib/prompt-writer/types'
-import { PromptWriterBlock } from './prompt-writer-block'
+import { PromptWriterBlock, RUNNER_STATUS } from './prompt-writer-block'
 
 // ---- fixtures --------------------------------------------------------------
 
@@ -331,6 +331,28 @@ describe('running', () => {
     await typeIdea(user, 'lighthouse')
     await run()
     expect(generateBodies()[0].system_prompt).toMatch(/^You are writing a concise visual description for AI image generation/)
+  })
+
+  it('a result written for an earlier user prompt is marked out of date, not Done', async () => {
+    const { user, run } = renderBlock()
+    await user.click(await screen.findByRole('combobox', { name: 'Model' }))
+    await user.click(screen.getAllByRole('option')[0])
+    await typeIdea(user, 'a fox')
+    await run()
+    expect(within(screen.getByTestId('run-status')).getByText('Done')).toBeInTheDocument()
+    await typeIdea(user, 'a heron')
+    const status = screen.getByTestId('run-status')
+    expect(within(status).queryByText('Done')).toBeNull()
+    expect(within(status).getByText('Out of date')).toBeInTheDocument()
+    expect(within(status).getByText('Written for an earlier user prompt.')).toBeInTheDocument()
+    // The result itself is kept; going back to the same prompt is Done again.
+    expect(screen.getByLabelText('Result')).toHaveValue('A red fox crosses a frozen lake at dawn.')
+    await typeIdea(user, 'a fox')
+    expect(within(screen.getByTestId('run-status')).getByText('Done')).toBeInTheDocument()
+  })
+
+  it('maps each of its run states to the runner\'s block status in one table', () => {
+    expect(RUNNER_STATUS).toEqual({ idle: 'idle', running: 'running', success: 'completed', cancelled: 'cancelled', error: 'error' })
   })
 
   it('rejects an empty idea without calling the provider', async () => {

@@ -41,11 +41,11 @@ function makeRun(id: string, over: Partial<RunEntry> = {}): RunEntry {
 const RUNS = [makeRun('a'), makeRun('b', { block_results: [block(0, 'i', 'I', { image: { kind: 'image', value: ref(2, { ...META, cost: null }) } })] }), makeRun('c')]
 
 function Harness({ runs = RUNS, start = 0 }: { runs?: RunEntry[]; start?: number }) {
-  const [index, setIndex] = useState<number | null>(null)
+  const [openId, setOpenId] = useState<string | null>(null)
   return (
     <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
-      <button type="button" data-run-tile={runs[start].id} onClick={() => setIndex(start)}>open</button>
-      <ArtifactViewer runs={runs} index={index} onIndexChange={setIndex} />
+      <button type="button" data-run-tile={runs[start].id} onClick={() => setOpenId(runs[start].id)}>open</button>
+      <ArtifactViewer runs={runs} openId={openId} onOpenChange={setOpenId} />
     </SWRConfig>
   )
 }
@@ -188,7 +188,7 @@ describe('ArtifactViewer', () => {
     toggleRunFavorite.mockResolvedValue({ ok: true, favorited: true })
     const onFavoriteToggled = vi.fn()
     const user = userEvent.setup()
-    render(wrap(<ArtifactViewer runs={RUNS} index={0} onIndexChange={vi.fn()} onFavoriteToggled={onFavoriteToggled} />))
+    render(wrap(<ArtifactViewer runs={RUNS} openId="a" onOpenChange={vi.fn()} onFavoriteToggled={onFavoriteToggled} />))
     const fav = await screen.findByRole('button', { name: 'Favorite Run a' })
     expect(fav).toHaveAttribute('aria-pressed', 'false')
     await user.click(fav)
@@ -201,5 +201,33 @@ describe('ArtifactViewer', () => {
     const { dialog } = await open()
     expect(within(dialog).queryByRole('button', { name: /delete/i })).toBeNull()
     expect(within(dialog).queryByText('Image to Image')).toBeNull()
+  })
+
+  it('a refresh that adds runs above keeps showing the open run', async () => {
+    const onOpenChange = vi.fn()
+    const { rerender } = render(wrap(<ArtifactViewer runs={RUNS} openId="b" onOpenChange={onOpenChange} />))
+    expect(await screen.findByRole('dialog', { name: 'Run b' })).toBeInTheDocument()
+    rerender(wrap(<ArtifactViewer runs={[makeRun('new1'), makeRun('new2'), ...RUNS]} openId="b" onOpenChange={onOpenChange} />))
+    expect(screen.getByRole('dialog', { name: 'Run b' })).toBeInTheDocument()
+    expect(onOpenChange).not.toHaveBeenCalled()
+  })
+
+  it('the open run leaving the list stays shown; the arrows go to its old neighbours', async () => {
+    const onOpenChange = vi.fn()
+    const user = userEvent.setup()
+    const { rerender } = render(wrap(<ArtifactViewer runs={RUNS} openId="b" onOpenChange={onOpenChange} />))
+    await screen.findByRole('dialog', { name: 'Run b' })
+    // e.g. its favourite was turned off under "Favorites only", and the list refreshed.
+    rerender(wrap(<ArtifactViewer runs={[RUNS[0], RUNS[2]]} openId="b" onOpenChange={onOpenChange} />))
+    const dialog = screen.getByRole('dialog', { name: 'Run b' })
+    await user.click(within(dialog).getByRole('button', { name: 'Next run' }))
+    expect(onOpenChange).toHaveBeenLastCalledWith('c')
+    await user.click(within(dialog).getByRole('button', { name: 'Previous run' }))
+    expect(onOpenChange).toHaveBeenLastCalledWith('a')
+  })
+
+  it('an id that is not in the list and was never shown opens nothing', () => {
+    render(wrap(<ArtifactViewer runs={RUNS} openId="zzz" onOpenChange={vi.fn()} />))
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

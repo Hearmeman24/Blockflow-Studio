@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { renderHook } from '@testing-library/react'
-import { parseJobEvent, useMcpStream } from './hooks'
+import { renderHook, waitFor } from '@testing-library/react'
+import { SWRConfig } from 'swr'
+import type { ReactNode } from 'react'
+import { parseJobEvent, useMcpJobs, useMcpStream, useRuns } from './hooks'
 import { fetchMcpJobs, fetchRuns } from './api'
 
 class FakeEventSource {
@@ -106,3 +108,38 @@ describe('fetchRuns', () => {
     expect((await urlOf(25, 0, false, null, '', true, null, null)).searchParams.has('character')).toBe(false)
   })
 })
+
+describe('non-OK answers are errors', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  const answer = (status: number, body: unknown) => vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })))
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0, shouldRetryOnError: false }}>{children}</SWRConfig>
+  )
+
+  test('fetchRuns rejects with the detail of a FastAPI error', async () => {
+    answer(500, { detail: 'Internal Server Error' })
+    await expect(fetchRuns()).rejects.toThrow('Internal Server Error')
+  })
+
+  test('fetchMcpJobs rejects on a non-OK answer', async () => {
+    answer(503, { detail: 'busy' })
+    await expect(fetchMcpJobs()).rejects.toThrow('busy')
+  })
+
+  test('useRuns reports an ok:false answer as its error', async () => {
+    answer(200, { ok: false, error: 'Run store unreadable' })
+    const { result } = renderHook(() => useRuns(), { wrapper })
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    expect(String(result.current.error)).toContain('Run store unreadable')
+    expect(result.current.runs).toEqual([])
+  })
+
+  test('useMcpJobs exposes its error', async () => {
+    answer(500, { detail: 'boom' })
+    const { result } = renderHook(() => useMcpJobs(true), { wrapper })
+    await waitFor(() => expect(result.current.resource.kind).toBe('error'))
+    expect(result.current.resource).toEqual({ kind: 'error', message: 'boom' })
+    expect(result.current.jobs).toEqual([])
+  })
+})
+

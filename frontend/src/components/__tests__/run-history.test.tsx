@@ -35,13 +35,15 @@ const defaultUseRuns: UseRunsReturn = {
 let useRunsReturn: UseRunsReturn = { ...defaultUseRuns }
 
 let mcpJobs: unknown[] = []
+let mcpJobsResource: { kind: string; message?: string } = { kind: 'ready' }
+const mutateJobsMock = vi.fn()
 const useRunsArgs: unknown[][] = []
 vi.mock('@/lib/hooks', () => ({
   useRuns: (...args: unknown[]) => {
     useRunsArgs.push(args)
     return useRunsReturn
   },
-  useMcpJobs: () => ({ jobs: mcpJobs, mutate: vi.fn() }),
+  useMcpJobs: () => ({ jobs: mcpJobs, resource: mcpJobsResource, mutate: mutateJobsMock }),
   useMcpStream: () => {},
 }))
 
@@ -54,11 +56,11 @@ vi.mock('@/components/artifacts/artifact-tile', () => ({
 
 // ── ArtifactViewer — tested on its own; here only what it is given ───────────
 vi.mock('@/components/artifacts/artifact-viewer', () => ({
-  ArtifactViewer: ({ runs, index, onIndexChange }: { runs: { id: string }[]; index: number | null; onIndexChange: (i: number | null) => void }) =>
-    index === null ? null : (
+  ArtifactViewer: ({ runs, openId, onOpenChange }: { runs: { id: string }[]; openId: string | null; onOpenChange: (id: string | null) => void }) =>
+    openId === null ? null : (
       <div role="dialog" aria-label="viewer">
-        {`showing ${runs[index].id} of ${runs.map((r) => r.id).join(',')}`}
-        <button type="button" onClick={() => onIndexChange(index + 1)}>next</button>
+        {`showing ${openId} of ${runs.map((r) => r.id).join(',')}`}
+        <button type="button" onClick={() => onOpenChange(runs[runs.findIndex((r) => r.id === openId) + 1].id)}>next</button>
       </div>
     ),
 }))
@@ -72,6 +74,8 @@ describe('RunHistory', () => {
     useRunsReturn = { ...defaultUseRuns }
     searchParams = new URLSearchParams()
     mcpJobs = []
+    mcpJobsResource = { kind: 'ready' }
+    mutateJobsMock.mockClear()
     useRunsArgs.length = 0
     mutateMock.mockClear()
     replaceMock.mockClear()
@@ -287,6 +291,75 @@ describe('RunHistory', () => {
       expect(cells).toHaveLength(2)
       expect(cells[0]).toContainElement(screen.getByRole('status', { name: 'Generating with seedream-5.5' }))
       expect(cells[1]).toContainElement(screen.getByTestId('run-tile-r1'))
+    })
+  })
+
+  // ── List status, page clamp, open run, search ──────────────────────────────
+
+  describe('list status', () => {
+    const run = (id: string) => ({ id, block_results: [], flow_snapshot: {} }) as never
+
+    test('a backend error on a later page keeps the page and shows the error', () => {
+      searchParams = new URLSearchParams('page=3')
+      useRunsReturn = { ...defaultUseRuns, error: new Error('Backend down') }
+      const { rerender } = render(<RunHistory />)
+      rerender(<RunHistory />)
+      expect(screen.getByText(/failed to load/i)).toBeInTheDocument()
+      expect(replaceMock).not.toHaveBeenCalled()
+    })
+
+    test('a later page that is truly empty goes back one page', () => {
+      searchParams = new URLSearchParams('page=3')
+      render(<RunHistory />)
+      expect(replaceMock).toHaveBeenCalledWith('/artifacts?page=2', { scroll: false })
+    })
+
+    test('a refresh that adds runs above keeps the open run open', async () => {
+      const user = userEvent.setup()
+      useRunsReturn = { ...defaultUseRuns, runs: [run('r1'), run('r2')], total: 2 }
+      const { rerender } = render(<RunHistory />)
+      await user.click(screen.getByTestId('run-tile-r2'))
+      useRunsReturn = { ...defaultUseRuns, runs: [run('new'), run('r1'), run('r2')], total: 3 }
+      rerender(<RunHistory />)
+      expect(screen.getByRole('dialog')).toHaveTextContent('showing r2 of new,r1,r2')
+    })
+
+    test('the search in the URL drives the request and the empty state at once', () => {
+      searchParams = new URLSearchParams('q=fox')
+      const { rerender } = render(<RunHistory />)
+      expect(useRunsArgs.at(-1)![4]).toBe('fox')
+      expect(screen.getByText('No runs match these filters.')).toBeInTheDocument()
+      // Clear filters or Back: the URL loses q.
+      searchParams = new URLSearchParams()
+      rerender(<RunHistory />)
+      expect(useRunsArgs.at(-1)![4]).toBe('')
+      expect(screen.getByText(/no pipeline runs/i)).toBeInTheDocument()
+    })
+
+    test('Clear filters is the Button primitive', () => {
+      searchParams = new URLSearchParams('fav=1')
+      render(<RunHistory />)
+      expect(screen.getByRole('button', { name: 'Clear filters' })).toHaveAttribute('data-slot', 'button')
+    })
+  })
+
+  describe('MCP jobs', () => {
+    test('a failed read of the generations in progress says so, with Retry', async () => {
+      const user = userEvent.setup()
+      searchParams = new URLSearchParams('source=mcp')
+      mcpJobsResource = { kind: 'error', message: 'boom' }
+      useRunsReturn = { ...defaultUseRuns, runs: [{ id: 'r1', block_results: [], flow_snapshot: {} } as never], total: 1 }
+      render(<RunHistory />)
+      expect(screen.getByText('Could not load the generations in progress.')).toBeInTheDocument()
+      expect(screen.getByTestId('run-tile-r1')).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Retry' }))
+      expect(mutateJobsMock).toHaveBeenCalledTimes(1)
+    })
+
+    test('outside the MCP view nothing is said', () => {
+      mcpJobsResource = { kind: 'error', message: 'boom' }
+      render(<RunHistory />)
+      expect(screen.queryByText('Could not load the generations in progress.')).toBeNull()
     })
   })
 })

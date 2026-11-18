@@ -92,4 +92,12 @@ describe('RunHistory character filter', () => {
     const target = nav.replace.mock.calls.at(-1)![0] as string
     expect(target).not.toContain('character')
   })
+
+  it('an error answer without ok:false is an error, not "No pipeline runs yet"', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ detail: 'Internal Server Error' }), { status: 500 })))
+    renderPage()
+    expect(await screen.findByText('Failed to load artifacts')).toBeInTheDocument()
+    expect(screen.getByText('Internal Server Error')).toBeInTheDocument()
+    expect(screen.queryByText(/no pipeline runs/i)).toBeNull()
+  })
 })

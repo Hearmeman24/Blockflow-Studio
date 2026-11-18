@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MediaProbe } from '@/lib/byok/probe-media'
+import { movedOrder } from '@/lib/characters/mutation-queue'
 import { mediaOfKind, type CharactersState } from '@/lib/characters/use-characters'
 import type { Character, CharacterMediaKind } from '@/lib/characters/types'
 
@@ -29,8 +30,10 @@ export interface MediaSource {
   /** Add one file already checked to be of `kind`, with its probed metadata. Rejects with a readable message. */
   add: (kind: CharacterMediaKind, file: File, meta: MediaProbe) => Promise<unknown>
   remove: (item: SourceItem) => Promise<unknown>
-  /** `ids` is the whole new order of that kind. */
-  reorder: (kind: CharacterMediaKind, ids: string[]) => Promise<unknown>
+  /** Move one item a place earlier (-1) or later (1) among the items of its kind that are
+   * not `lockedIds`. The source builds the new order from its latest state, so quick moves
+   * build on each other. */
+  move: (item: SourceItem, delta: -1 | 1, lockedIds: readonly string[]) => Promise<unknown>
   setDefault: (kind: 'image' | 'audio', id: string | null) => Promise<unknown>
   /** Why this item cannot be removed (its tooltip), or null when it can. */
   removeBlocked: (item: SourceItem) => string | null
@@ -38,7 +41,7 @@ export interface MediaSource {
 
 export const NEEDS_FACE_TIP = 'A character needs a face'
 
-export type CharacterMediaActions = Pick<CharactersState, 'update' | 'uploadMedia' | 'removeMedia' | 'reorderMedia'>
+export type CharacterMediaActions = Pick<CharactersState, 'update' | 'uploadMedia' | 'removeMedia' | 'moveMedia'>
 
 // ---- Live: a saved character ----
 
@@ -51,7 +54,7 @@ export function liveMediaSource(character: Character, actions: CharacterMediaAct
     defaultId: (kind) => (kind === 'image' ? character.default_face_id : kind === 'audio' ? character.default_audio_id : null),
     add: (kind, file, meta) => actions.uploadMedia(id, file, kind, meta),
     remove: (item) => actions.removeMedia(id, item.id),
-    reorder: (kind, ids) => actions.reorderMedia(id, kind, ids),
+    move: (item, delta, lockedIds) => actions.moveMedia(id, item.id, delta, lockedIds),
     setDefault: (kind, mediaId) => actions.update(id, kind === 'image' ? { default_face_id: mediaId } : { default_audio_id: mediaId }),
     removeBlocked: (item) => (item.kind === 'image' && mediaOfKind(character, 'image').length <= 1 ? NEEDS_FACE_TIP : null),
   }
@@ -167,11 +170,13 @@ export function useStagedMedia(): StagedMedia {
         return { ...prev, [item.kind]: prev[item.kind].filter((f) => f.id !== item.id) }
       })
     },
-    reorder: async (kind, ids) => {
+    move: async (item, delta, lockedIds) => {
       setFiles((prev) => {
-        const byId = new Map(prev[kind].map((f) => [f.id, f]))
-        const ordered = ids.map((id) => byId.get(id)).filter((f): f is StagedFile => !!f)
-        return ordered.length === prev[kind].length ? { ...prev, [kind]: ordered } : prev
+        const list = prev[item.kind]
+        const ids = movedOrder(list.map((f) => f.id), item.id, delta, lockedIds)
+        if (!ids) return prev
+        const byId = new Map(list.map((f) => [f.id, f]))
+        return { ...prev, [item.kind]: ids.map((id) => byId.get(id)!) }
       })
     },
     setDefault: async (kind, id) => {
