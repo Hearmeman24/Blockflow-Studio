@@ -21,6 +21,7 @@ import { findModel, providerName } from '@/lib/byok/catalog'
 import { formatJobCost } from '@/lib/byok/cost'
 import { useProviderCatalog } from '@/lib/byok/use-provider-catalog'
 import { fmtDurationSeconds, formatRelativeTime } from '@/lib/format-time'
+import { runStatusBadge } from '@/lib/status'
 import type { RunEntry } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { CopyPromptButton, FavoriteRunButton, RestoreButton, useRestoreRun, useRunFavorite } from './run-actions'
@@ -221,7 +222,8 @@ function DetailsPane({ run, onFavoriteToggled, onClose }: { run: RunEntry; onFav
   const failure = runFailure(run)
   const name = run.name || 'Run'
   const created = new Date(run.created_at)
-  const statusLabel = run.status === 'failed' ? 'Failed' : run.status === 'partial' ? 'Partial' : null
+  const badge = runStatusBadge(run.status)
+  const statusLabel = badge?.label ?? null
 
   return (
     <div className="space-y-5 text-xs">
@@ -247,7 +249,7 @@ function DetailsPane({ run, onFavoriteToggled, onClose }: { run: RunEntry; onFav
         {statusLabel && (
           <Row label="Status">
             <span className="inline-flex items-center gap-1 font-medium">
-              <AlertTriangle aria-hidden className={cn('size-3.5', run.status === 'failed' ? 'text-destructive' : 'text-warning')} />
+              <AlertTriangle aria-hidden className={cn('size-3.5', badge?.tone === 'error' ? 'text-destructive' : 'text-warning')} />
               {statusLabel}
             </span>
             {failure && <span className="block">{failure}</span>}

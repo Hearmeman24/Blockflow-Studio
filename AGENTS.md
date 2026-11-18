@@ -120,6 +120,7 @@ needs their explicit yes.
 | `npm --prefix frontend test` | Vitest. Focused: `npm --prefix frontend test -- model-select`. |
 | `npm --prefix frontend run build` | Production build. Not while a dev server from the same checkout is running. |
 | `uv run python tests/test_byok_catalog_fixture.py` | Regenerate the frontend catalog fixtures after a ledger change. |
+| `uv run python tests/test_status_contract_fixture.py` | Regenerate the status-contract fixture after changing `backend/statuses.py`. |
 | `uv run python scripts/sync_price_ledger.py` | Pull the price ledger from `Hearmeman24/blockflow-prices`. |
 
 CI (`.github/workflows/ci.yml`) runs ruff, pytest, codegen, tsc, lint, Vitest
@@ -133,6 +134,7 @@ app.py                      installs what a fresh clone is missing, then starts 
 mcp_server.py               MCP server entry (stdio); code in blockflow_mcp/ (one module per tool group)
 backend/
   main.py                   FastAPI app; mounts routers and every block sidecar at /api/blocks/<slug>
+  statuses.py               every status vocabulary (jobs, runs, updater, ...) as StrEnums; stdlib only
   config.py                 user data folder and output folder resolution
   byok/                     capability ledger (catalog.py, spec.py, validation.py), provider adapters
                             (providers/), generation service, pricing, balances, /api/providers/*, /api/generation/*
@@ -145,6 +147,7 @@ private_blocks/<slug>/      a user's own blocks; git-ignored, same layout
 frontend/src/
   app/                      pages: generate, characters, artifacts, settings
   lib/pipeline/             registry (BlockDef, ports), runner, flow I/O and migrations
+  lib/status/               the same vocabularies for the frontend, checked against the backend by a fixture
   components/pipeline/      canvas, block card; custom_blocks/_register.ts is generated
   components/byok/, lib/byok/  generation block shell, loaders, catalog client, cost
   components/ui/            shadcn primitives

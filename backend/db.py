@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend import config
+from backend.statuses import RunStatus
 
 DB_PATH = config.RUN_HISTORY_DB_PATH
 _lock = threading.Lock()
@@ -309,7 +310,7 @@ def count_runs(
 _MCP_RUN_PREFIX = "run-mcp-"
 
 # Statuses of runs where a block failed; `hide_partial` looks at these only.
-_UNFINISHED_STATUSES = frozenset({"partial", "failed"})
+_UNFINISHED_STATUSES = frozenset({RunStatus.PARTIAL, RunStatus.FAILED})
 _GENERATED_KINDS = frozenset({"image", "video", "audio"})
 _MAX_VALUE_DEPTH = 16
 

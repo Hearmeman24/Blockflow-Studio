@@ -1,0 +1,100 @@
+{
+  "job_status": [
+    "QUEUED",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "TIMED_OUT"
+  ],
+  "job_status_active": [
+    "QUEUED",
+    "RUNNING"
+  ],
+  "job_status_terminal": [
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "TIMED_OUT"
+  ],
+  "error_kind": [
+    "auth",
+    "insufficient_credits",
+    "rate_limited",
+    "validation",
+    "content_rejected",
+    "unsupported",
+    "provider_failure",
+    "timeout",
+    "network",
+    "malformed_response",
+    "interrupted"
+  ],
+  "run_status": [
+    "completed",
+    "partial",
+    "failed"
+  ],
+  "block_result_status": [
+    "idle",
+    "running",
+    "completed",
+    "error",
+    "skipped",
+    "cancelled"
+  ],
+  "update_state": [
+    "idle",
+    "running",
+    "restarting",
+    "done",
+    "failed",
+    "rolled_back"
+  ],
+  "update_state_active": [
+    "running",
+    "restarting"
+  ],
+  "update_state_finished": [
+    "done",
+    "failed",
+    "rolled_back"
+  ],
+  "update_step_status": [
+    "pending",
+    "running",
+    "done",
+    "failed",
+    "skipped"
+  ],
+  "storage_mode": [
+    "local_only",
+    "tmpfiles"
+  ],
+  "balance_status": [
+    "ok",
+    "unavailable",
+    "error",
+    "not_configured"
+  ],
+  "price_refresh_status": [
+    "updated",
+    "not_modified",
+    "skipped",
+    "not_configured",
+    "disabled",
+    "older_than_bundled",
+    "not_available",
+    "invalid",
+    "too_large",
+    "error"
+  ],
+  "reference_check_status": [
+    "ok",
+    "missing_local",
+    "unreachable",
+    "expired",
+    "malformed",
+    "unchecked"
+  ]
+}

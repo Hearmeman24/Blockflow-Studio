@@ -10,6 +10,9 @@ from blockflow_mcp.client import ToolFailure, checked, get_client, tool
 
 TERMINAL = ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")
 STATUSES = ("QUEUED", "RUNNING", *TERMINAL)
+# Statuses the backend saves an Artifacts run for (backend/mcp_runs.py).
+# tests/test_mcp_status_contract.py keeps these equal to backend/statuses.py.
+RUN_RECORDED = ("COMPLETED", "FAILED", "TIMED_OUT")
 SOURCES = ("mcp", "pipeline")
 POLL_INTERVAL_S = 3.0
 DEFAULT_TIMEOUT_S = 600.0
@@ -65,7 +68,7 @@ def summarize(job: dict[str, Any], *, roots: list[Path] | None = None) -> dict[s
         summary["label"] = request["label"]
     if isinstance(request.get("params"), dict) and isinstance(request["params"].get("prompt"), str):
         summary["prompt"] = request["params"]["prompt"]
-    if job.get("source") == "mcp" and job.get("status") in ("COMPLETED", "FAILED", "TIMED_OUT"):
+    if job.get("source") == "mcp" and job.get("status") in RUN_RECORDED:
         summary["artifacts_run_id"] = f"run-mcp-{job.get('job_id')}"
     return summary
 

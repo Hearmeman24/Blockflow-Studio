@@ -10,22 +10,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-ERROR_KINDS: tuple[str, ...] = (
-    "auth",
-    "insufficient_credits",
-    "rate_limited",
-    "validation",
-    "content_rejected",
-    "unsupported",
-    "provider_failure",
-    "timeout",
-    "network",
-    "malformed_response",
-)
+from backend.statuses import PROVIDER_ERROR_KINDS, ErrorKind
+
+# The kinds a ProviderError may carry, as plain strings (``interrupted`` is a
+# job-store-only kind and is not one of them).
+ERROR_KINDS: tuple[str, ...] = tuple(k.value for k in PROVIDER_ERROR_KINDS)
 
 # Kinds that a caller may retry later. Automatic retry inside the provider
 # layer is narrower: see ``http.RETRY_KINDS``.
-_RETRYABLE_BY_DEFAULT = frozenset({"rate_limited", "network", "timeout"})
+_RETRYABLE_BY_DEFAULT = frozenset({ErrorKind.RATE_LIMITED, ErrorKind.NETWORK, ErrorKind.TIMEOUT})
 
 _CONTENT_WORDS = ("content policy", "content review", "content violation", "content moderation", "sensitive",
                   "nsfw", "moderation", "violat", "inappropriate", "safety", "prohibited")

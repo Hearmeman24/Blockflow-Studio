@@ -1,5 +1,6 @@
 import { type ComponentType } from 'react'
 import type { BlockRole } from './block-role'
+import type { BlockStatus } from '@/lib/status'
 
 // ---- Port System ----
 
@@ -54,7 +55,7 @@ export interface BlockComponentProps {
   setStatusMessage: (message: string | undefined) => void
   /** Optional: update the block execution status outside the main runner.
    *  Used for resumable polling when route navigation unmounts the pipeline UI. */
-  setExecutionStatus?: (status: 'idle' | 'running' | 'completed' | 'error' | 'skipped', error?: string) => void
+  setExecutionStatus?: (status: BlockStatus, error?: string) => void
   /** Hint which output port name is active (e.g. 'image' or 'video').
    *  Used to narrow the add-block menu for blocks with multiple output kinds.
    *  Call with empty string to clear the hint. */

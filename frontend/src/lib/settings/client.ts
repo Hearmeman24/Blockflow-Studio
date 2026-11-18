@@ -11,6 +11,7 @@
  */
 
 import { mutate } from 'swr'
+import { ASSET_STORAGE_MODES, type AssetStorageMode } from '@/lib/status'
 
 // kie_api_key and piapi_api_key drive generation. openrouter_api_key is
 // optional and only used by the Prompt Writer block.
@@ -136,8 +137,8 @@ export async function setAppPref(name: string, value: string): Promise<void> {
 }
 
 export const ASSET_STORAGE_MODE_PREF = 'asset_storage_mode'
-export const ASSET_STORAGE_MODES = ['local_only', 'tmpfiles'] as const
-export type AssetStorageMode = typeof ASSET_STORAGE_MODES[number]
+// Declared in `@/lib/status`; re-exported for existing imports.
+export { ASSET_STORAGE_MODES, type AssetStorageMode }
 
 export function isAssetStorageMode(value: string | null | undefined): value is AssetStorageMode {
   return ASSET_STORAGE_MODES.includes(value as AssetStorageMode)

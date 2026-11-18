@@ -49,6 +49,7 @@ import { useProviderCatalog } from '@/lib/byok/use-provider-catalog'
 import { referenceBadges } from '@/lib/byok/mentions'
 import { useCostEstimate } from '@/lib/byok/use-cost-estimate'
 import { readJobCost } from '@/lib/byok/cost'
+import { GENERATION_RUN_STATUS_LABEL } from '@/lib/status'
 import type { JobSnapshot } from '@/lib/types'
 import { useOptionalPipeline } from '@/lib/pipeline/pipeline-context'
 import { loaderForReferences } from '@/lib/pipeline/migrate-references-to-loaders'
@@ -362,17 +363,9 @@ export function useGenerationBlock(
       error: null,
       warnings: update.issues?.filter((i) => i.severity === 'warning') ?? prev.warnings,
     }))
-    const label: Record<RunStatus, string> = {
-      validating: 'Checking the request…',
-      submitting: 'Submitting…',
-      queued: 'Queued',
-      running: update.progress != null ? `Running ${Math.round(update.progress * 100)}%` : 'Running…',
-      completed: 'Completed',
-      failed: 'Failed',
-      cancelled: 'Cancelled',
-      timed_out: 'Timed out',
-    }
-    setStatusMessage(label[update.status])
+    setStatusMessage(update.status === 'running' && update.progress != null
+      ? `Running ${Math.round(update.progress * 100)}%`
+      : GENERATION_RUN_STATUS_LABEL[update.status])
   }, [setRun, setStatusMessage])
 
   useEffect(() => {
@@ -428,7 +421,7 @@ export function useGenerationBlock(
         setOutput(output, value)
         watchLateCost(job)
         setRun((prev) => ({ ...prev, status: 'completed', progress: 1, error: null }))
-        setStatusMessage('Completed')
+        setStatusMessage(GENERATION_RUN_STATUS_LABEL.completed)
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') {
           setRun((prev) => ({ ...prev, status: 'cancelled', error: null }))

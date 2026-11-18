@@ -7,6 +7,7 @@
  * restarted, so the proxy is not there to answer.
  */
 import { directBackendUrl } from '@/lib/backend-url'
+import type { UpdateState, UpdateStepStatus } from '@/lib/status'
 
 export const UPDATE_STATUS_URL = '/api/app/update'
 export const VERSION_URL = '/api/app/version'
@@ -55,9 +56,10 @@ export interface VersionInfo {
   reason?: string
 }
 
-export type StepStatus = 'pending' | 'running' | 'done' | 'skipped' | 'failed'
+// Declared in `@/lib/status`; these names stay for existing imports.
+export type StepStatus = UpdateStepStatus
 export interface UpdateStep { id: string; label: string; status: StepStatus; detail?: string }
-export type UpdateState = 'idle' | 'running' | 'restarting' | 'done' | 'failed' | 'rolled_back'
+export type { UpdateState }
 
 export interface UpdateProgress {
   state: UpdateState

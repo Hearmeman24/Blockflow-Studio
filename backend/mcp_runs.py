@@ -38,11 +38,15 @@ from urllib.parse import unquote, urlsplit
 
 from backend import db, job_store
 from backend.byok.spec import canonical_kind
+from backend.statuses import BlockResultStatus, JobStatus, RunStatus
 
 logger = logging.getLogger(__name__)
 
 SOURCE = "mcp"
 RUN_PREFIX = db._MCP_RUN_PREFIX
+# Job statuses that get a run (CANCELLED gets none). blockflow_mcp/tools_jobs.py
+# keeps a copy (RUN_RECORDED); tests/test_mcp_status_contract.py keeps them equal.
+RUN_RECORDED_STATUSES: tuple[JobStatus, ...] = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMED_OUT)
 MARKER_TABLE = "mcp_job_runs"
 # frontend/src/lib/pipeline/flow-migrations.ts CURRENT_FLOW_SCHEMA_VERSION; the
 # Vitest snapshot test fails if the two drift apart.
@@ -267,20 +271,20 @@ def build_run(job: Any) -> dict[str, Any] | None:
     if not isinstance(job, Mapping) or job.get("source") != SOURCE or not job.get("job_id"):
         return None
     status = job.get("status")
-    if status not in ("COMPLETED", "FAILED", "TIMED_OUT") or job.get("mode") not in GENERATION_BLOCKS:
+    if status not in RUN_RECORDED_STATUSES or job.get("mode") not in GENERATION_BLOCKS:
         return None
     snapshot = build_flow_snapshot(job)
     gen_type, gen_label, output_kind, loader = GENERATION_BLOCKS[job["mode"]]
-    refs = _output_refs(job, output_kind) if status == "COMPLETED" else []
+    refs = _output_refs(job, output_kind) if status == JobStatus.COMPLETED else []
     ok = bool(refs)
 
     results: list[dict[str, Any]] = []
     if snapshot["blocks"][0]["type"] != gen_type and loader is not None:
         results.append({"block_index": 0, "block_type": loader[0], "block_label": loader[1],
-                        "status": "completed", "outputs": _loader_outputs(snapshot["blocks"][0]["config"])})
+                        "status": BlockResultStatus.COMPLETED, "outputs": _loader_outputs(snapshot["blocks"][0]["config"])})
     value = (refs[0] if len(refs) == 1 else refs) if ok else None
     gen: dict[str, Any] = {"block_index": len(results), "block_type": gen_type, "block_label": gen_label,
-                           "status": "completed" if ok else "error",
+                           "status": BlockResultStatus.COMPLETED if ok else BlockResultStatus.ERROR,
                            "outputs": {output_kind: {"kind": output_kind, "value": value}} if ok else {}}
     if not ok:
         error = job.get("error") if isinstance(job.get("error"), Mapping) else {}
@@ -288,7 +292,7 @@ def build_run(job: Any) -> dict[str, Any] | None:
     results.append(gen)
     viewer_type, viewer_label = VIEWERS[output_kind]
     results.append({"block_index": len(results), "block_type": viewer_type, "block_label": viewer_label,
-                    "status": "completed" if ok else "skipped", "outputs": dict(gen["outputs"])})
+                    "status": BlockResultStatus.COMPLETED if ok else BlockResultStatus.SKIPPED, "outputs": dict(gen["outputs"])})
 
     duration_ms = None
     try:
@@ -298,7 +302,7 @@ def build_run(job: Any) -> dict[str, Any] | None:
     return {
         "id": f"{RUN_PREFIX}{job['job_id']}",
         "name": _run_name(job),
-        "status": "completed" if ok else "failed",
+        "status": RunStatus.COMPLETED if ok else RunStatus.FAILED,
         "duration_ms": duration_ms,
         "flow_snapshot": snapshot,
         "block_results": results,

@@ -46,6 +46,7 @@ from backend.app_update import install, settings
 from backend.app_update import version as semver
 from backend.app_update.commands import Result, Runner, redact, run_command
 from backend.app_update.supervisor import Supervisor, restart_command
+from backend.statuses import ACTIVE_UPDATE_STATES, FINISHED_UPDATE_STATES, StepStatus, UpdateState
 
 STEPS: tuple[tuple[str, str], ...] = (
     ("preflight", "Check that the update can run safely"),
@@ -60,8 +61,8 @@ STEPS: tuple[tuple[str, str], ...] = (
     ("restart", "Restart BlockFlow"),
 )
 ROLLBACK_STEPS = (("rollback", "Undo the update"), ("rollback_deps", "Restore packages"))
-ACTIVE_STATES = frozenset({"running", "restarting"})
-FINISHED_STATES = frozenset({"done", "failed", "rolled_back"})
+ACTIVE_STATES = ACTIVE_UPDATE_STATES
+FINISHED_STATES = FINISHED_UPDATE_STATES
 LOCKFILES = ("frontend/package-lock.json", "frontend/package.json")
 LAUNCHER = "app.py"
 TOOLS = ("git", "uv", "npm")
@@ -94,7 +95,7 @@ def count_active_jobs() -> int:
 
 
 def _idle() -> dict[str, Any]:
-    return {"state": "idle", "step": None, "steps": [], "error": None, "message": None, "tag": None,
+    return {"state": UpdateState.IDLE, "step": None, "steps": [], "error": None, "message": None, "tag": None,
             "from_version": None, "to_version": None, "from_commit": None, "to_commit": None,
             "started_at": None, "finished_at": None, "manual": [], "restart": None, "owner": None,
             "log_tail": []}
@@ -140,7 +141,7 @@ class UpdateEngine:
             data = json.loads(self.progress_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return _idle()
-        if not isinstance(data, dict) or data.get("state") not in ACTIVE_STATES | FINISHED_STATES | {"idle"}:
+        if not isinstance(data, dict) or data.get("state") not in ACTIVE_STATES | FINISHED_STATES | {UpdateState.IDLE}:
             return _idle()
         return {**_idle(), **data}
 
@@ -185,7 +186,7 @@ class UpdateEngine:
                     step["status"] = status
                     if detail is not None:
                         step["detail"] = redact(detail)
-            if status == "running":
+            if status == StepStatus.RUNNING:
                 self._progress["step"] = step_id
         self._save()
 
@@ -255,13 +256,13 @@ class UpdateEngine:
             self._log.clear()
             target = semver.parse_tag(tag)
             self._progress = {
-                **_idle(), "state": "running", "tag": tag, "from_version": self.current_version,
+                **_idle(), "state": UpdateState.RUNNING, "tag": tag, "from_version": self.current_version,
                 "to_version": str(target), "started_at": self.clock(), "owner": self.instance_id,
-                "steps": [{"id": i, "label": label, "status": "pending"} for i, label in STEPS],
+                "steps": [{"id": i, "label": label, "status": StepStatus.PENDING} for i, label in STEPS],
                 "restart": {"automatic": False, "required": True, "command": restart_command(self.launch_mode)},
             }
             self._write_log([f"Updating BlockFlow {self.current_version} -> {target} ({tag})"])
-            self._set_step("preflight", "done")
+            self._set_step("preflight", StepStatus.DONE)
         if self.threaded:
             threading.Thread(target=self._update, args=(tag,), name="blockflow-update", daemon=True).start()
         else:
@@ -276,8 +277,8 @@ class UpdateEngine:
             self._progress.update(state=state, error=redact(error) if error else None, message=message,
                                   manual=manual or [], finished_at=self.clock(), step=None)
             for step in self._progress["steps"]:
-                if step["status"] == "pending":
-                    step["status"] = "skipped"
+                if step["status"] == StepStatus.PENDING:
+                    step["status"] = StepStatus.SKIPPED
         self._write_log([f"Update {state}" + (f": {error}" if error else "")])
         self._save()
 
@@ -301,20 +302,20 @@ class UpdateEngine:
     def _handle_failure(self, tag: str, message: str) -> None:
         step = self._progress.get("step")
         if step:
-            self._set_step(step, "failed", message)
+            self._set_step(step, StepStatus.FAILED, message)
         if self._progress.get("from_commit") and (self._merged or self._deps_touched or step == "merge"):
             self._rollback(tag, message)
             return
         if self._paused:
             self.supervisor.resume_frontend()
-        self._finish("failed", error=message, manual=[])
+        self._finish(UpdateState.FAILED, error=message, manual=[])
 
     def _steps(self, tag: str) -> None:
         git = self._tool("git")
         uv = self._tool("uv")
         npm = self._tool("npm")
 
-        self._set_step("fetch", "running")
+        self._set_step("fetch", StepStatus.RUNNING)
         res = self._run([git, "fetch", "--tags", "--no-recurse-submodules", "origin"], TIMEOUTS["fetch"])
         if not res.ok and "would clobber existing tag" in res.output:
             raise _StepFailed("A tag in this checkout does not match the one on GitHub (git fetch refused to "
@@ -322,9 +323,9 @@ class UpdateEngine:
         if not res.ok:
             raise _StepFailed("Could not download the release from GitHub (git fetch failed). Check your "
                               "connection and that `git fetch origin` works in the app folder.")
-        self._set_step("fetch", "done")
+        self._set_step("fetch", StepStatus.DONE)
 
-        self._set_step("verify", "running")
+        self._set_step("verify", StepStatus.RUNNING)
         local = self._run([git, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"], TIMEOUTS["git"])
         new = local.output.strip()
         if not local.ok or len(new) < 40:
@@ -349,11 +350,11 @@ class UpdateEngine:
         with self._lock:
             self._progress.update(from_commit=head, to_commit=new)
         if head == new:
-            self._set_step("verify", "done", f"Already on {tag}.")
+            self._set_step("verify", StepStatus.DONE, f"Already on {tag}.")
             with self._lock:
                 self._progress["restart"] = {"automatic": False, "required": False,
                                              "command": restart_command(self.launch_mode)}
-            self._finish("done", message=f"BlockFlow is already on {tag}.")
+            self._finish(UpdateState.DONE, message=f"BlockFlow is already on {tag}.")
             return
         ff = self._run([git, "merge-base", "--is-ancestor", head, new], TIMEOUTS["git"])
         if ff.code == 1:
@@ -370,60 +371,60 @@ class UpdateEngine:
         need_npm_ci = bool(changed & set(LOCKFILES)) or not (self.root / "frontend" / "node_modules").is_dir()
         launcher_changed = LAUNCHER in changed
         auto_restart = self.supervisor.available and self.launch_mode in ("dev", "packaged") and not launcher_changed
-        self._set_step("verify", "done", f"{head[:12]} -> {new[:12]}, {len(changed)} files change.")
+        self._set_step("verify", StepStatus.DONE, f"{head[:12]} -> {new[:12]}, {len(changed)} files change.")
 
         if auto_restart:
-            self._set_step("pause", "running")
+            self._set_step("pause", StepStatus.RUNNING)
             self._paused = True
             if not self.supervisor.pause_frontend():
                 raise _StepFailed("The web interface did not stop in time. Nothing was changed.")
-            self._set_step("pause", "done")
+            self._set_step("pause", StepStatus.DONE)
         else:
-            self._set_step("pause", "skipped")
+            self._set_step("pause", StepStatus.SKIPPED)
 
-        self._set_step("merge", "running")
+        self._set_step("merge", StepStatus.RUNNING)
         res = self._run([git, "merge", "--ff-only", new], TIMEOUTS["git"])
         if not res.ok:
             raise _StepFailed(f"git could not fast-forward to {tag}.")
         self._merged = True
-        self._set_step("merge", "done")
+        self._set_step("merge", StepStatus.DONE)
 
-        self._set_step("python_deps", "running")
+        self._set_step("python_deps", StepStatus.RUNNING)
         self._deps_touched.add("python")
         if not self._run([uv, "sync", "--frozen"], TIMEOUTS["uv"]).ok:
             raise _StepFailed("Updating Python packages failed (uv sync).")
-        self._set_step("python_deps", "done")
+        self._set_step("python_deps", StepStatus.DONE)
 
         if need_npm_ci:
-            self._set_step("frontend_deps", "running")
+            self._set_step("frontend_deps", StepStatus.RUNNING)
             self._deps_touched.add("npm")
             if not self._run([npm, "--prefix", "frontend", "ci"], TIMEOUTS["npm_ci"]).ok:
                 raise _StepFailed("Updating web packages failed (npm ci).")
-            self._set_step("frontend_deps", "done")
+            self._set_step("frontend_deps", StepStatus.DONE)
         else:
-            self._set_step("frontend_deps", "skipped", "The web package lockfile did not change.")
+            self._set_step("frontend_deps", StepStatus.SKIPPED, "The web package lockfile did not change.")
 
-        self._set_step("codegen", "running")
+        self._set_step("codegen", StepStatus.RUNNING)
         self._deps_touched.add("codegen")
         if not self._run([npm, "--prefix", "frontend", "run", "gen:custom-blocks"], TIMEOUTS["codegen"]).ok:
             raise _StepFailed("Registering blocks failed (gen:custom-blocks).")
-        self._set_step("codegen", "done")
+        self._set_step("codegen", StepStatus.DONE)
 
         if self.launch_mode == "packaged":
-            self._set_step("build", "running")
+            self._set_step("build", StepStatus.RUNNING)
             self._deps_touched.add("build")
             if not self._run([npm, "--prefix", "frontend", "run", "build"], TIMEOUTS["build"]).ok:
                 raise _StepFailed("Building the web interface failed (npm run build).")
-            self._set_step("build", "done")
+            self._set_step("build", StepStatus.DONE)
         else:
-            self._set_step("build", "skipped", "The development server builds on start.")
+            self._set_step("build", StepStatus.SKIPPED, "The development server builds on start.")
 
         command = restart_command(self.launch_mode)
         if auto_restart:
             with self._lock:
-                self._progress.update(state="restarting",
+                self._progress.update(state=UpdateState.RESTARTING,
                                       restart={"automatic": True, "required": True, "command": command})
-            self._set_step("restart", "running")
+            self._set_step("restart", StepStatus.RUNNING)
             self._write_log(["Restarting BlockFlow…"])
             self._save()
             self.supervisor.restart()
@@ -432,8 +433,8 @@ class UpdateEngine:
                   if launcher_changed else "BlockFlow was not started with app.py, so it cannot restart itself.")
         with self._lock:
             self._progress["restart"] = {"automatic": False, "required": True, "command": command}
-        self._set_step("restart", "skipped", f"{reason} Stop it (Ctrl+C) and run `{command}`.")
-        self._finish("done", message=f"Updated to {tag}. Restart BlockFlow to use it: stop it (Ctrl+C in its "
+        self._set_step("restart", StepStatus.SKIPPED, f"{reason} Stop it (Ctrl+C) and run `{command}`.")
+        self._finish(UpdateState.DONE, message=f"Updated to {tag}. Restart BlockFlow to use it: stop it (Ctrl+C in its "
                                      f"terminal) and run `{command}` in the app folder. {reason}",
                      manual=[command])
 
@@ -442,9 +443,9 @@ class UpdateEngine:
     def _rollback(self, tag: str, message: str) -> None:
         old = self._progress["from_commit"]
         with self._lock:
-            self._progress["steps"].extend({"id": i, "label": label, "status": "pending"} for i, label in ROLLBACK_STEPS)
+            self._progress["steps"].extend({"id": i, "label": label, "status": StepStatus.PENDING} for i, label in ROLLBACK_STEPS)
         git, uv, npm = (self.which(t) or t for t in TOOLS)
-        self._set_step("rollback", "running")
+        self._set_step("rollback", StepStatus.RUNNING)
         head = self._run([git, "rev-parse", "HEAD"], TIMEOUTS["git"]).output.strip()
         undo = [f"git reset --keep {old}", "uv sync --frozen", "npm --prefix frontend ci",
                 "npm --prefix frontend run gen:custom-blocks",
@@ -453,18 +454,18 @@ class UpdateEngine:
         if head != old:
             res = self._run([git, "reset", "--keep", old], TIMEOUTS["git"])
             if not res.ok:
-                self._set_step("rollback", "failed", "git reset --keep refused.")
+                self._set_step("rollback", StepStatus.FAILED, "git reset --keep refused.")
                 if self._paused:
                     self.supervisor.resume_frontend()
-                self._finish("failed", manual=undo, error=(
+                self._finish(UpdateState.FAILED, manual=undo, error=(
                     f"{message} The update could not be undone automatically, so BlockFlow may be half-updated "
                     f"(code at {tag}, packages may not match). Run these commands in the app folder to go back."))
                 return
-        self._set_step("rollback", "done", f"Back on {old[:12]}.")
+        self._set_step("rollback", StepStatus.DONE, f"Back on {old[:12]}.")
 
         restore_failed = []
         if self._deps_touched:
-            self._set_step("rollback_deps", "running")
+            self._set_step("rollback_deps", StepStatus.RUNNING)
             if "python" in self._deps_touched and not self._run([uv, "sync", "--frozen"], TIMEOUTS["uv"]).ok:
                 restore_failed.append("uv sync --frozen")
             if "npm" in self._deps_touched and not self._run([npm, "--prefix", "frontend", "ci"],
@@ -476,17 +477,17 @@ class UpdateEngine:
             if "build" in self._deps_touched and not self._run([npm, "--prefix", "frontend", "run", "build"],
                                                                  TIMEOUTS["build"]).ok:
                 restore_failed.append("npm --prefix frontend run build")
-            self._set_step("rollback_deps", "failed" if restore_failed else "done")
+            self._set_step("rollback_deps", StepStatus.FAILED if restore_failed else StepStatus.DONE)
         else:
-            self._set_step("rollback_deps", "skipped", "Nothing was installed.")
+            self._set_step("rollback_deps", StepStatus.SKIPPED, "Nothing was installed.")
         if self._paused:
             self.supervisor.resume_frontend()
         if restore_failed:
-            self._finish("failed", manual=[*restore_failed, restart_command(self.launch_mode)], error=(
+            self._finish(UpdateState.FAILED, manual=[*restore_failed, restart_command(self.launch_mode)], error=(
                 f"{message} The code is back on the previous version, but restoring packages failed. Run these "
                 "commands in the app folder, then restart BlockFlow."))
             return
-        self._finish("rolled_back", manual=self._manual_update_commands(tag), error=message,
+        self._finish(UpdateState.ROLLED_BACK, manual=self._manual_update_commands(tag), error=message,
                      message=f"The update to {tag} failed and was undone; BlockFlow is still on "
                              f"{self.current_version}. You can try again later or update by hand.")
 
@@ -499,16 +500,16 @@ class UpdateEngine:
             if p["state"] not in ACTIVE_STATES or p.get("owner") == self.instance_id:
                 return
             old = p.get("from_commit")
-            if p["state"] == "restarting":
+            if p["state"] == UpdateState.RESTARTING:
                 if self.current_version == p.get("to_version"):
                     for step in p["steps"]:
                         if step["id"] == "restart":
-                            step["status"] = "done"
-                    p.update(state="done", finished_at=self.clock(), step=None, error=None,
+                            step["status"] = StepStatus.DONE
+                    p.update(state=UpdateState.DONE, finished_at=self.clock(), step=None, error=None,
                              message=f"Updated to {p.get('tag')}.")
                     self._log.append(f"Restarted on {self.current_version}.")
                 else:
-                    p.update(state="failed", finished_at=self.clock(), step=None,
+                    p.update(state=UpdateState.FAILED, finished_at=self.clock(), step=None,
                              error=(f"BlockFlow restarted but is running {self.current_version}, not "
                                     f"{p.get('to_version')}. Stop it and start it again with "
                                     f"`{restart_command(self.launch_mode)}`."),
@@ -517,7 +518,7 @@ class UpdateEngine:
                 manual = ([f"git reset --keep {old}", "uv sync --frozen", "npm --prefix frontend ci",
                            "npm --prefix frontend run gen:custom-blocks", restart_command(self.launch_mode)]
                           if old else [])
-                p.update(state="failed", finished_at=self.clock(), step=None, manual=manual, error=(
+                p.update(state=UpdateState.FAILED, finished_at=self.clock(), step=None, manual=manual, error=(
                     "The update was interrupted (BlockFlow stopped while it was running). The app folder may be "
                     "half-updated. To go back to the previous version, run these commands in the app folder."))
             p["owner"] = self.instance_id

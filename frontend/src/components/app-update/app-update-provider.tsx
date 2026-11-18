@@ -43,6 +43,7 @@ import {
   type UpdateStatus,
   type UpdateStep,
 } from '@/lib/app-update/client'
+import { ACTIVE_UPDATE_STATES } from '@/lib/status'
 import { cn } from '@/lib/utils'
 
 export const STATUS_REFRESH_MS = 60 * 60 * 1000
@@ -77,7 +78,7 @@ export function useAppUpdate(): AppUpdateContextValue {
   return ctx
 }
 
-const ACTIVE = new Set(['running', 'restarting'])
+const ACTIVE: ReadonlySet<string> = new Set(ACTIVE_UPDATE_STATES)
 
 function StepIcon({ status }: { status: UpdateStep['status'] }) {
   if (status === 'done') return <CheckCircle2 aria-hidden className="text-success size-4" />

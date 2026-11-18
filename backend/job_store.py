@@ -39,12 +39,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from backend import db
+from backend.statuses import ACTIVE_JOB_STATUSES, TERMINAL_JOB_STATUSES, ErrorKind, JobStatus
 
 TABLE = "generation_jobs"
 
-JOB_STATUSES: tuple[str, ...] = ("QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")
-TERMINAL_STATUSES: frozenset[str] = frozenset({"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"})
-ACTIVE_STATUSES: frozenset[str] = frozenset({"QUEUED", "RUNNING"})
+# Plain-string views of backend.statuses.JobStatus (same names and contents as always).
+JOB_STATUSES: tuple[str, ...] = tuple(s.value for s in JobStatus)
+TERMINAL_STATUSES: frozenset[str] = frozenset(s.value for s in TERMINAL_JOB_STATUSES)
+ACTIVE_STATUSES: frozenset[str] = frozenset(s.value for s in ACTIVE_JOB_STATUSES)
 JOB_SOURCES: tuple[str, ...] = ("pipeline", "mcp")
 OUTPUT_KINDS: frozenset[str] = frozenset({"image", "video", "audio"})
 
@@ -372,7 +374,7 @@ class JobStore:
         mode: str | None = None,
         request: dict[str, Any] | None = None,
         job_id: str | None = None,
-        status: str = "QUEUED",
+        status: str = JobStatus.QUEUED,
         remote_job_id: str | None = None,
         message: str | None = None,
     ) -> dict[str, Any]:
@@ -477,7 +479,7 @@ class JobStore:
             if job["status"] in TERMINAL_STATUSES:
                 return False
             job["cancel_requested"] = True
-            job["status"] = "CANCELLED"
+            job["status"] = JobStatus.CANCELLED
             job["message"] = "Cancelled"
             return True
 
@@ -549,12 +551,12 @@ class JobStore:
             def change(j: dict[str, Any]) -> bool:
                 if j["status"] in TERMINAL_STATUSES or j.get("remote_job_id"):
                     return False
-                j["status"] = "FAILED"
-                j["error"] = {"kind": "interrupted", "message": INTERRUPTED_MESSAGE}
+                j["status"] = JobStatus.FAILED
+                j["error"] = {"kind": ErrorKind.INTERRUPTED, "message": INTERRUPTED_MESSAGE}
                 j["message"] = INTERRUPTED_MESSAGE
                 return True
 
-            if self._mutate(job["job_id"], change)["status"] == "FAILED":
+            if self._mutate(job["job_id"], change)["status"] == JobStatus.FAILED:
                 failed.append(job["job_id"])
         return {"failed": failed, "resumable": [j["job_id"] for j in self.list_resumable()]}
 

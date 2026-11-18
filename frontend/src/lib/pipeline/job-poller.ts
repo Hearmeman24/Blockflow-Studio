@@ -1,6 +1,7 @@
 'use client'
 
-import type { JobSnapshot, JobStatus } from '@/lib/types'
+import { ACTIVE_JOB_STATUSES } from '@/lib/status'
+import type { JobSnapshot } from '@/lib/types'
 import {
   type PendingJobRun,
   type PendingJobSubmission,
@@ -11,7 +12,7 @@ import {
 
 // ---- Job store status (GET /api/jobs/{id}) ----
 
-const ACTIVE_JOB_STATUSES: ReadonlySet<string> = new Set<JobStatus>(['QUEUED', 'RUNNING'])
+const ACTIVE_JOB_STATUS_SET: ReadonlySet<string> = new Set(ACTIVE_JOB_STATUSES)
 
 function notFoundSnapshot(jobId: string): JobSnapshot {
   const now = Date.now() / 1000
@@ -59,7 +60,7 @@ export const JOB_SNAPSHOT_POLLING = {
       : null
   ),
   getStatus: (job: JobSnapshot) => job.status,
-  isActiveStatus: (status: string) => ACTIVE_JOB_STATUSES.has(status),
+  isActiveStatus: (status: string) => ACTIVE_JOB_STATUS_SET.has(status),
   isCompletedStatus: (status: string) => status === 'COMPLETED',
   getError: (job: JobSnapshot) => job.error?.message ?? null,
 }

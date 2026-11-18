@@ -1,9 +1,17 @@
 // ---- Jobs (provider-neutral job store, /api/jobs) ----
 
-export type JobStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT'
+import {
+  ACTIVE_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES,
+  type JobStatus,
+  type RunStatus,
+  type SavedBlockStatus,
+} from '@/lib/status'
 
-export const TERMINAL_STATUSES: readonly JobStatus[] = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT']
-export const ACTIVE_STATUSES: readonly JobStatus[] = ['QUEUED', 'RUNNING']
+// The vocabularies live in `@/lib/status`; these names stay for existing imports.
+export type { JobStatus, RunStatus, SavedBlockStatus }
+export const TERMINAL_STATUSES: readonly JobStatus[] = TERMINAL_JOB_STATUSES
+export const ACTIVE_STATUSES: readonly JobStatus[] = ACTIVE_JOB_STATUSES
 
 export type JobSource = 'pipeline' | 'mcp'
 
@@ -73,6 +81,7 @@ export interface BlockResult {
   block_index: number
   block_type: string
   block_label: string
+  /** A `SavedBlockStatus` when written by this build; older rows may hold other text. */
   status: string
   outputs: Record<string, { kind: string; value: unknown }>
 }
@@ -80,7 +89,7 @@ export interface BlockResult {
 export interface RunEntry {
   id: string
   name: string
-  status: 'completed' | 'partial' | 'failed'
+  status: RunStatus
   duration_ms: number
   flow_snapshot: Record<string, unknown>
   block_results: BlockResult[]

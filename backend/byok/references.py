@@ -28,12 +28,13 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from backend.byok.http import USER_AGENT, Transport, UrllibTransport
+from backend.statuses import ReferenceCheckStatus
 
 OUTPUTS_PREFIX = "/outputs/"
 PROBE_TIMEOUT_S = 5.0
 PROBE_WORKERS = 8
 ASSET_PREFIX = "asset://"
-STATUSES = ("ok", "missing_local", "unreachable", "expired", "malformed", "unchecked")
+STATUSES: tuple[str, ...] = tuple(s.value for s in ReferenceCheckStatus)
 
 # Injectable default transport for probes (tests set this or pass ``transport``).
 probe_transport: Transport | None = None
@@ -175,30 +176,30 @@ def probe_url(url: str, transport: Transport) -> tuple[str, str]:
             code = resp.status
     except Exception as exc:  # noqa: BLE001 - every transport failure means "unreachable"
         kind = getattr(exc, "kind", None) or type(exc).__name__
-        return "unreachable", f"Could not reach {shown} ({kind}). Check the connection or re-add the file."
+        return ReferenceCheckStatus.UNREACHABLE, f"Could not reach {shown} ({kind}). Check the connection or re-add the file."
     if 200 <= code < 300 or code == 416:
-        return "ok", f"{shown} is reachable."
+        return ReferenceCheckStatus.OK, f"{shown} is reachable."
     if code in _EXPIRED:
-        return "expired", f"{shown} answered HTTP {code}; the link has expired or is private. Re-add the file."
-    return "unreachable", f"{shown} answered HTTP {code}. Try again later or re-add the file."
+        return ReferenceCheckStatus.EXPIRED, f"{shown} answered HTTP {code}; the link has expired or is private. Re-add the file."
+    return ReferenceCheckStatus.UNREACHABLE, f"{shown} answered HTTP {code}. Try again later or re-add the file."
 
 
 def _check_one(index: int, ref: Any, transport: Transport) -> dict[str, Any]:
     if not isinstance(ref, Mapping):
-        return _result(index, "malformed", "The reference is not an object.")
+        return _result(index, ReferenceCheckStatus.MALFORMED, "The reference is not an object.")
     local, url = ref.get("local"), ref.get("url")
     missing_local: str | None = None
 
     local_candidates = [v for v in (local, url) if is_local_value(v)]
     if local is not None and not is_local_value(local):
-        return _result(index, "malformed", "The local value must be an /outputs/ path.")
+        return _result(index, ReferenceCheckStatus.MALFORMED, "The local value must be an /outputs/ path.")
     for value in local_candidates:
         try:
             path = resolve_local(value)
         except UnsafePathError as exc:
-            return _result(index, "malformed", str(exc))
+            return _result(index, ReferenceCheckStatus.MALFORMED, str(exc))
         if path.is_file():
-            return _result(index, "ok", f"Local file {path.name} is available.")
+            return _result(index, ReferenceCheckStatus.OK, f"Local file {path.name} is available.")
         missing_local = path.name
 
     if url is not None and not is_local_value(url):
@@ -206,18 +207,18 @@ def _check_one(index: int, ref: Any, transport: Transport) -> dict[str, Any]:
             detail = "Provider asset reference, not verified: BlockFlow cannot probe provider-side assets."
             if missing_local:
                 detail = f"The local copy {missing_local} is missing. {detail}"
-            return _result(index, "unchecked", detail)
+            return _result(index, ReferenceCheckStatus.UNCHECKED, detail)
         if not is_http_url(url):
-            return _result(index, "malformed", "The URL must be a valid http:// or https:// address.")
+            return _result(index, ReferenceCheckStatus.MALFORMED, "The URL must be a valid http:// or https:// address.")
         status, detail = probe_url(url.strip(), transport)
-        if status == "ok" and missing_local:
+        if status == ReferenceCheckStatus.OK and missing_local:
             detail = f"The local copy {missing_local} is missing; using the remote URL. {detail}"
         return _result(index, status, detail)
 
     if missing_local:
-        return _result(index, "missing_local",
+        return _result(index, ReferenceCheckStatus.MISSING_LOCAL,
                        f"The local file {missing_local} no longer exists. Re-add the file.")
-    return _result(index, "malformed", "The reference has no file or URL.")
+    return _result(index, ReferenceCheckStatus.MALFORMED, "The reference has no file or URL.")
 
 
 def check_references(refs: Sequence[Any], *, transport: Transport | None = None) -> list[dict[str, Any]]:

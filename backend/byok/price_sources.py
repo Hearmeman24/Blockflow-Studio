@@ -38,6 +38,7 @@ from urllib.parse import urlsplit
 from backend.byok import price_ledger
 from backend.byok.errors import ProviderError
 from backend.byok.http import Transport, UrllibTransport
+from backend.statuses import PriceRefreshStatus
 
 logger = logging.getLogger(__name__)
 
@@ -224,14 +225,14 @@ def refresh(force: bool = False) -> dict[str, Any]:
     not_available (HTTP 404) | invalid | too_large | error."""
     url = configured_url()
     if not url:
-        return _record({"ok": False, "status": "not_configured",
+        return _record({"ok": False, "status": PriceRefreshStatus.NOT_CONFIGURED,
                         "message": "No price ledger URL is configured."})
     if not updates_enabled():
-        return _record({"ok": False, "status": "disabled", "message": "Price list updates are turned off."})
+        return _record({"ok": False, "status": PriceRefreshStatus.DISABLED, "message": "Price list updates are turned off."})
     with _lock:
         last = _state.get("last_attempt", 0.0)
         if not force and clock() - last < REFRESH_INTERVAL_S:
-            return {"ok": True, "status": "skipped", "message": "Refreshed recently.",
+            return {"ok": True, "status": PriceRefreshStatus.SKIPPED, "message": "Refreshed recently.",
                     "at": _state.get("last_result", {}).get("at")}
         _state["last_attempt"] = clock()
     headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
@@ -243,32 +244,32 @@ def refresh(force: bool = False) -> dict[str, Any]:
     try:
         resp = transport("GET", url, headers, None, TIMEOUT_S)
     except ProviderError as exc:
-        return _record({"ok": False, "status": "error", "message": f"Could not download the price list ({exc.kind})."})
+        return _record({"ok": False, "status": PriceRefreshStatus.ERROR, "message": f"Could not download the price list ({exc.kind})."})
     except Exception as exc:  # noqa: BLE001 - never raise into a request
-        return _record({"ok": False, "status": "error",
+        return _record({"ok": False, "status": PriceRefreshStatus.ERROR,
                         "message": f"Could not download the price list ({type(exc).__name__})."})
     if resp.status == 304:
-        return _record({"ok": True, "status": "not_modified", "message": "The price list has not changed."})
+        return _record({"ok": True, "status": PriceRefreshStatus.NOT_MODIFIED, "message": "The price list has not changed."})
     if resp.status == 404:
-        return _record({"ok": False, "status": "not_available",
+        return _record({"ok": False, "status": PriceRefreshStatus.NOT_AVAILABLE,
                         "message": "The online price list is not available yet; the bundled prices are used."})
     if resp.status != 200:
-        return _record({"ok": False, "status": "error", "message": f"The price list URL answered HTTP {resp.status}."})
+        return _record({"ok": False, "status": PriceRefreshStatus.ERROR, "message": f"The price list URL answered HTTP {resp.status}."})
     lengths = {k.lower(): v for k, v in (resp.headers or {}).items()}
     declared = lengths.get("content-length", "")
     if (declared.isdigit() and int(declared) > MAX_BYTES) or len(resp.body) > MAX_BYTES:
-        return _record({"ok": False, "status": "too_large",
+        return _record({"ok": False, "status": PriceRefreshStatus.TOO_LARGE,
                         "message": f"The price list is larger than {MAX_BYTES // 1_000_000} MB."})
     try:
         ledger = price_ledger.validate_ledger(json.loads(resp.body.decode("utf-8")))
     except (UnicodeDecodeError, ValueError) as exc:
-        return _record({"ok": False, "status": "invalid", "message": f"The price list is not valid: {str(exc)[:200]}"})
+        return _record({"ok": False, "status": PriceRefreshStatus.INVALID, "message": f"The price list is not valid: {str(exc)[:200]}"})
     if _when(ledger) <= _when(bundled()):
-        return _record({"ok": True, "status": "older_than_bundled",
+        return _record({"ok": True, "status": PriceRefreshStatus.OLDER_THAN_BUNDLED,
                         "message": "The downloaded price list is not newer than the one bundled with the app."})
     _write_cache(resp.body, {"url": url, "etag": lengths.get("etag"), "last_modified": lengths.get("last-modified"),
                              "fetched_at": clock(), "generated_at": ledger.generated_at})
-    return _record({"ok": True, "status": "updated", "message": f"Price list from {ledger.generated_date} loaded."})
+    return _record({"ok": True, "status": PriceRefreshStatus.UPDATED, "message": f"Price list from {ledger.generated_date} loaded."})
 
 
 def _refresh_in_background() -> None:

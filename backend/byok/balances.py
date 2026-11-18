@@ -29,6 +29,7 @@ from typing import Any, Callable
 from backend.byok import service
 from backend.byok.errors import ProviderError, redact
 from backend.byok.spec import PROVIDER_NAMES, PROVIDERS
+from backend.statuses import BalanceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _base(provider: str, configured: bool) -> dict[str, Any]:
 
 
 def _error(provider: str, kind: str, message: str) -> dict[str, Any]:
-    return {**_base(provider, True), "status": "error", "kind": kind, "message": message, "fetched_at": clock()}
+    return {**_base(provider, True), "status": BalanceStatus.ERROR, "kind": kind, "message": message, "fetched_at": clock()}
 
 
 def _fetch(provider: str, key: str) -> dict[str, Any]:
@@ -74,10 +75,10 @@ def _fetch(provider: str, key: str) -> dict[str, Any]:
         logger.warning("balance lookup for %s crashed (%s)", provider, type(exc).__name__)
         return _error(provider, "provider_failure", f"Could not read the {name} balance. Try again.")
     entry = {**_base(provider, True), "status": balance.status, "fetched_at": clock()}
-    if balance.status == "ok" and balance.amount is not None:
+    if balance.status == BalanceStatus.OK and balance.amount is not None:
         entry.update(amount=balance.amount, unit=balance.unit, usd_equivalent=balance.usd_equivalent)
     else:
-        entry["status"] = "unavailable"
+        entry["status"] = BalanceStatus.UNAVAILABLE
         entry["message"] = redact(balance.message, key) or f"{name} did not report a balance."
     return entry
 
@@ -90,7 +91,7 @@ def get_balances(refresh: bool = False) -> list[dict[str, Any]]:
     for provider in PROVIDERS:
         key = keys[provider]
         if not key:
-            results[provider] = {**_base(provider, False), "status": "not_configured", "fetched_at": now}
+            results[provider] = {**_base(provider, False), "status": BalanceStatus.NOT_CONFIGURED, "fetched_at": now}
             continue
         if not refresh:
             with _cache_lock:
@@ -106,7 +107,7 @@ def get_balances(refresh: bool = False) -> list[dict[str, Any]]:
             name = PROVIDER_NAMES[provider]
             entry = _error(provider, "timeout", f"{name} did not answer in time. Try again.")
         results[provider] = entry
-        if entry["status"] in ("ok", "unavailable"):
+        if entry["status"] in (BalanceStatus.OK, BalanceStatus.UNAVAILABLE):
             with _cache_lock:
                 _cache[provider] = (clock() + CACHE_TTL_S, _fingerprint(keys[provider] or ""), dict(entry))
     return [results[p] for p in PROVIDERS]

@@ -9,19 +9,13 @@ import { readJobCost, readPriceCheck } from './cost'
 import type { VideoRef } from '@/lib/video-ref'
 import { loadPendingJobRun, type PendingJobRun } from '@/lib/pipeline/job-pending'
 import { JOB_SNAPSHOT_POLLING, abortPoll, resumePendingPoll, startNewPendingPoll } from '@/lib/pipeline/job-poller'
-import type { JobSnapshot, JobStatus } from '@/lib/types'
+import { GENERATION_RUN_STATUS_BY_JOB, type GenerationRunStatus } from '@/lib/status'
+import type { JobSnapshot } from '@/lib/types'
 import { cancelJob, newClientRequestId, submitGeneration, validateGeneration } from './api'
 import type { GenerationIssue, GenerationRequest } from './types'
 
-export type RunStatus =
-  | 'validating'
-  | 'submitting'
-  | 'queued'
-  | 'running'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'timed_out'
+/** A generation block's run status; declared in `@/lib/status`. */
+export type RunStatus = GenerationRunStatus
 
 export interface RunUpdate {
   status: RunStatus
@@ -44,14 +38,6 @@ export class GenerationRunError extends Error {
 }
 
 const PENDING_KIND = 'generation'
-const STATUS_BY_JOB: Record<JobStatus, RunStatus> = {
-  QUEUED: 'queued',
-  RUNNING: 'running',
-  COMPLETED: 'completed',
-  FAILED: 'failed',
-  CANCELLED: 'cancelled',
-  TIMED_OUT: 'timed_out',
-}
 
 function abortError(): DOMException {
   return new DOMException('Generation cancelled', 'AbortError')
@@ -84,7 +70,7 @@ function pollJob(
       const snapshot = progress[0]?.job
       if (!snapshot) return
       onUpdate?.({
-        status: STATUS_BY_JOB[snapshot.status] ?? 'running',
+        status: GENERATION_RUN_STATUS_BY_JOB[snapshot.status] ?? 'running',
         jobId: snapshot.job_id,
         progress: snapshot.progress,
         message: snapshot.message,

@@ -7,11 +7,12 @@ import urllib.request
 from pathlib import Path
 
 from backend import settings_store, tmpfiles
+from backend.statuses import StorageMode
 
 ASSET_STORAGE_MODE_PREF = "asset_storage_mode"
-ASSET_STORAGE_MODES = {"local_only", "tmpfiles"}
+ASSET_STORAGE_MODES = {m.value for m in StorageMode}
 # Unset or unknown means files stay on this machine (matches backend.byok.service).
-DEFAULT_ASSET_STORAGE_MODE = "local_only"
+DEFAULT_ASSET_STORAGE_MODE = StorageMode.LOCAL_ONLY
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
 
 
@@ -77,7 +78,7 @@ def upload_asset(
     media_kind: str,
 ) -> dict[str, str | None]:
     mode = get_asset_storage_mode()
-    if mode == "local_only":
+    if mode == StorageMode.LOCAL_ONLY:
         raise RemoteAssetUploadDisabled(
             "Remote asset upload is disabled by local-only storage mode"
         )

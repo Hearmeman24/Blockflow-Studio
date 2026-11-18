@@ -1,3 +1,5 @@
+import type { BlockStatus } from '@/lib/status'
+
 export interface PipelineBlock {
   id: string
   type: string
@@ -34,7 +36,8 @@ export interface Pipeline {
   blocks: PipelineBlock[]
 }
 
-export type BlockStatus = 'idle' | 'running' | 'completed' | 'error' | 'skipped'
+// Declared in `@/lib/status`; re-exported for existing imports.
+export type { BlockStatus }
 
 export interface BlockState {
   status: BlockStatus

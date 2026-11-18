@@ -27,7 +27,7 @@ import {
 import { useBlockLayout } from '@/lib/pipeline/block-layout-context'
 import { blockRole, blockRoleStyle } from '@/lib/pipeline/block-role'
 import { usePipeline } from '@/lib/pipeline/pipeline-context'
-import type { PipelineBlock, IterationState } from '@/lib/pipeline/types'
+import type { BlockStatus, PipelineBlock, IterationState } from '@/lib/pipeline/types'
 import type { ComponentType } from 'react'
 
 // Width is fixed per size. Height follows the content in the auto and expanded
@@ -112,7 +112,7 @@ export function BlockCard({ block, displayNumber }: BlockCardProps) {
   )
 
   const handleSetExecutionStatus = useCallback(
-    (nextStatus: 'idle' | 'running' | 'completed' | 'error' | 'skipped', error?: string) => {
+    (nextStatus: BlockStatus, error?: string) => {
       setBlockStatus(block.id, nextStatus, error)
     },
     [block.id, setBlockStatus],

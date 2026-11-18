@@ -5,11 +5,13 @@
  * malformed. `unchecked` (a provider `asset://` reference) is not broken: it
  * cannot be probed and is shown as "not verified".
  */
+import { REFERENCE_HEALTH_STATUSES, type ReferenceHealthStatus } from '@/lib/status'
 import type { MediaKind } from './types'
 
 export const CHECK_REFERENCES_URL = '/api/generation/check-references'
 
-export type ReferenceHealthStatus = 'ok' | 'missing_local' | 'unreachable' | 'expired' | 'malformed' | 'unchecked'
+// Declared in `@/lib/status`; re-exported for existing imports.
+export type { ReferenceHealthStatus }
 
 export interface ReferenceHealth {
   status: ReferenceHealthStatus
@@ -22,7 +24,7 @@ export interface HealthTarget {
   url?: string
 }
 
-const STATUSES: ReadonlySet<string> = new Set(['ok', 'missing_local', 'unreachable', 'expired', 'malformed', 'unchecked'])
+const STATUSES: ReadonlySet<string> = new Set(REFERENCE_HEALTH_STATUSES)
 const BROKEN: ReadonlySet<ReferenceHealthStatus> = new Set(['missing_local', 'unreachable', 'expired', 'malformed'])
 
 export function isBrokenStatus(status: ReferenceHealthStatus | undefined | null): boolean {

@@ -3,12 +3,14 @@
  * `/api/generation/estimate`, plus the display formatting shared by the
  * credits panel and the cost chips.
  */
+import type { BalanceStatus } from '@/lib/status'
 import type { JobCost, PriceCheck } from '@/lib/types'
 
 export const BALANCES_URL = '/api/providers/balances'
 export const ESTIMATE_URL = '/api/generation/estimate'
 
-export type BalanceStatus = 'ok' | 'unavailable' | 'error' | 'not_configured'
+// Declared in `@/lib/status`; re-exported for existing imports.
+export type { BalanceStatus }
 
 export interface ProviderBalance {
   provider: string

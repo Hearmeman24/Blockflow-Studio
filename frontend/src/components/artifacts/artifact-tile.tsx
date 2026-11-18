@@ -21,6 +21,7 @@ import { formatAmount, formatUsd } from '@/lib/byok/cost'
 import { useProviderCatalog } from '@/lib/byok/use-provider-catalog'
 import { formatRelativeTime } from '@/lib/format-time'
 import type { GenerationMeta } from '@/lib/image-ref'
+import { runStatusBadge } from '@/lib/status'
 import type { RunEntry } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
@@ -151,7 +152,8 @@ export function ArtifactTile({ run, onFavoriteToggled, onAspect, onOpen }: Artif
   }
 
   const name = run.name || 'Run'
-  const statusLabel = run.status === 'failed' ? 'Failed' : run.status === 'partial' ? 'Partial' : null
+  const badge = runStatusBadge(run.status)
+  const statusLabel = badge?.label ?? null
 
   return (
     <div
@@ -236,7 +238,7 @@ export function ArtifactTile({ run, onFavoriteToggled, onAspect, onOpen }: Artif
           {statusLabel && (
             <span className={cn(
               'inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-3xs font-medium',
-              run.status === 'failed' ? 'bg-destructive text-white' : 'bg-warning text-warning-foreground',
+              badge?.tone === 'error' ? 'bg-destructive text-white' : 'bg-warning text-warning-foreground',
             )}>
               <AlertTriangle aria-hidden className="size-3" />
               {statusLabel}

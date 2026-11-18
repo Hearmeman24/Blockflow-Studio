@@ -37,6 +37,7 @@ from backend.byok.errors import ProviderError, redact
 from backend.byok.http import USER_AGENT
 from backend.byok.providers import PollResult, SubmitResult, get_adapter
 from backend.byok.spec import PROVIDER_NAMES, Reference, canonical_reference, to_jsonable
+from backend.statuses import JobStatus, StorageMode
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +168,8 @@ def storage_mode() -> str:
     try:
         value = settings_store.get_app_pref(STORAGE_MODE_PREF)
     except Exception:  # noqa: BLE001 - fail closed
-        return "local_only"
-    return "tmpfiles" if value == "tmpfiles" else "local_only"
+        return StorageMode.LOCAL_ONLY
+    return StorageMode.TMPFILES if value == StorageMode.TMPFILES else StorageMode.LOCAL_ONLY
 
 
 def _local_only_refusal(provider: str, path: Path, err: ProviderError, key: str) -> ProviderError:
@@ -183,7 +184,7 @@ def _local_only_refusal(provider: str, path: Path, err: ProviderError, key: str)
 
 def _uploaders(adapter: Any, provider: str, key: str) -> tuple[Callable[[Path, str], str], Callable[[Path], str]]:
     """(provider uploader, fallback uploader) honouring the storage mode."""
-    if storage_mode() == "tmpfiles":
+    if storage_mode() == StorageMode.TMPFILES:
         return adapter.upload_file, (fallback_uploader or media.default_fallback_uploader)
 
     def provider_only(path: Path, api_key: str) -> str:
@@ -401,7 +402,7 @@ def shutdown(wait: bool = True) -> None:
 
 
 def _find_active(store: job_store.JobStore, client_request_id: str) -> dict[str, Any] | None:
-    for status in ("QUEUED", "RUNNING"):
+    for status in (JobStatus.QUEUED, JobStatus.RUNNING):
         for job in store.list_jobs(status=status, limit=job_store.MAX_LIST_LIMIT):
             if (job.get("request") or {}).get("client_request_id") == client_request_id:
                 return job
@@ -453,7 +454,7 @@ def _annotate_cancelled(store: job_store.JobStore, job_id: str, message: str,
     provider task id if the cancel landed while the submit was in flight)."""
     try:
         job = store.get_job(job_id)
-        if job is None or job.get("status") != "CANCELLED":
+        if job is None or job.get("status") != JobStatus.CANCELLED:
             return
         if job.get("remote_job_id"):
             remote_job_id = None
@@ -484,7 +485,7 @@ def _update(store: job_store.JobStore, job_id: str, **fields: Any) -> dict[str, 
 def _fail(store: job_store.JobStore, job_id: str, kind: str, message: str,
           cost: dict[str, Any] | None = None) -> None:
     fields: dict[str, Any] = {"cost": cost} if cost is not None else {}
-    store.update_job(job_id, status="FAILED", error={"kind": kind, "message": message}, message=message,
+    store.update_job(job_id, status=JobStatus.FAILED, error={"kind": kind, "message": message}, message=message,
                      **fields)
 
 
@@ -527,7 +528,7 @@ def _run_new(job_id: str, plan: _Plan) -> None:
             return
         if store.is_cancel_requested(job_id):
             raise _Stop
-        _update(store, job_id, status="RUNNING", message="Preparing references")
+        _update(store, job_id, status=JobStatus.RUNNING, message="Preparing references")
         adapter = adapter_factory(plan.provider)
         uploader, fallback = _uploaders(adapter, plan.provider, key)
         refs = media.prepare_references(plan.refs, plan.provider, key, uploader=uploader,
@@ -561,7 +562,7 @@ def _run_new(job_id: str, plan: _Plan) -> None:
                 result.initial)
     except _Stop:
         job = store.get_job(job_id) or {}
-        if job.get("status") == "CANCELLED":
+        if job.get("status") == JobStatus.CANCELLED:
             if remote_job_id or job.get("remote_job_id"):
                 _cancel_after_submit(store, job_id, plan.provider, remote_job_id or job["remote_job_id"])
             else:
@@ -623,10 +624,10 @@ def _follow(store: job_store.JobStore, job_id: str, adapter: Any, key: str, prov
                         return
                     result = None
             if result is not None:
-                if result.status == "COMPLETED":
+                if result.status == JobStatus.COMPLETED:
                     _complete(store, job_id, provider, result, expected_kind, key)
                     return
-                if result.status == "FAILED":
+                if result.status == JobStatus.FAILED:
                     info = result.error
                     kind = info.kind if info else "provider_failure"
                     text = info.message if info else f"{p} could not generate this result."
@@ -635,14 +636,14 @@ def _follow(store: job_store.JobStore, job_id: str, adapter: Any, key: str, prov
                 state = (result.remote_status, _progress(result.progress))
                 if state != last:
                     last = state
-                    waiting = "Queued at" if result.status == "QUEUED" else "Generating on"
+                    waiting = "Queued at" if result.status == JobStatus.QUEUED else "Generating on"
                     _update(store, job_id, remote_status=result.remote_status or None, progress=state[1],
                             message=f"{waiting} {p}")
             if clock() >= deadline:
                 minutes = max(1, round(JOB_TIMEOUT_S / 60))
                 message = (f"Gave up waiting after {minutes} minutes. {p} may still finish task {remote_job_id} "
                            f"and bill it; check your {p} dashboard.")
-                store.update_job(job_id, status="TIMED_OUT", error={"kind": "timeout", "message": message},
+                store.update_job(job_id, status=JobStatus.TIMED_OUT, error={"kind": "timeout", "message": message},
                                  message=message)
                 return
             _wait(store, job_id, interval)
@@ -732,7 +733,7 @@ def _complete(store: job_store.JobStore, job_id: str, provider: str, result: Pol
     else:
         message = "Done"
     cost = _cost(result)
-    store.update_job(job_id, status="COMPLETED", outputs=outputs, progress=1.0,
+    store.update_job(job_id, status=JobStatus.COMPLETED, outputs=outputs, progress=1.0,
                      remote_status=result.remote_status or None, error=None, message=message,
                      cost=cost, price_check=_price_check(store, job_id, cost))
 
@@ -776,7 +777,7 @@ def _run_resumed(job: dict[str, Any]) -> None:
             expected = "image"
         elapsed = max(0.0, time.time() - float(job.get("created_at") or time.time()))
         deadline = clock() + max(0.0, JOB_TIMEOUT_S - elapsed)
-        _update(store, job_id, status="RUNNING", message=f"Reconnected to {_pname(provider)}")
+        _update(store, job_id, status=JobStatus.RUNNING, message=f"Reconnected to {_pname(provider)}")
         _follow(store, job_id, adapter, key, provider, job["remote_job_id"], expected, deadline)
     except _Stop:
         _cancel_after_submit(store, job_id, provider, job["remote_job_id"])

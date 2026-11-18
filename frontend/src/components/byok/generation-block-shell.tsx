@@ -15,6 +15,7 @@ import { providerIds, providerName } from '@/lib/byok/catalog'
 import { insertMention } from '@/lib/byok/mentions'
 import type { MediaKind, ProviderCatalog } from '@/lib/byok/types'
 import { useOptionalPipeline } from '@/lib/pipeline/pipeline-context'
+import { ACTIVE_GENERATION_RUN_STATUSES } from '@/lib/status'
 import type { BlockComponentProps, BlockWarning } from '@/lib/pipeline/registry'
 import { useHeaderWarnings } from '@/lib/pipeline/use-header-warnings'
 import { PROVIDER_REFERRALS } from '@/lib/provider-referrals'
@@ -337,7 +338,7 @@ function BadgeIcon({ kind }: { kind: MediaKind }) {
   return <Icon className="size-3" />
 }
 
-const ACTIVE: ReadonlySet<RunView['status']> = new Set(['validating', 'submitting', 'queued', 'running'])
+const ACTIVE: ReadonlySet<RunView['status']> = new Set(ACTIVE_GENERATION_RUN_STATUSES)
 /** Provider messages that repeat the header status and add nothing. */
 const FILLER = /^(done|completed?|running|queued)\.?$/i
 
