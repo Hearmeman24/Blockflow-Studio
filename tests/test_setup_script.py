@@ -79,6 +79,17 @@ def test_second_run_skips_what_is_already_done(fake):
     assert text.count("already done") == 3
 
 
+def test_setup_plan_gives_each_step_a_reason(fake, root):
+    R = install_steps.StepReason
+    done = [(s.id, s.reason) for s in install_steps.setup_plan(fake.env())]
+    assert done == [("python_deps", None), ("frontend_deps", None), ("block_registry", R.ALWAYS),
+                    ("mcp_cache", None)]
+    fresh(fake, root)
+    todo = [(s.id, s.reason, s.cmd) for s in install_steps.setup_plan(fake.env())]
+    assert todo == [("python_deps", R.PYTHON_DEPS_OUT_OF_DATE, UV_SYNC), ("frontend_deps", R.NOT_INSTALLED, NPM_CI),
+                    ("block_registry", R.ALWAYS, CODEGEN), ("mcp_cache", R.FASTMCP_NOT_CACHED, FASTMCP)]
+
+
 def test_check_mode_reports_and_changes_nothing(fake, root):
     fresh(fake, root)
     code, text = run(fake, "--check")

@@ -232,6 +232,89 @@ def test_doctor_never_runs_a_state_changing_command(fake):
             ["uv", "python", "find"], ["claude", "mcp", "get"]), joined
 
 
+def test_statuses_and_check_ids_are_declared_once():
+    assert doctor.STATUSES == ("ok", "warn", "fail", "skip")
+    assert doctor.CHECK_IDS == tuple(ALL_IDS)
+    with pytest.raises(ValueError):
+        doctor.Check("backend", "broken", "x")
+    with pytest.raises(ValueError):
+        doctor.Check("not_a_check", "ok", "x")
+    assert list(doctor.summarize([])) == list(doctor.STATUSES)
+
+
+def test_scripts_import_with_the_standard_library_only():
+    import subprocess
+
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import doctor, install_steps, setup; "
+            "print(len(doctor.CHECK_IDS))")
+    proc = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(ROOT / "scripts")],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == str(len(ALL_IDS))
+
+
+@pytest.mark.parametrize("name,check", [("BACKEND_PORT", "backend_port"), ("FRONTEND_PORT", "frontend_port")])
+@pytest.mark.parametrize("raw", ["abc", "0", "70000", "-5"])
+def test_a_bad_port_setting_fails_that_port_check_instead_of_checking_the_default(fake, name, check, raw):
+    got = by_id(doctor.run_checks(fake.env(**{name: raw})))
+    assert got[check].status == "fail"
+    assert name in got[check].message and repr(raw) in got[check].message
+    assert "1 to 65535" in got[check].fix
+    reach = check.replace("_port", "")
+    assert got[reach].status != "ok" and "See " + check in got[reach].fix
+
+
+@pytest.mark.parametrize("raw", ["", "  "])
+def test_an_empty_port_setting_means_the_default(fake, raw):
+    got = by_id(doctor.run_checks(fake.env(BACKEND_PORT=raw)))
+    assert got["backend_port"].status == "ok" and "47301" in got["backend_port"].message
+
+
+def test_parse_port_is_the_one_rule():
+    assert doctor.port_setting({}, "BACKEND_PORT", 47301) == (47301, None)
+    assert doctor.port_setting({"BACKEND_PORT": "48001"}, "BACKEND_PORT", 47301) == (48001, None)
+    port, problem = doctor.port_setting({"BACKEND_PORT": "x" * 200}, "BACKEND_PORT", 47301)
+    assert port == 47301 and "BACKEND_PORT" in problem and len(problem) < 300
+
+
+def test_busy_backend_port_says_which_case(fake, root):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    mine = doctor.checkout_id(root)
+    # This app's own backend answers, but the catalog fails (500 or still starting).
+    fake.routes[47301] = {"/api/providers/catalog": (500, None),
+                          "/api/app/version": (200, {"checkout_id": mine})}
+    got = by_id(doctor.run_checks(fake.env()))["backend_port"]
+    assert got.status == "fail"
+    assert "this app's backend" in got.message and "another program" not in got.message
+    assert "terminal" in got.fix
+    # Another copy of BlockFlow (another folder).
+    fake.routes[47301]["/api/app/version"] = (200, {"checkout_id": "f" * 16})
+    got = by_id(doctor.run_checks(fake.env()))["backend_port"]
+    assert got.status == "fail" and "another copy of BlockFlow Studio" in got.message
+    assert "BACKEND_PORT" in got.fix
+    # Something answers HTTP but says nothing about itself.
+    fake.routes[47301] = {"/api/providers/catalog": (500, None)}
+    got = by_id(doctor.run_checks(fake.env()))["backend_port"]
+    assert got.status == "fail" and "HTTP 500" in got.message and "another program" in got.message
+    assert "terminal" in got.fix and "BACKEND_PORT" in got.fix
+
+
+def test_frontend_deps_fix_says_which_case(root, fake):
+    import os
+
+    lock = root / "frontend" / "package-lock.json"
+    installed = root / "frontend" / "node_modules" / ".package-lock.json"
+    os.utime(installed, (1_000_000, 1_000_000))
+    stale = by_id(doctor.run_checks(fake.env()))["frontend_deps"]
+    assert stale.status == "warn" and "newer" in stale.message
+    assert "changed" in stale.fix and "reinstalls" in stale.fix
+    installed.unlink()
+    missing = by_id(doctor.run_checks(fake.env()))["frontend_deps"]
+    assert missing.status == "warn" and "not installed" in missing.message
+    assert "changed" not in missing.fix and "installs them" in missing.fix
+    assert lock.exists()
+
+
 def test_tilde():
     assert doctor.tilde("/home/ana/x/y", "/home/ana") == "~/x/y"
     assert doctor.tilde("/home/anabel/x", "/home/ana") == "/home/anabel/x"

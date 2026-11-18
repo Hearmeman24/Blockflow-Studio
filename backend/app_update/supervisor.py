@@ -15,8 +15,9 @@ top process never exits. Without the variable (the backend was started some
 other way: uvicorn directly, a debugger) automatic restart is not available
 and the update asks the user to restart.
 
-``app.py`` keeps its own copy of these names; tests/test_app_supervisor.py
-runs both sides together.
+The names, the order app.py handles them in and the launch modes are
+declared once in ``backend/app_update/launcher_protocol.py``, which app.py
+imports too.
 """
 
 from __future__ import annotations
@@ -26,22 +27,38 @@ import time
 from pathlib import Path
 from typing import Callable
 
-ENV = "BLOCKFLOW_SUPERVISOR_DIR"
-LAUNCH_MODE_ENV = "BLOCKFLOW_LAUNCH_MODE"
-PAUSE = "pause-frontend"
-PAUSED = "frontend-paused"
-RESUME = "resume-frontend"
-RESTART = "restart"
+from backend.app_update.launcher_protocol import LAUNCH_MODE_ENV, SUPERVISOR_ENV, ControlFile, LaunchMode
+
+ENV = SUPERVISOR_ENV
+PAUSE = ControlFile.PAUSE_FRONTEND
+PAUSED = ControlFile.FRONTEND_PAUSED
+RESUME = ControlFile.RESUME_FRONTEND
+RESTART = ControlFile.RESTART
+
+__all__ = ["ENV", "LAUNCH_MODE_ENV", "PAUSE", "PAUSED", "RESUME", "RESTART", "Supervisor", "launch_mode",
+           "restart_command", "restarts_automatically"]
 
 
-def launch_mode() -> str:
+def launch_mode() -> LaunchMode:
     """``dev`` | ``packaged`` when started by app.py, else ``unknown``."""
-    mode = os.environ.get(LAUNCH_MODE_ENV, "")
-    return mode if mode in ("dev", "packaged") else "unknown"
+    return LaunchMode.parse(os.environ.get(LAUNCH_MODE_ENV, ""))
 
 
 def restart_command(mode: str) -> str:
-    return "uv run app.py --packaged" if mode == "packaged" else "uv run app.py"
+    return "uv run app.py --packaged" if mode == LaunchMode.PACKAGED else "uv run app.py"
+
+
+def restarts_automatically(*, supervised: bool, mode: str, launcher_changed: bool = False) -> bool:
+    """The one rule for whether BlockFlow restarts itself after an update:
+    app.py supervises this backend (its control folder exists and it set the
+    launch mode) and the update does not change app.py itself (a running
+    launcher cannot reload its own code, so that needs a manual restart).
+
+    Before an update is fetched nobody knows yet whether it changes app.py;
+    callers that answer then (``/api/app/version``, ``/api/app/update``)
+    pass ``launcher_changed=False``, so their ``restart_automatic`` means
+    "can restart itself, unless the update changes app.py"."""
+    return supervised and LaunchMode.parse(mode).supervised and not launcher_changed
 
 
 class Supervisor:
@@ -56,31 +73,51 @@ class Supervisor:
     def available(self) -> bool:
         return self.directory is not None and self.directory.is_dir()
 
-    def _request(self, name: str) -> None:
+    def _request(self, name: str) -> bool:
+        """Create the request file. False when it could not be written (no
+        supervisor, or its folder vanished or refused the write)."""
         if not self.available:
-            return
+            return False
         assert self.directory is not None
         tmp = self.directory / f".{name}.tmp"
-        tmp.write_text(str(os.getpid()), encoding="utf-8")
-        os.replace(tmp, self.directory / name)
+        try:
+            tmp.write_text(str(os.getpid()), encoding="utf-8")
+            os.replace(tmp, self.directory / name)
+        except OSError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        return True
 
     def pause_frontend(self, timeout: float = 30.0) -> bool:
         """Ask app.py to stop the frontend; True once it confirms."""
         if not self.available:
             return False
         assert self.directory is not None
-        (self.directory / PAUSED).unlink(missing_ok=True)
-        self._request(PAUSE)
+        try:
+            (self.directory / PAUSED).unlink(missing_ok=True)
+        except OSError:
+            return False
+        if not self._request(PAUSE):
+            return False
         deadline = self._clock() + timeout
         while self._clock() < deadline:
             if (self.directory / PAUSED).exists():
                 return True
             self._sleep(0.2)
-        (self.directory / PAUSE).unlink(missing_ok=True)
+        try:
+            (self.directory / PAUSE).unlink(missing_ok=True)
+        except OSError:
+            pass
         return False
 
-    def resume_frontend(self) -> None:
-        self._request(RESUME)
+    def resume_frontend(self) -> bool:
+        """Ask app.py to start the frontend again; True when the request was written."""
+        return self._request(RESUME)
 
-    def restart(self) -> None:
-        self._request(RESTART)
+    def restart(self) -> bool:
+        """Ask app.py to restart both processes; True when the request was
+        written. False means nothing will restart this process."""
+        return self._request(RESTART)

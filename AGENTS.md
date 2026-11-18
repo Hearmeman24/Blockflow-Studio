@@ -102,7 +102,7 @@ needs their explicit yes.
 
 | Symptom | Fix |
 |---|---|
-| Doctor: `backend_port` or `frontend_port` `fail` ("in use by another program"), often the original BlockFlow app | Stop the other program, or start this one with `BACKEND_PORT=48001 FRONTEND_PORT=48000 uv run app.py` and register the MCP server with `-e BLOCKFLOW_URL=http://127.0.0.1:48001`. |
+| `uv run app.py` exits 1 with "Port … is already in use", or doctor: `backend_port` or `frontend_port` `fail` (the message says whether it is another program, another BlockFlow copy, or this app failing), often the original BlockFlow app | Stop the other program, or start this one with `BACKEND_PORT=48001 FRONTEND_PORT=48000 uv run app.py` and register the MCP server with `-e BLOCKFLOW_URL=http://127.0.0.1:48001`. |
 | MCP tools missing, or every tool returns `error.kind: "backend_unreachable"` | The app must be running (step 2), and the client must be restarted after `claude mcp add`. Check `claude mcp list`; the `--directory` path must be the absolute repository path. |
 | `generate` refuses with `auth`, `unknown_cost` or `over_budget` | `auth`: no key for that provider, back to step 3. `unknown_cost`: pick a model with an estimate. `over_budget`: the cap is below the estimate; ask the user before raising it. |
 
@@ -339,8 +339,10 @@ app deliberately does not offer in `UNSUPPORTED_FEATURES`.
   `tests/test_byok_requests.py`.
 - A new provider also needs: `PROVIDERS`/`PROVIDER_NAMES` in `spec.py`, a
   `ProviderAdapter` subclass registered in `ADAPTERS`
-  (`backend/byok/providers/`), errors mapped to the kinds in
-  `backend/byok/errors.py`, its credential name in `ALLOWED_CREDENTIALS`
+  (`backend/byok/providers/`) whose raw task statuses map to
+  `ProviderTaskStatus` (`backend/statuses.py`) in one `task_status` function,
+  errors mapped to the kinds in `backend/byok/errors.py` (whether a kind is
+  retried is declared once, in `RETRY_POLICY` there), its credential name in `ALLOWED_CREDENTIALS`
   (`backend/settings_store.py`) and `CREDENTIALS` (`backend/byok/service.py`),
   and the frontend key specs (`lib/settings/client.ts`,
   `components/settings/provider-keys.tsx`, `lib/provider-referrals.ts`).

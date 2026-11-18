@@ -210,6 +210,34 @@ def test_another_copy_running_does_not_block_the_install(fake, root):
     assert NPM_CI in installs(fake)
 
 
+def _plan(fake):
+    return [(s.id, s.reason) for s in install_steps.first_start_plan(fake.env())]
+
+
+def test_each_planned_step_says_why_it_is_needed(fake, root):
+    R = install_steps.StepReason
+    assert _plan(fake) == []
+    registry(root).unlink()
+    assert _plan(fake) == [("block_registry", R.REGISTRY_MISSING)]
+    hidden_lock(root).unlink()
+    assert _plan(fake) == [("frontend_deps", R.NOT_INSTALLED), ("block_registry", R.FRONTEND_INSTALLED)]
+    hidden_lock(root).write_text("{}")
+    os.utime(hidden_lock(root), (1_000_000, 1_000_000))
+    registry(root).write_text("")
+    assert _plan(fake) == [("frontend_deps", R.LOCKFILE_CHANGED), ("block_registry", R.FRONTEND_INSTALLED)]
+
+
+def test_fastmcp_outcome_is_one_of_three_named_results(fake):
+    F = install_steps.FastMCP
+    assert install_steps.ensure_fastmcp(fake.env(), print) is F.ALREADY_PRESENT
+    fake.failing.add("uv run --offline")
+    assert install_steps.ensure_fastmcp(fake.env(), print) is F.DOWNLOADED
+    fake.failing.add("uv run --with")
+    lines: list[str] = []
+    assert install_steps.ensure_fastmcp(fake.env(), lines.append, prefix="[app] ") is F.FAILED
+    assert lines and lines[0].startswith("[app] Could not download FastMCP")
+
+
 def test_main_never_starts_servers_after_a_failed_install(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["app.py"])
     monkeypatch.delenv("BLOCKFLOW_PACKAGED", raising=False)
@@ -234,6 +262,7 @@ def test_packaged_mode_never_installs(monkeypatch):
     def stop(*a, **k):
         raise Stop
 
+    monkeypatch.setattr(app, "_port_problem", lambda *a, **k: None)  # the real ports may be in use
     monkeypatch.setattr(app, "_find_standalone_server", stop)
     monkeypatch.setattr(app.ProcessSupervisor, "start", lambda self: stop())
     with pytest.raises(Stop):

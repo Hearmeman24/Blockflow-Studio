@@ -251,6 +251,21 @@ def test_channel_change_applies_to_cached_releases(checker):
     assert out["latest"]["tag"] == "v0.1.16"
 
 
+def test_check_status_and_dismissal_vocabularies_are_declared():
+    from typing import get_args
+
+    assert set(get_args(releases.CheckStatus)) == set(releases.MESSAGES)
+    assert get_args(releases.Dismissed) == ("skipped", "snoozed")  # in precedence order
+
+
+def test_a_skip_wins_over_a_snooze_of_the_same_release(checker):
+    checker.transport = FakeTransport(_ok([_rel("v0.2.0")]))
+    checker.status(force=True)
+    checker.prefs[settings.SKIP_PREF] = "v0.2.0"
+    checker.prefs[settings.SNOOZE_PREF] = json.dumps({"tag": "v0.2.0", "until": checker.clock_state["now"] + 10})
+    assert checker.status()["dismissed"] == "skipped"
+
+
 def test_skip_and_snooze_hide_the_notice_but_not_the_update(checker):
     checker.transport = FakeTransport(_ok([_rel("v0.2.0")]))
     assert checker.status(force=True)["notify"] is True

@@ -15,9 +15,9 @@ same value for the local folder.
 
 from __future__ import annotations
 
-import hashlib
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -35,10 +35,7 @@ NODE_INSTALL = "Install Node.js from https://nodejs.org/"
 NPM_INSTALL = "npm ships with Node.js: https://nodejs.org/"
 
 
-def checkout_id(root: Path) -> str:
-    """A stable identity for a checkout folder that does not reveal its path.
-    Keep in step with ``backend/app_update/install.py:checkout_id``."""
-    return hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
+checkout_id = doctor.checkout_id  # also used by the doctor's port checks
 
 
 def this_checkout_running(env: doctor.Env) -> bool:
@@ -70,24 +67,68 @@ def node_prereqs(env: doctor.Env) -> List[doctor.Check]:
     ]
 
 
+class StepReason(Enum):
+    """Why an install step runs. Not printed; the plan and its tests read it."""
+
+    NOT_INSTALLED = "not_installed"                      # no frontend packages (or an install was cut short)
+    LOCKFILE_CHANGED = "lockfile_changed"                # frontend/package-lock.json is newer than the install
+    FRONTEND_INSTALLED = "frontend_installed"            # the codegen after a fresh frontend install
+    REGISTRY_MISSING = "registry_missing"                # the generated block registry is not there
+    PYTHON_DEPS_OUT_OF_DATE = "python_deps_out_of_date"  # uv.lock (with dev extras) is not installed
+    FASTMCP_NOT_CACHED = "fastmcp_not_cached"            # FastMCP is not in uv's cache, or does not import
+    ALWAYS = "always"                                    # cheap and repeatable (setup.py's codegen)
+
+
+class FastMCP(Enum):
+    """What ``ensure_fastmcp`` did."""
+
+    ALREADY_PRESENT = "already_present"
+    DOWNLOADED = "downloaded"
+    FAILED = "failed"
+
+
 @dataclass
 class Step:
     id: str
     cmd: List[str]
     message: str
+    reason: Optional[StepReason] = None  # None: not needed (setup_plan lists done steps too)
+
+
+_FRONTEND_REASONS = {doctor.FRONTEND_MISSING: StepReason.NOT_INSTALLED,
+                     doctor.FRONTEND_STALE: StepReason.LOCKFILE_CHANGED}
+
+
+def _frontend_reason(env: doctor.Env) -> Optional[StepReason]:
+    return _FRONTEND_REASONS.get(doctor.frontend_deps_state(env))
 
 
 def first_start_plan(env: doctor.Env) -> List[Step]:
     """The frontend steps a start needs. Reads two files' timestamps only: no
     command, no network, so an installed checkout starts as fast as before."""
     steps: List[Step] = []
-    deps = doctor.check_frontend_deps(env).status != doctor.OK
+    deps = _frontend_reason(env)
     if deps:
         steps.append(Step("frontend_deps", NPM_CI,
-                          "First start: installing the frontend packages, this can take a few minutes..."))
-    if deps or doctor.check_block_registry(env).status != doctor.OK:
-        steps.append(Step("block_registry", CODEGEN, "Registering the blocks..."))
+                          "First start: installing the frontend packages, this can take a few minutes...", deps))
+    if deps:
+        steps.append(Step("block_registry", CODEGEN, "Registering the blocks...", StepReason.FRONTEND_INSTALLED))
+    elif doctor.check_block_registry(env).status != doctor.OK:
+        steps.append(Step("block_registry", CODEGEN, "Registering the blocks...", StepReason.REGISTRY_MISSING))
     return steps
+
+
+def setup_plan(env: doctor.Env) -> List[Step]:
+    """``scripts/setup.py``'s steps in order, each with the reason it runs, or
+    ``reason=None`` when it is already done. Runs the doctor's read-only checks."""
+    return [
+        Step("python_deps", UV_SYNC, "",
+             StepReason.PYTHON_DEPS_OUT_OF_DATE if doctor.check_python_deps(env).status != doctor.OK else None),
+        Step("frontend_deps", NPM_CI, "", _frontend_reason(env)),
+        Step("block_registry", CODEGEN, "", StepReason.ALWAYS),
+        Step("mcp_cache", FASTMCP, "",
+             StepReason.FASTMCP_NOT_CACHED if doctor.check_mcp(env).status != doctor.OK else None),
+    ]
 
 
 def forget_frontend_install(root: Path) -> None:
@@ -103,14 +144,14 @@ def tail(output: str, lines: int = 15) -> str:
     return "\n".join(output.splitlines()[-lines:])
 
 
-def ensure_fastmcp(env: doctor.Env, out: Callable[[str], None], prefix: str = "") -> Optional[bool]:
-    """Download FastMCP into uv's cache when it is not there. None when it
-    was already there; otherwise whether the download worked."""
+def ensure_fastmcp(env: doctor.Env, out: Callable[[str], None], prefix: str = "") -> FastMCP:
+    """Download FastMCP into uv's cache when it is not there. A failed
+    download is reported through ``out`` and never stops the caller."""
     if doctor.check_mcp(env).status == doctor.OK:
-        return None
+        return FastMCP.ALREADY_PRESENT
     code, _ = env.run(FASTMCP, cwd=env.root, timeout=INSTALL_TIMEOUT_S)
     if code != 0:
         out(f"{prefix}Could not download FastMCP for the MCP server; the app works without it. "
             f"Retry later with `{' '.join(FASTMCP)}`.")
-        return False
-    return True
+        return FastMCP.FAILED
+    return FastMCP.DOWNLOADED

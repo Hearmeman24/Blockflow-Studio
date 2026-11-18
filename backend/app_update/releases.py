@@ -27,7 +27,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import quote
 
 from backend.app_update import settings
@@ -49,7 +49,14 @@ MAX_RELEASES = 100
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f​-‏‪-‮⁦-⁩]")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
-MESSAGES = {
+# ``status`` of a release check (``/api/app/update``); MESSAGES has one line per value.
+CheckStatus = Literal["ok", "disabled", "not_configured", "not_found", "rate_limited", "offline", "error",
+                      "invalid", "too_large", "never"]
+# ``dismissed``: the user skipped this release, or snoozed it ("later"). In
+# precedence order: a skip of a release wins over a snooze of the same one.
+Dismissed = Literal["skipped", "snoozed"]
+
+MESSAGES: dict[CheckStatus, str] = {
     "ok": "Checked for updates.",
     "disabled": "Update checks are turned off.",
     "not_configured": "No release repository is configured.",
@@ -200,7 +207,10 @@ class UpdateChecker:
 
     # ------------------------------------------------------------ status
 
-    def _dismissed(self, tag: str) -> str | None:
+    def _dismissed(self, tag: str) -> Dismissed | None:
+        """How the user dismissed ``tag``, in ``Dismissed`` precedence order: a
+        skip is permanent for that release and wins over a snooze, which
+        lasts until its ``until`` time."""
         if settings._pref(settings.SKIP_PREF) == tag:
             return "skipped"
         raw = settings._pref(settings.SNOOZE_PREF)

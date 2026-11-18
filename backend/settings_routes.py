@@ -172,6 +172,8 @@ def put_app_pref(name: str, body: AppPrefBody) -> JSONResponse:
         output_folder.switch_to(value or None)
     else:
         settings_store.set_app_pref(name, value)
+        if name in output_folder.STATE_PREFS:
+            output_folder.reload()  # its cached state was read from this pref
     return JSONResponse({"name": name, "saved": True})
 
 

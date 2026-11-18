@@ -95,9 +95,11 @@ class FakeSupervisor:
 
     def resume_frontend(self):
         self.requests.append("resume")
+        return True
 
     def restart(self):
         self.requests.append("restart")
+        return True  # the request file was written
 
 
 def make(tmp_path, runner, *, supervisor=None, active=0, launch_mode="dev", version="0.1.15", latest="v0.2.0"):
@@ -483,3 +485,130 @@ def test_every_command_is_an_argument_list_with_a_timeout(tmp_path, monkeypatch)
 
 def test_command_timeout_and_missing_binary_are_results(tmp_path):
     assert commands.run_command(["definitely-not-a-binary-xyz"], tmp_path, 5).code == 127
+
+
+# ------------------------------------------------------------------ declared transitions
+
+
+def test_every_update_state_has_a_declared_set_of_next_states():
+    from backend.statuses import UpdateState
+
+    assert set(engine.UPDATE_TRANSITIONS) == set(UpdateState)
+    # The moves the engine makes, and nothing else.
+    assert engine.UPDATE_TRANSITIONS[UpdateState.IDLE] == {UpdateState.RUNNING}
+    assert engine.UPDATE_TRANSITIONS[UpdateState.RUNNING] == {
+        UpdateState.RESTARTING, UpdateState.DONE, UpdateState.FAILED, UpdateState.ROLLED_BACK}
+    assert engine.UPDATE_TRANSITIONS[UpdateState.RESTARTING] == {UpdateState.DONE, UpdateState.FAILED}
+    for finished in (UpdateState.DONE, UpdateState.FAILED, UpdateState.ROLLED_BACK):
+        assert engine.UPDATE_TRANSITIONS[finished] == {UpdateState.IDLE, UpdateState.RUNNING}
+
+
+def test_an_undeclared_move_is_refused(tmp_path):
+    eng = make(tmp_path, FakeGit())
+    with pytest.raises(engine.InvalidTransition):
+        eng._transition("restarting")  # idle -> restarting is not a move the engine makes
+    assert eng.progress()["state"] == "idle"
+
+
+def test_step_statuses_have_declared_moves():
+    from backend.statuses import StepStatus
+
+    assert set(engine.STEP_TRANSITIONS) == set(StepStatus)
+    assert engine.STEP_TRANSITIONS[StepStatus.DONE] == frozenset()
+    assert StepStatus.RUNNING in engine.STEP_TRANSITIONS[StepStatus.PENDING]
+
+
+# ------------------------------------------------------------------ restart request not delivered
+
+
+class UndeliverableSupervisor(FakeSupervisor):
+    def __init__(self, *, raises=False):
+        super().__init__()
+        self.raises = raises
+
+    def restart(self):
+        self.requests.append("restart")
+        if self.raises:
+            raise PermissionError("control folder is read-only")
+        return False  # the control folder vanished after the availability check
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_restart_request_that_is_not_delivered_ends_in_a_manual_restart(tmp_path, raises):
+    sup = UndeliverableSupervisor(raises=raises)
+    eng = make(tmp_path, FakeGit(), supervisor=sup)
+    eng.start("v0.2.0")
+    p = eng.progress()
+    assert p["state"] == "done"
+    assert p["restart"] == {"automatic": False, "required": True, "command": "uv run app.py"}
+    assert p["manual"] == ["uv run app.py"]
+    assert "updated" in p["message"].lower() and "uv run app.py" in p["message"]
+    assert {s["id"]: s["status"] for s in p["steps"]}["restart"] == "failed"
+    # The web interface was paused for the update: it is asked to come back.
+    assert sup.requests == ["pause", "restart", "resume"]
+    saved = json.loads((tmp_path / "state" / "progress.json").read_text())
+    assert saved["state"] == "done"
+    # Not stuck in "restarting": the user can acknowledge it and update again later.
+    assert eng.acknowledge()["state"] == "idle"
+
+
+# ------------------------------------------------------------------ rollback that raises
+
+
+class ExplodingGit(FakeGit):
+    def __call__(self, args, cwd, timeout, env=None):
+        if self.line(args).startswith("git reset"):
+            raise OSError("disk went away")
+        return super().__call__(args, cwd, timeout, env)
+
+
+def test_an_exception_during_rollback_ends_in_failed_with_the_commands(tmp_path):
+    fake = ExplodingGit(fail={"uv sync": Result(1, "boom")})
+    sup = FakeSupervisor()
+    eng = make(tmp_path, fake, supervisor=sup)
+    eng.start("v0.2.0")
+    p = eng.progress()
+    assert p["state"] == "failed"
+    assert "Updating Python packages failed" in p["error"]
+    assert "could not be undone" in p["error"].lower()
+    assert f"git reset --keep {OLD}" in p["manual"]
+    assert sup.requests[-1] == "resume"
+    assert eng.acknowledge()["state"] == "idle"
+
+
+# ------------------------------------------------------------------ progress.json from disk
+
+
+def _write_progress(tmp_path, data):
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "progress.json").write_text(data if isinstance(data, str) else json.dumps(data))
+
+
+@pytest.mark.parametrize("bad", [
+    "not json", "[]", {"state": "exploded"},
+    {"state": "done", "steps": "abc"},
+    {"state": "done", "steps": [1, 2]},
+    {"state": "done", "steps": [{"id": "fetch", "status": "weird"}]},
+    {"state": "done", "steps": [{"status": "done"}]},
+    {"state": "restarting", "restart": "yes"},
+    {"state": "done", "restart": {"automatic": "no", "required": True, "command": "x"}},
+    {"state": "done", "manual": "uv run app.py"},
+    {"state": "done", "log_tail": 5},
+    {"state": "done", "log_tail": [1, 2]},
+])
+def test_a_corrupt_progress_file_falls_back_to_idle(tmp_path, bad):
+    _write_progress(tmp_path, bad)
+    eng = make(tmp_path, FakeGit())  # never raises
+    assert eng.progress()["state"] == "idle"
+    eng.recover()  # nor does settling it
+    assert eng.progress()["state"] == "idle"
+
+
+def test_a_valid_progress_file_is_read_unchanged(tmp_path):
+    eng = make(tmp_path, FakeGit())
+    eng.start("v0.2.0")
+    saved = json.loads((tmp_path / "state" / "progress.json").read_text())
+    again = make(tmp_path, FakeGit())
+    saved.pop("owner")
+    assert again.progress() == saved

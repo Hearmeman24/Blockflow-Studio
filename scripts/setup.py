@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import doctor  # noqa: E402
 import install_steps  # noqa: E402
-from install_steps import CODEGEN, FASTMCP, INSTALL_TIMEOUT_S, NPM_CI, UV_SYNC  # noqa: E402
+from install_steps import INSTALL_TIMEOUT_S, NPM_CI  # noqa: E402
 
 
 def next_steps(env: doctor.Env) -> List[str]:
@@ -70,15 +70,10 @@ def main(argv: Optional[List[str]] = None, env: Optional[doctor.Env] = None,
         out("Install the missing prerequisites above, then run this again. Nothing was changed.")
         return 1
 
-    steps = [
-        ("python_deps", UV_SYNC, doctor.check_python_deps(env).status != doctor.OK),
-        ("frontend_deps", NPM_CI, doctor.check_frontend_deps(env).status != doctor.OK),
-        ("block_registry", CODEGEN, True),
-        ("mcp_cache", FASTMCP, doctor.check_mcp(env).status != doctor.OK),
-    ]
-    for step_id, cmd, needed in steps:
+    for step in install_steps.setup_plan(env):
+        step_id, cmd = step.id, step.cmd
         shown = " ".join(cmd)
-        if not needed:
+        if step.reason is None:
             out(f"[ok  ] {step_id}: already done")
             continue
         if args.check:

@@ -5,11 +5,13 @@
     uv run python scripts/doctor.py --json     # machine-readable (safe to paste in a bug report)
     python3 scripts/doctor.py --expect-running # the app should be up: unreachable is a failure
 
-Every check has a stable ``id``, a ``status`` (ok / warn / fail / skip), a
-one-line ``message`` and a one-line ``fix``. The exit code is 1 only when a
-check fails.
+Every check has a stable ``id`` (``CHECK_IDS``), a ``status`` (``STATUSES``:
+ok / warn / fail / skip), a one-line ``message`` and a one-line ``fix``. The
+exit code is 1 only when a check fails. The ids, statuses and JSON keys are a
+public contract (bug reports, AGENTS.md): add to them, never rename.
 
-Standard library only. It never modifies anything, never reads the settings
+Standard library only, and no newer syntax than the oldest ``python3`` a
+user may have, because it runs before anything is installed. It never modifies anything, never reads the settings
 database and never prints a key: provider state comes from the running app's
 ``GET /api/providers/catalog``, which reports only whether a key is saved.
 Paths under your home folder are shown as ``~``.
@@ -18,6 +20,7 @@ Paths under your home folder are shown as ``~``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -42,6 +45,20 @@ VERSION_ROUTE = "/api/app/version"
 UPDATE_ROUTE = "/api/app/update"
 
 OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
+# Every status, in the order the summary counts them.
+STATUSES = (OK, WARN, FAIL, SKIP)
+
+# Every check, in the order the report lists them. setup.py and the install
+# plan reuse the prerequisite checks (git, uv, python, node, npm).
+CHECK_IDS = (
+    "git", "uv", "python", "node", "npm",                              # prerequisites
+    "python_deps", "frontend_deps", "block_registry",                  # what the install put in place
+    "mcp_importable", "mcp_registered",                                # the MCP server
+    "backend_port", "backend", "frontend_port", "frontend",            # the running app
+    "providers", "balances", "output_folder", "version",               # what the running app reports
+)
+
+PORT_MIN, PORT_MAX = 1, 65535
 
 RunResult = Tuple[int, str]
 HttpResult = Tuple[Optional[int], Any]
@@ -53,6 +70,12 @@ class Check:
     status: str
     message: str
     fix: str = ""
+
+    def __post_init__(self) -> None:
+        if self.id not in CHECK_IDS:
+            raise ValueError("unknown doctor check id: " + repr(self.id))
+        if self.status not in STATUSES:
+            raise ValueError("unknown doctor status: " + repr(self.status))
 
 
 # --------------------------------------------------------------------- the environment
@@ -109,17 +132,46 @@ class Env:
     home: str = field(default_factory=lambda: str(Path.home()))
 
     def backend_port(self) -> int:
-        return _int(self.environ.get("BACKEND_PORT"), DEFAULT_BACKEND_PORT)
+        """The backend port; the default when the setting is not a port (see ``port_problem``)."""
+        return port_setting(self.environ, "BACKEND_PORT", DEFAULT_BACKEND_PORT)[0]
 
     def frontend_port(self) -> int:
-        return _int(self.environ.get("FRONTEND_PORT"), DEFAULT_FRONTEND_PORT)
+        return port_setting(self.environ, "FRONTEND_PORT", DEFAULT_FRONTEND_PORT)[0]
+
+    def port_problem(self, name: str) -> Optional[str]:
+        """Why BACKEND_PORT / FRONTEND_PORT is not usable, or None."""
+        return port_setting(self.environ, name, PORT_DEFAULTS[name])[1]
 
 
-def _int(value: Optional[str], default: int) -> int:
+PORT_DEFAULTS = {"BACKEND_PORT": DEFAULT_BACKEND_PORT, "FRONTEND_PORT": DEFAULT_FRONTEND_PORT}
+
+
+def port_setting(environ: Dict[str, str], name: str, default: int) -> Tuple[int, Optional[str]]:
+    """The port an environment variable asks for: ``(port, None)``, or
+    ``(default, problem)`` when the value is not a port number (``port_fix``
+    says what to do). Unset or blank means the default. The one rule, shared
+    by app.py and the doctor."""
+    raw = environ.get(name)
+    if raw is None or not raw.strip():
+        return default, None
     try:
-        return int(value) if value else default
+        port = int(raw.strip())
     except ValueError:
-        return default
+        port = None
+    if port is not None and PORT_MIN <= port <= PORT_MAX:
+        return port, None
+    shown = raw if len(raw) <= 40 else raw[:40] + "..."
+    return default, f"{name} is {shown!r}, which is not a port number."
+
+
+def port_fix(name: str, default: int) -> str:
+    return f"Use a whole number from {PORT_MIN} to {PORT_MAX} for {name}, or leave it unset to use {default}."
+
+
+def checkout_id(root: Path) -> str:
+    """A stable identity for a checkout folder that does not reveal its path.
+    Keep in step with ``backend/app_update/install.py:checkout_id``."""
+    return hashlib.sha256(str(Path(root).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------- helpers
@@ -220,20 +272,37 @@ def check_python_deps(env: Env) -> Check:
                  "The app itself still starts with `uv run app.py`; tests and lint need them.", fix)
 
 
-def check_frontend_deps(env: Env) -> Check:
-    fix = ("Stop the app and start it again with `uv run app.py`, which installs them; or, with the app "
-           "stopped, run `npm --prefix frontend ci` (or `uv run python scripts/setup.py`).")
+FRONTEND_INSTALLED, FRONTEND_MISSING, FRONTEND_STALE = "installed", "missing", "stale"
+
+
+def frontend_deps_state(env: Env) -> str:
+    """``installed``, ``missing`` (never installed, or an install was cut
+    short) or ``stale`` (the lockfile changed after the install, for example
+    after a git pull). Two file timestamps; no command."""
     lock = env.root / "frontend" / "package-lock.json"
     installed = env.root / "frontend" / "node_modules" / ".package-lock.json"
     if not installed.exists():
-        return Check("frontend_deps", WARN, "Frontend dependencies are not installed "
-                     "(`uv run app.py` installs them when it starts).", fix)
+        return FRONTEND_MISSING
     try:
         stale = lock.exists() and installed.stat().st_mtime < lock.stat().st_mtime
     except OSError:
         stale = False
-    if stale:
-        return Check("frontend_deps", WARN, "frontend/package-lock.json is newer than the installed packages.", fix)
+    return FRONTEND_STALE if stale else FRONTEND_INSTALLED
+
+
+def check_frontend_deps(env: Env) -> Check:
+    by_hand = ("; or, with the app stopped, run `npm --prefix frontend ci` "
+               "(or `uv run python scripts/setup.py`).")
+    state = frontend_deps_state(env)
+    if state == FRONTEND_MISSING:
+        return Check("frontend_deps", WARN, "Frontend dependencies are not installed "
+                     "(`uv run app.py` installs them when it starts).",
+                     "Start the app with `uv run app.py` (stop it first if it is running), which installs them"
+                     + by_hand)
+    if state == FRONTEND_STALE:
+        return Check("frontend_deps", WARN, "frontend/package-lock.json is newer than the installed packages.",
+                     "The lockfile changed since the packages were installed (after a git pull or an update): "
+                     "stop the app and start it again with `uv run app.py`, which reinstalls them" + by_hand)
     return Check("frontend_deps", OK, "Frontend dependencies are installed.")
 
 
@@ -277,27 +346,76 @@ def check_mcp_registered(env: Env) -> Check:
 # --------------------------------------------------------------------- running-app checks
 
 
+# Who holds a port that is in use but does not serve this app's provider catalog.
+BUSY_THIS_APP = "this_app"        # answers /api/app/version with this folder's checkout_id
+BUSY_OTHER_COPY = "other_copy"    # answers /api/app/version with another folder's checkout_id
+BUSY_HTTP = "http"                # answers HTTP, says nothing about itself
+BUSY_OTHER = "other"              # accepts connections, no HTTP answer
+
+
+def busy_port_case(env: Env, port: int, catalog_status: Optional[int]) -> str:
+    status, body = env.http_get(f"http://127.0.0.1:{port}{VERSION_ROUTE}")
+    if status == 200 and isinstance(body, dict) and isinstance(body.get("checkout_id"), str):
+        return BUSY_THIS_APP if body["checkout_id"] == checkout_id(env.root) else BUSY_OTHER_COPY
+    return BUSY_HTTP if catalog_status is not None or status is not None else BUSY_OTHER
+
+
+def _busy_port_check(cid: str, port: int, case: str, status: Optional[int], role: str, other_port: str) -> Check:
+    """A FAIL for a port in use, with a message and fix for the case it is."""
+    if case == BUSY_THIS_APP:
+        return Check(cid, FAIL, f"Port {port} is this app's {role}, but it did not return the provider catalog"
+                     + (f" (HTTP {status})" if status else "") + ": it is failing or still starting.",
+                     "Wait a few seconds and run the doctor again; if it stays, read the errors in the app's "
+                     "terminal, then stop it (Ctrl+C) and start it again with `uv run app.py`.")
+    if case == BUSY_OTHER_COPY:
+        return Check(cid, FAIL, f"Port {port} is used by another copy of BlockFlow Studio (from a different "
+                     "folder).", f"Stop that copy, or start this one with another port: {other_port}")
+    if case == BUSY_HTTP:
+        return Check(cid, FAIL, f"Port {port} answers" + (f" HTTP {status}" if status else " HTTP")
+                     + f" but not as this app's {role}: another program, or this app's {role} failing.",
+                     "If BlockFlow is running, read the errors in its terminal and start it again; otherwise "
+                     f"stop the program on port {port}, or start this app with another port: {other_port}")
+    return Check(cid, FAIL, f"Port {port} is in use by another program.",
+                 f"Stop that program, or start this app with another port: {other_port}")
+
+
+def _bad_port_checks(port_cid: str, reach_cid: str, var: str, problem: str, down: str) -> List[Check]:
+    return [Check(port_cid, FAIL, f"{problem} BlockFlow Studio will not start with it.",
+                  port_fix(var, PORT_DEFAULTS[var])),
+            Check(reach_cid, down, f"Not checked: {var} is not a port number.", f"See {port_cid}.")]
+
+
 def check_ports_and_reachability(env: Env, expect_running: bool) -> Tuple[List[Check], bool]:
     """Port checks plus backend and frontend reachability. Returns (checks, backend_up)."""
     checks: List[Check] = []
     bport, fport = env.backend_port(), env.frontend_port()
     down = FAIL if expect_running else WARN
 
-    status, body = env.http_get(f"http://127.0.0.1:{bport}/api/providers/catalog")
-    backend_up = status == 200 and _is_catalog(body)
-    if backend_up:
-        checks.append(Check("backend_port", OK, f"Port {bport} is serving this app's backend."))
-        checks.append(Check("backend", OK, f"Backend answers at http://127.0.0.1:{bport}."))
-    elif env.port_in_use(bport):
-        checks.append(Check("backend_port", FAIL, f"Port {bport} is in use by another program.",
-                            "Stop that program, or start this app with another port: BACKEND_PORT=<port> "
-                            "uv run app.py (and set BLOCKFLOW_URL for the MCP server)."))
-        checks.append(Check("backend", down, "The BlockFlow Studio backend is not reachable.", "See backend_port."))
+    backend_up = False
+    bad_backend = env.port_problem("BACKEND_PORT")
+    if bad_backend:
+        checks.extend(_bad_port_checks("backend_port", "backend", "BACKEND_PORT", bad_backend, down))
     else:
-        checks.append(Check("backend_port", OK, f"Port {bport} is free."))
-        checks.append(Check("backend", down, "The app is not running.", "Start it from the repository root: "
-                            "`uv run app.py`."))
+        status, body = env.http_get(f"http://127.0.0.1:{bport}/api/providers/catalog")
+        backend_up = status == 200 and _is_catalog(body)
+        if backend_up:
+            checks.append(Check("backend_port", OK, f"Port {bport} is serving this app's backend."))
+            checks.append(Check("backend", OK, f"Backend answers at http://127.0.0.1:{bport}."))
+        elif env.port_in_use(bport):
+            checks.append(_busy_port_check(
+                "backend_port", bport, busy_port_case(env, bport, status), status, "backend",
+                "BACKEND_PORT=<port> uv run app.py (and set BLOCKFLOW_URL for the MCP server)."))
+            checks.append(Check("backend", down, "The BlockFlow Studio backend is not reachable.",
+                                "See backend_port."))
+        else:
+            checks.append(Check("backend_port", OK, f"Port {bport} is free."))
+            checks.append(Check("backend", down, "The app is not running.", "Start it from the repository root: "
+                                "`uv run app.py`."))
 
+    bad_frontend = env.port_problem("FRONTEND_PORT")
+    if bad_frontend:
+        checks.extend(_bad_port_checks("frontend_port", "frontend", "FRONTEND_PORT", bad_frontend, down))
+        return checks, backend_up
     fstatus, fbody = env.http_get(f"http://127.0.0.1:{fport}/api/providers/catalog")
     frontend_up = fstatus == 200 and _is_catalog(fbody)
     if frontend_up:
@@ -309,8 +427,8 @@ def check_ports_and_reachability(env: Env, expect_running: bool) -> Tuple[List[C
             checks.append(Check("frontend_port", WARN, f"Port {fport} answers but not as this app's frontend "
                                 "(it may still be starting).", "Wait a few seconds and run the doctor again."))
         else:
-            checks.append(Check("frontend_port", FAIL, f"Port {fport} is in use by another program.",
-                                "Stop that program, or start this app with FRONTEND_PORT=<port> uv run app.py."))
+            checks.append(_busy_port_check("frontend_port", fport, busy_port_case(env, fport, fstatus), fstatus,
+                                           "frontend", "FRONTEND_PORT=<port> uv run app.py."))
         checks.append(Check("frontend", down, "The BlockFlow Studio frontend is not reachable.",
                             "See frontend_port."))
     else:
@@ -429,7 +547,7 @@ def run_checks(env: Optional[Env] = None, *, expect_running: bool = False) -> Li
 
 
 def summarize(checks: List[Check]) -> Dict[str, int]:
-    return {s: sum(1 for c in checks if c.status == s) for s in (OK, WARN, FAIL, SKIP)}
+    return {s: sum(1 for c in checks if c.status == s) for s in STATUSES}
 
 
 def report(checks: List[Check]) -> Dict[str, Any]:

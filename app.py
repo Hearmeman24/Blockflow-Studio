@@ -15,14 +15,26 @@ import time
 import urllib.request
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT / "frontend"
-# Arbitrary, uncommon ports: 3000/8000 collide with every other Next.js/Django/
-# http.server dev instance on the machine. Override via env if these clash too.
-BACKEND_PORT = int(os.environ.get("BACKEND_PORT", 47301))
-FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", 47300))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# Standard library only (it is imported before anything is installed).
+from backend.app_update.launcher_protocol import (  # noqa: E402
+    LAUNCH_MODE_ENV,
+    REQUEST_ORDER,
+    SUPERVISOR_ENV,
+    ControlFile,
+    LaunchMode,
+)
+
+# Arbitrary, uncommon ports (scripts/doctor.py DEFAULT_*_PORT): 3000/8000 collide
+# with every other Next.js/Django/http.server dev instance on the machine.
+# Override with BACKEND_PORT / FRONTEND_PORT if these clash too (_read_ports).
+PORT_REMEDY = "BACKEND_PORT=48001 FRONTEND_PORT=48000 uv run app.py"
 
 
 def _is_packaged_mode(argv: list[str] | None = None) -> bool:
@@ -60,8 +72,7 @@ def _auto_setup(env=None, out: Callable[[str], None] = print) -> int:
     if not steps:
         return 0
     if steps_mod.this_checkout_running(env):
-        out(f"[app] BlockFlow Studio is already running from this folder at http://localhost:{env.frontend_port()}. "
-            "Use that one, or stop it (Ctrl+C in its terminal) and start again.")
+        out(_already_running(env.frontend_port()))
         return 1
     for check in steps_mod.node_prereqs(env):
         if check.status == doctor.FAIL:
@@ -93,6 +104,44 @@ def _auto_setup(env=None, out: Callable[[str], None] = print) -> int:
         out("[app] Checking FastMCP for the MCP server...")
         steps_mod.ensure_fastmcp(env, out, prefix="[app] ")
     return 0
+
+
+def _already_running(frontend_port: int) -> str:
+    return (f"[app] BlockFlow Studio is already running from this folder at http://localhost:{frontend_port}. "
+            "Use that one, or stop it (Ctrl+C in its terminal) and start again.")
+
+
+def _read_ports(environ: Mapping[str, str]) -> tuple[int, int] | str:
+    """(backend, frontend) from BACKEND_PORT / FRONTEND_PORT, or the line to
+    stop with when one is not a port number. Same rule as the doctor's."""
+    doctor = _install_steps().doctor
+    ports = []
+    for name in ("BACKEND_PORT", "FRONTEND_PORT"):
+        default = doctor.PORT_DEFAULTS[name]
+        port, problem = doctor.port_setting(dict(environ), name, default)
+        if problem:
+            return f"[app] {problem} {doctor.port_fix(name, default)}"
+        ports.append(port)
+    return ports[0], ports[1]
+
+
+def _port_problem(backend_port: int, frontend_port: int, env=None) -> str | None:
+    """The line to stop with when a port is already taken, else None. Checked
+    once, before the servers first start: an update restart reuses the ports
+    of the servers it just stopped and never comes through here."""
+    steps_mod = _install_steps()
+    env = env or steps_mod.doctor.Env(root=ROOT)
+    busy = [(port, role) for port, role in ((backend_port, "backend"), (frontend_port, "frontend"))
+            if env.port_in_use(port)]
+    if not busy:
+        return None
+    if steps_mod.this_checkout_running(env):
+        return _already_running(frontend_port)
+    named = " and ".join(f"{port} ({role})" for port, role in busy)
+    which = f"Ports {named} are" if len(busy) > 1 else f"Port {named} is"
+    return (f"[app] {which} already in use by another program (often another copy of BlockFlow), so "
+            f"BlockFlow Studio cannot start. Stop it, or start this copy on other ports: `{PORT_REMEDY}` "
+            "(then register the MCP server with BLOCKFLOW_URL=http://127.0.0.1:48001).")
 
 
 def _wait_for(url: str, timeout: float = 30.0) -> bool:
@@ -135,22 +184,24 @@ def _frontend_command(*, packaged: bool, frontend_port: int) -> tuple[list[str],
     return ["npm", "run", "dev", "--", "--port", str(frontend_port)], FRONTEND_DIR
 
 
-# Restart protocol with the backend (backend/app_update/supervisor.py keeps the
-# same names): the backend creates a request file in this private folder and
-# the loop below acts on it within about a second.
-SUPERVISOR_ENV = "BLOCKFLOW_SUPERVISOR_DIR"
-LAUNCH_MODE_ENV = "BLOCKFLOW_LAUNCH_MODE"
-REQ_PAUSE = "pause-frontend"
-ACK_PAUSED = "frontend-paused"
-REQ_RESUME = "resume-frontend"
-REQ_RESTART = "restart"
+# Restart protocol with the backend, declared in backend/app_update/launcher_protocol.py:
+# the backend creates a request file in this private folder and the loop below
+# acts on it within about a second, in REQUEST_ORDER.
+REQ_PAUSE = ControlFile.PAUSE_FRONTEND
+ACK_PAUSED = ControlFile.FRONTEND_PAUSED
+REQ_RESUME = ControlFile.RESUME_FRONTEND
+REQ_RESTART = ControlFile.RESTART
+
+
+def _launch_mode(packaged: bool) -> LaunchMode:
+    return LaunchMode.PACKAGED if packaged else LaunchMode.DEV
 
 
 def _backend_env(*, control_dir: Path, packaged: bool, backend_port: int, frontend_port: int) -> dict[str, str]:
     return {
         **os.environ,
         SUPERVISOR_ENV: str(control_dir),
-        LAUNCH_MODE_ENV: "packaged" if packaged else "dev",
+        LAUNCH_MODE_ENV: _launch_mode(packaged).value,
         # The backend allows browser requests only from these ports (backend/origin_guard.py).
         "BACKEND_PORT": str(backend_port),
         "FRONTEND_PORT": str(frontend_port),
@@ -164,6 +215,8 @@ class LaunchOutcome(Enum):
     SERVER_EXITED = "server_exited"          # the backend or frontend stopped on its own
     SETUP_FAILED = "setup_failed"            # the first-start install could not finish
     SETUP_INTERRUPTED = "setup_interrupted"  # Ctrl+C during the first-start install
+    BAD_PORT = "bad_port"                    # BACKEND_PORT / FRONTEND_PORT is not a port number
+    PORT_IN_USE = "port_in_use"              # a port is taken (another program, or this app already)
 
 
 EXIT_CODES: dict[LaunchOutcome, int] = {
@@ -171,6 +224,8 @@ EXIT_CODES: dict[LaunchOutcome, int] = {
     LaunchOutcome.SERVER_EXITED: 1,
     LaunchOutcome.SETUP_FAILED: 1,
     LaunchOutcome.SETUP_INTERRUPTED: 130,
+    LaunchOutcome.BAD_PORT: 1,
+    LaunchOutcome.PORT_IN_USE: 1,
 }
 
 
@@ -212,25 +267,43 @@ class ProcessSupervisor:
         return [p for p in (self.backend, self.frontend) if p is not None]
 
     def tick(self) -> bool:
-        if self._take(REQ_RESTART):
-            print("[app] Restarting BlockFlow after an update...")
-            self._stop(self.procs())
-            (self.control_dir / ACK_PAUSED).unlink(missing_ok=True)
-            self.backend = self._start_backend()
+        # Requests in REQUEST_ORDER (launcher_protocol explains it): a restart
+        # wins and drops the requests left for the processes it replaces.
+        for request in REQUEST_ORDER:
+            if not self._take(request):
+                continue
+            if request is ControlFile.RESTART:
+                self._restart()
+                return True
+            if request is ControlFile.PAUSE_FRONTEND:
+                self._pause_frontend()
+            elif request is ControlFile.RESUME_FRONTEND:
+                self._resume_frontend()
+        return self._children_alive()
+
+    def _restart(self) -> None:
+        print("[app] Restarting BlockFlow after an update...")
+        self._stop(self.procs())
+        for stale in (*REQUEST_ORDER, ControlFile.FRONTEND_PAUSED):
+            (self.control_dir / stale).unlink(missing_ok=True)
+        self.backend = self._start_backend()
+        self.frontend = self._start_frontend()
+        self._wait()
+
+    def _pause_frontend(self) -> None:
+        if self.frontend is not None:
+            print("[app] Pausing the web interface for an update...")
+            self._stop([self.frontend])
+            self.frontend = None
+        (self.control_dir / ACK_PAUSED).write_text("1", encoding="utf-8")
+
+    def _resume_frontend(self) -> None:
+        (self.control_dir / ACK_PAUSED).unlink(missing_ok=True)
+        if self.frontend is None:
+            print("[app] Resuming the web interface...")
             self.frontend = self._start_frontend()
-            self._wait()
-            return True
-        if self._take(REQ_PAUSE):
-            if self.frontend is not None:
-                print("[app] Pausing the web interface for an update...")
-                self._stop([self.frontend])
-                self.frontend = None
-            (self.control_dir / ACK_PAUSED).write_text("1", encoding="utf-8")
-        if self._take(REQ_RESUME):
-            (self.control_dir / ACK_PAUSED).unlink(missing_ok=True)
-            if self.frontend is None:
-                print("[app] Resuming the web interface...")
-                self.frontend = self._start_frontend()
+
+    def _children_alive(self) -> bool:
         for name, p in (("backend", self.backend), ("frontend", self.frontend)):
             if p is not None and p.poll() is not None:
                 self.stopped_server = (name, p.returncode)
@@ -288,6 +361,13 @@ def _launch() -> LaunchOutcome:
         print("[app] Advanced mode enabled")
 
     packaged = _is_packaged_mode()
+    mode = _launch_mode(packaged)
+
+    ports = _read_ports(os.environ)
+    if isinstance(ports, str):
+        print(ports)
+        return LaunchOutcome.BAD_PORT
+    backend_port, frontend_port = ports
 
     # Install what a fresh clone is missing, in dev mode only. Packaged mode
     # must never mutate the installed app directory.
@@ -296,37 +376,43 @@ def _launch() -> LaunchOutcome:
         if code:
             return LaunchOutcome.SETUP_INTERRUPTED if code == 130 else LaunchOutcome.SETUP_FAILED
 
+    # Otherwise the wait below would succeed against whatever already holds the
+    # port (often a first copy of the app) and this copy's servers fail to bind.
+    problem = _port_problem(backend_port, frontend_port)
+    if problem:
+        print(problem)
+        return LaunchOutcome.PORT_IN_USE
+
     control_dir = Path(tempfile.mkdtemp(prefix="blockflow-supervisor-"))
-    mode = "standalone" if packaged else "dev"
 
     def start_backend() -> subprocess.Popen:
-        print(f"[app] Starting FastAPI on :{BACKEND_PORT}...")
+        print(f"[app] Starting FastAPI on :{backend_port}...")
         return subprocess.Popen(
-            _backend_command(BACKEND_PORT),
+            _backend_command(backend_port),
             cwd=str(ROOT),
             env=_backend_env(control_dir=control_dir, packaged=packaged,
-                             backend_port=BACKEND_PORT, frontend_port=FRONTEND_PORT),
+                             backend_port=backend_port, frontend_port=frontend_port),
         )
 
     def start_frontend() -> subprocess.Popen:
-        print(f"[app] Starting Next.js {mode} on :{FRONTEND_PORT}...")
-        frontend_cmd, frontend_cwd = _frontend_command(packaged=packaged, frontend_port=FRONTEND_PORT)
+        print(f"[app] Starting Next.js {mode.frontend_label} on :{frontend_port}...")
+        frontend_cmd, frontend_cwd = _frontend_command(packaged=packaged, frontend_port=frontend_port)
         frontend_env = {
             **os.environ,
-            "BACKEND_PORT": str(BACKEND_PORT),
+            "BACKEND_PORT": str(backend_port),
             # Inlined into the client bundle so browser code (e.g. directBackendUrl)
             # can reach FastAPI directly without going through the Next.js proxy.
-            "NEXT_PUBLIC_BACKEND_PORT": str(BACKEND_PORT),
-            "PORT": str(FRONTEND_PORT),
+            "NEXT_PUBLIC_BACKEND_PORT": str(backend_port),
+            "PORT": str(frontend_port),
             "HOSTNAME": "127.0.0.1",
         }
         return subprocess.Popen(frontend_cmd, cwd=str(frontend_cwd), env=frontend_env)
 
     def wait_for_servers() -> None:
         print("[app] Waiting for servers to start...")
-        if not _wait_for(f"http://127.0.0.1:{BACKEND_PORT}/api/runs?limit=1", timeout=20):
+        if not _wait_for(f"http://127.0.0.1:{backend_port}/api/runs?limit=1", timeout=20):
             print("[app] WARNING: Backend did not respond in time")
-        if not _wait_for(f"http://127.0.0.1:{FRONTEND_PORT}", timeout=30):
+        if not _wait_for(f"http://127.0.0.1:{frontend_port}", timeout=30):
             print("[app] WARNING: Frontend did not respond in time")
 
     supervisor = ProcessSupervisor(control_dir=control_dir, start_backend=start_backend,
@@ -336,7 +422,7 @@ def _launch() -> LaunchOutcome:
         supervisor.start()
         wait_for_servers()
 
-        url = f"http://localhost:{FRONTEND_PORT}"
+        url = f"http://localhost:{frontend_port}"
         if os.environ.get("BLOCKFLOW_NO_OPEN") == "1":
             print(f"[app] Ready at {url}")
         else:

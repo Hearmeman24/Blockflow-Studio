@@ -472,6 +472,23 @@ def test_forget_route(folders):
     assert client.post("/api/settings/output-folder/forget", json={}).status_code == 422
 
 
+def test_writing_the_earlier_folders_pref_directly_is_seen_at_once(folders):
+    """The generic pref route stores output_dir_previous itself; the module's
+    in-memory state must not keep serving the old list."""
+    client = _client()
+    (folders["b"] / "only-in-b.png").write_bytes(b"B")
+    assert output_folder.search_roots() == [folders["default"]]  # state loaded and cached
+    r = client.put("/api/settings/app-prefs/output_dir_previous", json={"value": json.dumps([str(folders["b"])])})
+    assert r.status_code == 200
+    assert json.loads(settings_store.get_app_pref("output_dir_previous")) == [str(folders["b"])]
+    assert output_folder.previous() == [folders["b"]]
+    assert client.get("/outputs/only-in-b.png").content == b"B"
+
+
+def test_output_folder_prefs_are_declared_by_the_module():
+    assert output_folder.STATE_PREFS == {"output_dir", "output_dir_previous"}
+
+
 def test_rejected_put_does_not_switch(folders):
     client = _client()
     f = folders["tmp"] / "file.txt"

@@ -1,5 +1,8 @@
 """Version and update routes.
 
+  restart_automatic: BlockFlow can restart itself after an update that does
+  not change app.py (an update that does asks for a manual restart).
+
   GET  /api/app/version             -> {version, commit, install, branch, dirty, update_supported,
                                         reason?, repo, checkout_id, restart_automatic}
   GET  /api/app/update              -> {current, latest, update_available, notify, dismissed, checked_at,
@@ -33,7 +36,7 @@ from backend import config, settings_store
 from backend.app_update import engine as engine_mod
 from backend.app_update import install, releases, settings
 from backend.app_update import version as semver
-from backend.app_update.supervisor import Supervisor, launch_mode
+from backend.app_update.supervisor import Supervisor, launch_mode, restarts_automatically
 
 router = APIRouter(tags=["app-update"])
 
@@ -84,7 +87,12 @@ def install_info() -> dict[str, Any]:
 
 
 def restart_automatic() -> bool:
-    return Supervisor().available and launch_mode() != "unknown"
+    """``restart_automatic`` in /api/app/version and /api/app/update: the
+    engine's rule (``restarts_automatically``) before an update is fetched,
+    when nobody knows yet whether it changes app.py. So it means "BlockFlow
+    restarts itself after an update, unless the update changes app.py"; the
+    update's own ``progress.restart.automatic`` is the final answer."""
+    return restarts_automatically(supervised=Supervisor().available, mode=launch_mode(), launcher_changed=False)
 
 
 def on_startup() -> None:

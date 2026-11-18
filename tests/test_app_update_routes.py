@@ -201,6 +201,28 @@ def test_update_prefs_are_validated(env, name, value, ok):
     assert (r.status_code == 200) is ok
 
 
+def test_restart_automatic_is_the_engines_rule_before_the_update_is_known(tmp_path, monkeypatch):
+    from backend.app_update import supervisor
+
+    assert engine_mod.restarts_automatically is supervisor.restarts_automatically
+    seen = []
+
+    def rule(**kwargs):
+        seen.append(kwargs)
+        return True
+
+    monkeypatch.setattr(routes, "restarts_automatically", rule)
+    monkeypatch.setenv("BLOCKFLOW_SUPERVISOR_DIR", str(tmp_path))
+    monkeypatch.setenv("BLOCKFLOW_LAUNCH_MODE", "packaged")
+    assert routes.restart_automatic() is True
+    # Whether the update changes app.py is not known before it is fetched.
+    assert seen == [{"supervised": True, "mode": "packaged", "launcher_changed": False}]
+    monkeypatch.undo()
+    monkeypatch.setenv("BLOCKFLOW_SUPERVISOR_DIR", str(tmp_path))
+    monkeypatch.setenv("BLOCKFLOW_LAUNCH_MODE", "something-else")
+    assert routes.restart_automatic() is False
+
+
 def test_turning_checks_off_through_settings(env):
     c = env["client"]
     c.put("/api/settings/app-prefs/update_checks", json={"value": "false"})

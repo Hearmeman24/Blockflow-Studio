@@ -51,6 +51,9 @@ from backend import config
 
 OUTPUT_DIR_PREF = "output_dir"
 PREVIOUS_PREF = "output_dir_previous"
+# The prefs the in-memory state below is loaded from. Anything that stores one
+# of them without going through switch_to / forget_previous calls reload().
+STATE_PREFS = frozenset({OUTPUT_DIR_PREF, PREVIOUS_PREF})
 MAX_PREVIOUS = 8
 OUTPUTS_PREFIX = "/outputs/"
 MAX_PATH_LENGTH = 1024

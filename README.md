@@ -116,7 +116,9 @@ keys. Never paste an API key into an issue.
   unless you choose another folder in the Welcome dialog or in **Settings, then
   App**.
 - **Ports.** Frontend `47300`, backend `47301`. To change them:
-  `BACKEND_PORT=48001 FRONTEND_PORT=48000 uv run app.py`.
+  `BACKEND_PORT=48001 FRONTEND_PORT=48000 uv run app.py`. If a port is already
+  taken, or a value is not a number from 1 to 65535, the app stops before
+  starting and says which.
 - **No browser.** `BLOCKFLOW_NO_OPEN=1` starts the app without opening one.
 - **Repair.** `python3 scripts/doctor.py` checks the install and changes
   nothing; `uv run python scripts/setup.py` reinstalls what is missing (and the
