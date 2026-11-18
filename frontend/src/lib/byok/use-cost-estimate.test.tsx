@@ -126,6 +126,75 @@ describe('useCostEstimate', () => {
     expect(result.current.unavailable).toBeNull()
   })
 
+  it('result is one state: disabled, loading, ready, unavailable or error', async () => {
+    const unavailable = { code: 'auto_duration', message: 'Auto length.' }
+    let respond: (r: Response) => void = () => {}
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { respond = resolve })))
+    const { result, rerender } = renderHook(({ enabled, d }) => useCostEstimate(request(d), { enabled, debounceMs: 5 }), {
+      initialProps: { enabled: false, d: 5 },
+    })
+    expect(result.current.result).toEqual({ status: 'disabled' })
+    rerender({ enabled: true, d: 5 })
+    expect(result.current.result).toEqual({ status: 'loading', previous: null })
+    await sleep(20)
+    respond(json({ ok: true, estimate: ESTIMATE }))
+    await waitFor(() => expect(result.current.result).toEqual({ status: 'ready', estimate: ESTIMATE }))
+    rerender({ enabled: true, d: 6 })
+    expect(result.current.result).toEqual({ status: 'loading', previous: { status: 'ready', estimate: ESTIMATE } })
+    await sleep(20)
+    respond(json({ ok: true, estimate: null, unavailable }))
+    await waitFor(() => expect(result.current.result).toEqual({ status: 'unavailable', reason: unavailable }))
+    rerender({ enabled: true, d: 7 })
+    await sleep(20)
+    respond(json({ ok: false }, 500))
+    await waitFor(() => expect(result.current.result).toMatchObject({ status: 'error', error: expect.any(Error) }))
+    // After an error nothing stale is offered while loading.
+    rerender({ enabled: true, d: 8 })
+    expect(result.current.result).toEqual({ status: 'loading', previous: null })
+  })
+
+  it('keeps the previous answer while loading only for the same provider, model and mode', async () => {
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as GenerationRequest
+      return Promise.resolve(json({ ok: true, estimate: { ...ESTIMATE, amount: body.model === 'seedance-2' ? 205 : 99 } }))
+    }))
+    const other = (model: string, provider = 'kie') => ({ ...request(5), model, provider }) as GenerationRequest
+    const { result, rerender } = renderHook(({ req, enabled }) => useCostEstimate(req, { enabled, debounceMs: 30 }), {
+      initialProps: { req: request(5), enabled: true },
+    })
+    await waitFor(() => expect(result.current.estimate?.amount).toBe(205))
+    // Same model, another setting: the old price stays until the new one arrives.
+    rerender({ req: request(6), enabled: true })
+    expect(result.current.estimate?.amount).toBe(205)
+    expect(result.current.isLoading).toBe(true)
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+    // Another model: no price until its own arrives.
+    rerender({ req: other('kling-4.0'), enabled: true })
+    expect(result.current.estimate).toBeNull()
+    expect(result.current.result).toEqual({ status: 'loading', previous: null })
+    await waitFor(() => expect(result.current.estimate?.amount).toBe(99))
+    // Another provider for the same model: also a different configuration.
+    rerender({ req: other('kling-4.0', 'piapi'), enabled: true })
+    expect(result.current.estimate).toBeNull()
+  })
+
+  it('after disabled -> enabled with another model, the previous model\'s price is not shown while loading', async () => {
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as GenerationRequest
+      return Promise.resolve(json({ ok: true, estimate: { ...ESTIMATE, amount: body.model === 'seedance-2' ? 205 : 99 } }))
+    }))
+    const { result, rerender } = renderHook(({ req, enabled }) => useCostEstimate(req, { enabled, debounceMs: 30 }), {
+      initialProps: { req: request(5), enabled: true },
+    })
+    await waitFor(() => expect(result.current.estimate?.amount).toBe(205))
+    rerender({ req: request(5), enabled: false })
+    expect(result.current.estimate).toBeNull()
+    rerender({ req: { ...request(5), model: 'kling-4.0' } as GenerationRequest, enabled: true })
+    expect(result.current.estimate).toBeNull()
+    expect(result.current.isLoading).toBe(true)
+    await waitFor(() => expect(result.current.estimate?.amount).toBe(99))
+  })
+
   it('ignores a malformed reason and never pairs a reason with an estimate', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce(json({ ok: true, estimate: null, unavailable: { code: 7 } }))

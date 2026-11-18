@@ -14,7 +14,7 @@
  * References are not held here: they arrive from an upstream loader block
  * (Image Loader, Omni Reference Loader), which shows and repairs them.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { BlockComponentProps } from '@/lib/pipeline/registry'
 import { toText } from '@/lib/pipeline/block-utils'
 import { useSessionState } from '@/lib/use-session-state'
@@ -24,7 +24,6 @@ import {
   modeName,
   modelAvailability,
   providerName,
-  configuredProviders,
 } from '@/lib/byok/catalog'
 import { checkReferences, kindPlural } from '@/lib/byok/check-references'
 import { EMPTY_PARAMS, buildRequestParams, reconcileParams, type ParamChange, type ParamState } from '@/lib/byok/params'
@@ -38,13 +37,26 @@ import {
 import {
   GenerationRunError,
   cancelResumedGeneration,
+  jobOutcome,
   jobOutputValue,
   resumeGeneration,
   runGeneration,
-  type RunStatus,
   type RunUpdate,
 } from '@/lib/byok/run-generation'
-import type { GenerationIssue, GenerationRequest, MediaKind, ModeSpec, ProviderCatalog } from '@/lib/byok/types'
+import {
+  EXECUTION_STATUS_BY_RUN,
+  IDLE_RUN,
+  isAbortError,
+  reduceRun,
+  runEndOfError,
+  runEndOfJob,
+  runHeaderText,
+  type GenerationRunState,
+  type RunEnd,
+} from '@/lib/byok/generation-run-state'
+import { readiness as readinessOf, readinessRefusal, runnableSelection } from '@/lib/byok/generation-readiness'
+import { initialSeenSource, nextUpstreamChoice } from '@/lib/byok/upstream-prompt-choice'
+import type { GenerationIssue, GenerationRequest, MediaKind, ModeSpec } from '@/lib/byok/types'
 import { useProviderCatalog } from '@/lib/byok/use-provider-catalog'
 import { referenceBadges } from '@/lib/byok/mentions'
 import { useCostEstimate } from '@/lib/byok/use-cost-estimate'
@@ -59,14 +71,8 @@ export const GENERATION_CONFIG_KEYS = ['provider', 'model', 'prompt', 'use_upstr
 
 export type { GenerationBlockConfig }
 
-export interface RunView {
-  status: RunStatus | 'idle'
-  jobId?: string
-  progress?: number | null
-  message?: string | null
-  error?: string | null
-  warnings?: GenerationIssue[]
-}
+/** The block's run, one state at a time (`@/lib/byok/generation-run-state`). */
+export type RunView = GenerationRunState
 
 /** When to look again for a charge the provider reports after the job finished. */
 export const LATE_COST_CHECKS_MS = [1000, 5000, 15000, 45000]
@@ -113,12 +119,14 @@ export function useGenerationBlock(
   const key = (name: string) => `block_${blockId}_${name}`
 
   const catalogState = useProviderCatalog()
-  const { catalog } = catalogState
+  const catalog = catalogState.load.status === 'ready' ? catalogState.load.catalog : undefined
 
   const [storedProvider, setStoredProvider] = useSessionState<string | null>(key('provider'), null)
   const [storedModel, setStoredModel] = useSessionState<string | null>(key('model'), null)
   const [prompt, setPrompt] = useSessionState<string>(key('prompt'), '')
-  // Read before useSessionState's first write: was a choice stored (reload, flow load)?
+  // Was a choice stored before this block mounted (a reload, a loaded flow)?
+  // Read in the first render; useSessionState writes its value in an effect,
+  // after the commit, so this never sees that write whatever the hook order.
   const [hadStoredUpstreamChoice] = useState(() => {
     try {
       return sessionStorage.getItem(key('use_upstream_prompt')) !== null
@@ -129,7 +137,7 @@ export function useGenerationBlock(
   const [useUpstreamPrompt, setUseUpstreamPrompt] = useSessionState<boolean>(key('use_upstream_prompt'), false)
   const [storedParams, setStoredParams] = useSessionState<ParamState>(key('params'), EMPTY_PARAMS)
   // Not persisted: after a reload the resumed poll repopulates it.
-  const [run, setRun] = useState<RunView>({ status: 'idle' })
+  const [run, dispatchRun] = useReducer(reduceRun, IDLE_RUN)
   const [changes, setChanges] = useState<ParamChange[]>([])
   const [serverIssues, setServerIssues] = useState<GenerationIssue[]>([])
   // Until a run is attempted, "add a reference" issues are a neutral hint rather than an error.
@@ -158,7 +166,6 @@ export function useGenerationBlock(
     mode: modeName(catalog, mode),
   }
   const where = `${names.model} on ${names.provider}`
-  const noKeys = Boolean(catalog) && configuredProviders(catalog as ProviderCatalog).length === 0
 
   const applySelection = useCallback((nextProvider: string, nextModel: string) => {
     const nextSpec = catalog ? getModeSpec(catalog, nextProvider, nextModel, mode, params.settings) : null
@@ -245,6 +252,9 @@ export function useGenerationBlock(
   const issues = allIssues.filter((i) => !asHint(i) && i.severity === 'error').map(withWhereToFix)
   const hints = [...new Set(allIssues.filter(asHint).map(withWhereToFix))]
 
+  // ---- Readiness: one answer for the execute guard and the UI ----
+  const readiness = readinessOf({ load: catalogState.load, provider, model, spec, availability, issues })
+
   /** Insert the matching loader directly upstream (after the user removed the spawned one). */
   const addLoader = useCallback(() => {
     pipeline?.insertBlockAdjacent(blockId, 'before', loader.type)
@@ -284,14 +294,14 @@ export function useGenerationBlock(
   // ---- Upstream prompt ----
   // A block upstream that outputs text (Prompt Writer, Prompt From Txt, ...).
   const hasUpstreamText = Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(inputs.text).trim())
-  // The switch follows the transition "no prompt source" -> "a source" (on) and
-  // back (off). A choice the user makes in between is kept, also across reloads
-  // and in saved flows: a stored choice counts as already having seen the source.
-  const seenUpstreamText = useRef(hadStoredUpstreamChoice ? hasUpstreamText : false)
+  // The switch follows the source's edges (`nextUpstreamChoice`); a choice the
+  // user makes in between is kept, also across reloads and in saved flows.
+  const seenUpstreamText = useRef(initialSeenSource(hadStoredUpstreamChoice, hasUpstreamText))
   useEffect(() => {
-    if (hasUpstreamText === seenUpstreamText.current) return
+    const hadSource = seenUpstreamText.current
+    if (hasUpstreamText === hadSource) return
     seenUpstreamText.current = hasUpstreamText
-    setUseUpstreamPrompt(hasUpstreamText)
+    setUseUpstreamPrompt((current) => nextUpstreamChoice(current, hadSource, hasUpstreamText))
   }, [hasUpstreamText, setUseUpstreamPrompt])
   const upstreamSources = pipeline?.getPortSources(blockId, 'text') ?? []
   /** Where the prompt comes from, e.g. "1 · Prompt Writer". */
@@ -321,7 +331,7 @@ export function useGenerationBlock(
   }
 
   // Pre-run estimate of that same request, only when it could actually run.
-  const canEstimate = Boolean(catalog && provider && catalog.providers[provider]?.configured && availability.available && spec)
+  const canEstimate = runnableSelection(readiness) !== null
   // The prompt never changes the price, so it is left out: typing does not re-request.
   const estimateRequest = canEstimate ? withoutPrompt(buildRequest(inputs)) : null
   const cost = useCostEstimate(estimateRequest, { enabled: canEstimate })
@@ -355,25 +365,27 @@ export function useGenerationBlock(
 
 
   const applyUpdate = useCallback((update: RunUpdate) => {
-    setRun((prev) => ({
-      status: update.status,
-      jobId: update.jobId ?? prev.jobId,
-      progress: update.progress ?? null,
-      message: update.message ?? null,
-      error: null,
-      warnings: update.issues?.filter((i) => i.severity === 'warning') ?? prev.warnings,
-    }))
-    setStatusMessage(update.status === 'running' && update.progress != null
-      ? `Running ${Math.round(update.progress * 100)}%`
-      : GENERATION_RUN_STATUS_LABEL[update.status])
-  }, [setRun, setStatusMessage])
+    dispatchRun({ type: 'update', update })
+    setStatusMessage(runHeaderText(update))
+  }, [setStatusMessage])
+
+  /** How a terminal job ends this block's run; sets the output when there is one. */
+  const settleJob = useCallback((job: JobSnapshot): RunEnd => {
+    const outcome = jobOutcome(job, output)
+    if (outcome.kind !== 'output') return runEndOfJob(outcome)
+    setOutput(output, outcome.value)
+    watchLateCost(job)
+    return { status: 'completed' }
+  }, [output, setOutput, watchLateCost])
 
   useEffect(() => {
     registerExecute(async (freshInputs, signal) => {
-      if (!catalog) throw new Error('The provider catalog has not loaded yet. Wait a moment and run again.')
-      if (noKeys) throw new Error('Add a Kie or PiAPI API key in Settings to run this block.')
-      if (!provider || !model || !spec) throw new Error(availability.reason ?? `Choose a model for ${names.mode}.`)
-      if (!availability.available) throw new Error(availability.reason ?? `${where} is not available.`)
+      // A new attempt: nothing of the previous run shows while this one is checked.
+      dispatchRun({ type: 'start' })
+      const refusal = readinessRefusal(readiness, { mode: names.mode, where })
+      const selection = runnableSelection(readiness)
+      if (refusal || !selection) throw new Error(refusal ?? `Choose a model for ${names.mode}.`)
+      const { spec } = selection
 
       stopLateCost()
       const latest = inputKinds.length === 0
@@ -415,60 +427,51 @@ export function useGenerationBlock(
       }
       const request = buildRequest(freshInputs)!
       setServerIssues([])
+      let end: RunEnd
       try {
         const job = await runGeneration({ blockId, request, signal, pollIntervalMs, onUpdate: applyUpdate })
-        const value = jobOutputValue(job, output)
-        setOutput(output, value)
-        watchLateCost(job)
-        setRun((prev) => ({ ...prev, status: 'completed', progress: 1, error: null }))
-        setStatusMessage(GENERATION_RUN_STATUS_LABEL.completed)
+        end = settleJob(job)
       } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          setRun((prev) => ({ ...prev, status: 'cancelled', error: null }))
-          throw err
-        }
-        const message = err instanceof Error && err.message ? err.message : 'The generation failed. Try again.'
         if (err instanceof GenerationRunError && err.issues.length > 0) setServerIssues(err.issues)
-        const status: RunStatus = err instanceof GenerationRunError && err.kind === 'cancelled'
-          ? 'cancelled'
-          : err instanceof GenerationRunError && err.kind === 'timeout' ? 'timed_out' : 'failed'
-        setRun((prev) => ({ ...prev, status, error: message }))
-        throw new Error(message)
+        const failure = runEndOfError(err)
+        dispatchRun({ type: 'end', end: failure })
+        // The runner marks the block cancelled for an AbortError (the only end
+        // without a text), and failed for anything else.
+        if (failure.status === 'completed' || failure.error === null) throw err
+        throw new Error(failure.error)
       }
+      dispatchRun({ type: 'end', end })
+      if (end.status === 'completed') {
+        setStatusMessage(GENERATION_RUN_STATUS_LABEL.completed)
+        return
+      }
+      // A job that ended without output fails the block with the job's text.
+      throw new Error(end.error ?? 'The generation was cancelled.')
     })
   })
 
-  // Resume a job that was running when the page was reloaded.
+  // Resume a job that was running when the page was reloaded. It ends exactly
+  // as a normal run would (`settleJob`, `runEndOfError`); the block reports
+  // the pipeline status itself, since no runner is waiting on it.
   useEffect(() => {
     const resumed = resumeGeneration({ blockId, pollIntervalMs, onUpdate: applyUpdate })
     if (!resumed) return
     setExecutionStatus?.('running')
     let active = true
+    const finish = (end: RunEnd) => {
+      dispatchRun({ type: 'end', end })
+      const status = EXECUTION_STATUS_BY_RUN[end.status]
+      if (status === 'error' && end.status !== 'completed' && end.error) setExecutionStatus?.(status, end.error)
+      else setExecutionStatus?.(status)
+    }
     resumed.promise
       .then((job) => {
-        if (!active) return
-        try {
-          setOutput(output, jobOutputValue(job, output))
-          watchLateCost(job)
-          setRun((prev) => ({ ...prev, status: 'completed', progress: 1, error: null }))
-          setExecutionStatus?.('completed')
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'The generation failed.'
-          setRun((prev) => ({ ...prev, status: 'failed', error: message }))
-          setExecutionStatus?.('error', message)
-        }
+        if (active) finish(settleJob(job))
       })
       .catch((err) => {
         if (!active) return
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          cancelResumedGeneration(blockId, resumed.jobId)
-          setRun((prev) => ({ ...prev, status: 'cancelled' }))
-          setExecutionStatus?.('cancelled')
-          return
-        }
-        const message = err instanceof Error ? err.message : 'The generation failed.'
-        setRun((prev) => ({ ...prev, status: 'failed', error: message }))
-        setExecutionStatus?.('error', message)
+        if (isAbortError(err)) cancelResumedGeneration(blockId, resumed.jobId)
+        finish(runEndOfError(err))
       })
     return () => {
       active = false
@@ -483,10 +486,10 @@ export function useGenerationBlock(
     provider,
     model,
     spec,
-    availability,
+    readiness,
     names,
     where,
-    noKeys,
+    noKeys: readiness.kind === 'no_keys',
     prompt,
     setPrompt,
     useUpstreamPrompt,
@@ -500,8 +503,8 @@ export function useGenerationBlock(
     dismissChanges: () => setChanges([]),
     selectProvider,
     selectModel,
-    costEstimate: cost.estimate,
-    costUnavailable: cost.unavailable,
+    /** The pre-run estimate; a failed estimate shows no chip, like no request at all. */
+    cost: cost.result,
     summary,
     badges: referenceBadges(spec, entries.map((e) => e.ref)),
     hasAnySource,

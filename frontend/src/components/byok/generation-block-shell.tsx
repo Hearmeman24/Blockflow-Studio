@@ -14,8 +14,10 @@ import { Textarea } from '@/components/ui/textarea'
 import { providerIds, providerName } from '@/lib/byok/catalog'
 import { insertMention } from '@/lib/byok/mentions'
 import type { MediaKind, ProviderCatalog } from '@/lib/byok/types'
+import { unavailableReason } from '@/lib/byok/generation-readiness'
+import { RUN_END_PANEL, isActiveRun, runError } from '@/lib/byok/generation-run-state'
+import { shownEstimate } from '@/lib/byok/use-cost-estimate'
 import { useOptionalPipeline } from '@/lib/pipeline/pipeline-context'
-import { ACTIVE_GENERATION_RUN_STATUSES } from '@/lib/status'
 import type { BlockComponentProps, BlockWarning } from '@/lib/pipeline/registry'
 import { useHeaderWarnings } from '@/lib/pipeline/use-header-warnings'
 import { PROVIDER_REFERRALS } from '@/lib/provider-referrals'
@@ -42,28 +44,30 @@ export interface GenerationBlockShellProps extends BlockComponentProps {
 
 export function GenerationBlockShell({ config, pollIntervalMs, ...props }: GenerationBlockShellProps) {
   const state = useGenerationBlock(props, config, pollIntervalMs)
-  const { catalogState, catalog } = state
+  const { load, retry } = state.catalogState
 
-  if (catalogState.isLoading || (!catalog && !catalogState.error)) {
-    return (
-      <div aria-busy="true" aria-label="Loading providers">
-        <Skeleton className="h-3 w-16" />
-        <Skeleton className="h-7 w-full" />
-        <Skeleton className="h-3 w-12" />
-        <Skeleton className="h-7 w-full" />
-        <Skeleton className="h-16 w-full" />
-      </div>
-    )
+  switch (load.status) {
+    case 'loading':
+      return (
+        <div aria-busy="true" aria-label="Loading providers">
+          <Skeleton className="h-3 w-16" />
+          <Skeleton className="h-7 w-full" />
+          <Skeleton className="h-3 w-12" />
+          <Skeleton className="h-7 w-full" />
+          <Skeleton className="h-16 w-full" />
+        </div>
+      )
+    case 'error':
+      return (
+        <AlertPanel variant="error" title="Could not load the providers">
+          <p>{load.error.message}</p>
+          <Button type="button" variant="outline" size="xs" onClick={retry}>Retry</Button>
+        </AlertPanel>
+      )
+    case 'ready':
+      // A failed revalidation (`stale`) keeps the loaded catalog in use.
+      return <ShellBody state={state} config={config} catalog={load.catalog} blockId={props.blockId} setHeaderWarnings={props.setHeaderWarnings} />
   }
-  if (!catalog) {
-    return (
-      <AlertPanel variant="error" title="Could not load the providers">
-        <p>{catalogState.error?.message ?? 'The provider catalog is unavailable.'}</p>
-        <Button type="button" variant="outline" size="xs" onClick={catalogState.retry}>Retry</Button>
-      </AlertPanel>
-    )
-  }
-  return <ShellBody state={state} config={config} catalog={catalog} blockId={props.blockId} setHeaderWarnings={props.setHeaderWarnings} />
 }
 
 function SetupGuidance({ catalog }: { catalog: ProviderCatalog }) {
@@ -104,7 +108,9 @@ function ShellBody({
   blockId: string
   setHeaderWarnings?: BlockComponentProps['setHeaderWarnings']
 }) {
-  const { spec, names, availability } = state
+  const { spec, names } = state
+  const unavailable = unavailableReason(state.readiness)
+  const estimate = shownEstimate(state.cost)
 
   // Non-blocking warnings go to the header badge; errors that block a run stay in the body.
   const warnings: BlockWarning[] = []
@@ -159,9 +165,9 @@ function ShellBody({
         </p>
       )}
 
-      {!state.noKeys && !availability.available && availability.reason && (
+      {unavailable && (
         <AlertPanel variant="warning" title={`${names.model} is not available on ${names.provider}`}>
-          <p>{availability.reason}.</p>
+          <p>{unavailable}.</p>
           {keyMissing ? (
             <Button asChild variant="outline" size="xs">
               <Link href="/settings">Add the key in Settings</Link>
@@ -184,8 +190,8 @@ function ShellBody({
           changes={state.changes}
           onDismissChanges={state.dismissChanges}
           where={state.where}
-          trailing={state.costEstimate || state.costUnavailable
-            ? <CostEstimateChip estimate={state.costEstimate} unavailable={state.costUnavailable} providerName={state.names.provider} />
+          trailing={estimate.estimate || estimate.unavailable
+            ? <CostEstimateChip estimate={estimate.estimate} unavailable={estimate.unavailable} providerName={state.names.provider} />
             : null}
         />
       )}
@@ -338,9 +344,16 @@ function BadgeIcon({ kind }: { kind: MediaKind }) {
   return <Icon className="size-3" />
 }
 
-const ACTIVE: ReadonlySet<RunView['status']> = new Set(ACTIVE_GENERATION_RUN_STATUSES)
 /** Provider messages that repeat the header status and add nothing. */
 const FILLER = /^(done|completed?|running|queued)\.?$/i
+
+/** The provider's detail and progress while a job is active, e.g. "Queued at Kie · 40%". */
+function activeDetail(run: RunView): string {
+  if (!isActiveRun(run)) return ''
+  const message = run.message && !FILLER.test(run.message.trim()) ? run.message.trim() : null
+  const percent = run.status === 'running' && run.progress != null ? `${Math.round(run.progress * 100)}%` : null
+  return [message, percent].filter(Boolean).join(' · ')
+}
 
 /**
  * The header status badge is the block's only status. The body adds only what
@@ -349,11 +362,10 @@ const FILLER = /^(done|completed?|running|queued)\.?$/i
  */
 function RunStatus({ run }: { run: RunView }) {
   if (run.status === 'idle') return null
-  const message = run.message && !FILLER.test(run.message.trim()) ? run.message.trim() : null
-  const percent = run.status === 'running' && run.progress != null ? `${Math.round(run.progress * 100)}%` : null
-  const detail = ACTIVE.has(run.status) ? [message, percent].filter(Boolean).join(' · ') : ''
-  const warnings = run.warnings ?? []
-  if (!detail && warnings.length === 0 && !run.error) return null
+  const detail = activeDetail(run)
+  const { warnings } = run
+  const ended = runError(run)
+  if (!detail && warnings.length === 0 && !ended) return null
   return (
     <div role="status" aria-live="polite" className="space-y-1.5" data-testid="run-status">
       {detail && <p data-testid="run-detail" className="text-muted-foreground truncate text-3xs">{detail}</p>}
@@ -362,12 +374,9 @@ function RunStatus({ run }: { run: RunView }) {
           <ul className="list-disc space-y-0.5 pl-4">{warnings.map((w, i) => <li key={i}>{w.message}</li>)}</ul>
         </AlertPanel>
       )}
-      {run.error && (
-        <AlertPanel
-          variant={run.status === 'cancelled' ? 'warning' : 'error'}
-          title={run.status === 'timed_out' ? 'The generation timed out' : run.status === 'cancelled' ? 'The generation was cancelled' : 'The generation did not finish'}
-        >
-          <p>{run.error}</p>
+      {ended && (
+        <AlertPanel variant={RUN_END_PANEL[ended.status].variant} title={RUN_END_PANEL[ended.status].title}>
+          <p>{ended.error}</p>
           <p className="text-muted-foreground">Fix the problem above if there is one, then press Run Pipeline again.</p>
         </AlertPanel>
       )}

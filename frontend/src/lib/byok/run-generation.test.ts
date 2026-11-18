@@ -3,6 +3,7 @@ import { getPendingJobRunKey, savePendingJobRun } from '@/lib/pipeline/job-pendi
 import type { JobSnapshot } from '@/lib/types'
 import {
   GenerationRunError,
+  jobOutcome,
   jobOutputValue,
   resumeGeneration,
   runGeneration,
@@ -207,5 +208,50 @@ describe('jobOutputValue', () => {
 
   it('fails when a completed job has no output of the kind', () => {
     expect(() => jobOutputValue(job({ status: 'COMPLETED', outputs: [] }), 'image')).toThrow('The job finished without an image.')
+  })
+
+  it('throws with the same kinds as before', () => {
+    const kindOf = (j: JobSnapshot) => {
+      try {
+        jobOutputValue(j, 'video')
+      } catch (err) {
+        return (err as GenerationRunError).kind
+      }
+      return null
+    }
+    expect(kindOf(job({ status: 'COMPLETED', outputs: [] }))).toBe('no_output')
+    expect(kindOf(job({ status: 'CANCELLED' }))).toBe('cancelled')
+    expect(kindOf(job({ status: 'TIMED_OUT' }))).toBe('timeout')
+    expect(kindOf(job({ status: 'TIMED_OUT', error: { kind: 'network', message: 'x' } }))).toBe('network')
+    expect(kindOf(job({ status: 'FAILED' }))).toBe('unknown')
+    expect(kindOf(job({ status: 'FAILED', error: { kind: 'auth', message: 'x' } }))).toBe('auth')
+  })
+})
+
+describe('jobOutcome', () => {
+  it('a completed job with outputs is the output value', () => {
+    const done = job({ status: 'COMPLETED', outputs: [{ kind: 'video', url: 'https://cdn/x.mp4' }] })
+    expect(jobOutcome(done, 'video')).toEqual({ kind: 'output', value: jobOutputValue(done, 'video') })
+  })
+
+  it('a completed job without an output of the kind is no_output', () => {
+    expect(jobOutcome(job({ status: 'COMPLETED', outputs: [{ kind: 'image', url: 'https://cdn/a.png' }] }), 'video'))
+      .toEqual({ kind: 'no_output', error: 'The job finished without a video.' })
+  })
+
+  it('every other terminal status is its own outcome, with the job error as written', () => {
+    expect(jobOutcome(job({ status: 'FAILED', error: { kind: 'content_rejected', message: 'Kie rejected the prompt.' } }), 'video'))
+      .toEqual({ kind: 'failed', error: 'Kie rejected the prompt.', errorKind: 'content_rejected' })
+    expect(jobOutcome(job({ status: 'FAILED' }), 'video'))
+      .toEqual({ kind: 'failed', error: 'The generation failed. Try again, or check the provider status.', errorKind: 'unknown' })
+    expect(jobOutcome(job({ status: 'CANCELLED' }), 'video')).toEqual({ kind: 'cancelled', error: 'The generation was cancelled.' })
+    expect(jobOutcome(job({ status: 'CANCELLED', error: { kind: 'interrupted', message: 'Stopped by MCP.' } }), 'video'))
+      .toEqual({ kind: 'cancelled', error: 'Stopped by MCP.' })
+    expect(jobOutcome(job({ status: 'TIMED_OUT' }), 'video'))
+      .toEqual({ kind: 'timed_out', error: 'The provider did not finish in time.', errorKind: 'timeout' })
+  })
+
+  it('a job that is somehow not terminal is a failure, never an output', () => {
+    expect(jobOutcome(job({ status: 'RUNNING' }), 'video')).toMatchObject({ kind: 'failed' })
   })
 })

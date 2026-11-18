@@ -94,7 +94,11 @@ export interface RunGenerationOptions {
   onUpdate?: (update: RunUpdate) => void
 }
 
-/** Resolves with the job's terminal snapshot. Rejects with an AbortError when cancelled. */
+/**
+ * Resolves with the job's terminal snapshot (read it with `jobOutcome`).
+ * Rejects with an AbortError when cancelled, and with a `GenerationRunError`
+ * when validation, submit or the poll fails.
+ */
 export async function runGeneration({ blockId, request, signal, pollIntervalMs, onUpdate }: RunGenerationOptions): Promise<JobSnapshot> {
   if (signal.aborted) throw abortError()
   onUpdate?.({ status: 'validating' })
@@ -175,33 +179,66 @@ export function cancelResumedGeneration(blockId: string, jobId: string): void {
 
 const GENERIC_FAILURE = 'The generation failed. Try again, or check the provider status.'
 
+/** What a generation block's output port receives from a completed job. */
+export type GenerationOutputValue = ImageRef | VideoRef | Array<ImageRef | VideoRef>
+
 /**
- * The output port value for a terminal job, or the error to show. Job errors
- * are shown as the backend wrote them.
+ * How a terminal job ended, for the block: its output, or why there is none.
+ * Job errors are shown as the backend wrote them. A normal run and a run
+ * resumed after a reload both read this (see `runEndOfJob`).
  */
-export function jobOutputValue(job: JobSnapshot, kind: 'image' | 'video'): ImageRef | VideoRef | Array<ImageRef | VideoRef> {
-  if (job.status === 'COMPLETED') {
-    // Which job made the output and what it cost travels with the ref, for viewers.
-    const price_check = readPriceCheck(job.price_check)
-    const meta: GenerationMeta = {
-      job_id: job.job_id, provider: job.provider, model: job.model, cost: readJobCost(job.cost),
-      ...(price_check ? { price_check } : {}),
+export type JobOutcome =
+  | { kind: 'output'; value: GenerationOutputValue }
+  | { kind: 'no_output'; error: string }
+  | { kind: 'failed'; error: string; errorKind: string }
+  | { kind: 'cancelled'; error: string }
+  | { kind: 'timed_out'; error: string; errorKind: string }
+
+export function jobOutcome(job: JobSnapshot, kind: 'image' | 'video'): JobOutcome {
+  switch (job.status) {
+    case 'COMPLETED': {
+      // Which job made the output and what it cost travels with the ref, for viewers.
+      const price_check = readPriceCheck(job.price_check)
+      const meta: GenerationMeta = {
+        job_id: job.job_id, provider: job.provider, model: job.model, cost: readJobCost(job.cost),
+        ...(price_check ? { price_check } : {}),
+      }
+      const refs = job.outputs
+        .filter((o) => o.kind === kind && (o.local_url || o.url))
+        .map((o) => {
+          const local = o.local_url || o.url
+          const url = /^https?:\/\//i.test(o.url) ? o.url : undefined
+          return kind === 'image'
+            ? ({ kind: 'image-ref', local, ...(url ? { url } : {}), meta } as ImageRef)
+            : ({ kind: 'video-ref', local, ...(url ? { url } : {}), meta } as VideoRef)
+        })
+      if (refs.length === 0) return { kind: 'no_output', error: `The job finished without ${kind === 'image' ? 'an image' : 'a video'}.` }
+      return { kind: 'output', value: refs.length === 1 ? refs[0] : refs }
     }
-    const refs = job.outputs
-      .filter((o) => o.kind === kind && (o.local_url || o.url))
-      .map((o) => {
-        const local = o.local_url || o.url
-        const url = /^https?:\/\//i.test(o.url) ? o.url : undefined
-        return kind === 'image'
-          ? ({ kind: 'image-ref', local, ...(url ? { url } : {}), meta } as ImageRef)
-          : ({ kind: 'video-ref', local, ...(url ? { url } : {}), meta } as VideoRef)
-      })
-    if (refs.length === 0) throw new GenerationRunError(`The job finished without ${kind === 'image' ? 'an image' : 'a video'}.`, 'no_output')
-    return refs.length === 1 ? refs[0] : refs
+    case 'CANCELLED':
+      return { kind: 'cancelled', error: job.error?.message || 'The generation was cancelled.' }
+    case 'TIMED_OUT':
+      return { kind: 'timed_out', error: job.error?.message || 'The provider did not finish in time.', errorKind: job.error?.kind ?? 'timeout' }
+    case 'FAILED':
+    case 'QUEUED':
+    case 'RUNNING':
+      // A poll resolves only on a terminal job; an active one here is a failure, never an output.
+      return { kind: 'failed', error: job.error?.message || GENERIC_FAILURE, errorKind: job.error?.kind ?? 'unknown' }
   }
-  if (job.status === 'CANCELLED') throw new GenerationRunError(job.error?.message || 'The generation was cancelled.', 'cancelled')
-  if (job.status === 'TIMED_OUT') {
-    throw new GenerationRunError(job.error?.message || 'The provider did not finish in time.', job.error?.kind ?? 'timeout')
+}
+
+/** The output port value for a completed job; throws a `GenerationRunError` for any other outcome. */
+export function jobOutputValue(job: JobSnapshot, kind: 'image' | 'video'): GenerationOutputValue {
+  const outcome = jobOutcome(job, kind)
+  switch (outcome.kind) {
+    case 'output':
+      return outcome.value
+    case 'no_output':
+      throw new GenerationRunError(outcome.error, 'no_output')
+    case 'cancelled':
+      throw new GenerationRunError(outcome.error, 'cancelled')
+    case 'failed':
+    case 'timed_out':
+      throw new GenerationRunError(outcome.error, outcome.errorKind)
   }
-  throw new GenerationRunError(job.error?.message || GENERIC_FAILURE, job.error?.kind ?? 'unknown')
 }

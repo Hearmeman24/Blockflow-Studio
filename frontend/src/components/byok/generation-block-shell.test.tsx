@@ -50,6 +50,18 @@ describe('GenerationBlockShell states', () => {
     expect(await screen.findByRole('combobox', { name: 'Model' })).toBeInTheDocument()
   })
 
+  it('keeps the block usable when a catalog revalidation fails after it loaded', async () => {
+    const harness = stubGenerationFetch({ catalog: CATALOG_BOTH })
+    const view = mount(T2V, blockProps('s6'))
+    await screen.findByRole('combobox', { name: 'Model' })
+    harness.fetchMock.mockResolvedValue(new Response('{}', { status: 500 }))
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    expect(screen.queryByText('Could not load the providers')).toBeNull()
+    expect(screen.getByRole('combobox', { name: 'Model' })).toHaveTextContent('Seedance 2')
+    view.unmount()
+  })
+
   it('guides setup when no key is configured and refuses to run', async () => {
     const harness = stubGenerationFetch({ catalog: CATALOG_NONE })
     const props = blockProps('s3')
@@ -199,6 +211,106 @@ describe('GenerationBlockShell run', () => {
   })
 })
 
+describe('GenerationBlockShell run outcomes after a reload', () => {
+  function pending(blockId: string, jobId: string) {
+    sessionStorage.setItem(`block_${blockId}_pending_jobs_v1`, JSON.stringify({
+      kind: 'generation', total: 1, submissionFailures: 0, submitted: [{ idx: 0, jobId }], startedAt: Date.now(),
+    }))
+  }
+
+  it('a resumed job that was cancelled shows Cancelled, as a normal run does', async () => {
+    pending('rc', 'job-c')
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ job_id: 'job-c', status: 'CANCELLED', error: { kind: 'interrupted', message: 'Cancelled from Artifacts.' } })] })
+    const props = blockProps('rc')
+    mount(T2V, props)
+    await waitFor(() => expect(props.setExecutionStatus).toHaveBeenLastCalledWith('cancelled'))
+    const panel = within(await screen.findByTestId('run-status'))
+    expect(panel.getByText('The generation was cancelled')).toBeInTheDocument()
+    expect(panel.getByText('Cancelled from Artifacts.')).toBeInTheDocument()
+    expect(props.setOutput).not.toHaveBeenCalled()
+  })
+
+  it('a resumed job that timed out shows Timed out, as a normal run does', async () => {
+    pending('rt', 'job-t')
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ job_id: 'job-t', status: 'TIMED_OUT', error: { kind: 'timeout', message: 'Kie did not finish within 30 minutes.' } })] })
+    const props = blockProps('rt')
+    mount(T2V, props)
+    await waitFor(() => expect(props.setExecutionStatus).toHaveBeenLastCalledWith('error', 'Kie did not finish within 30 minutes.'))
+    const panel = within(await screen.findByTestId('run-status'))
+    expect(panel.getByText('The generation timed out')).toBeInTheDocument()
+    expect(panel.getByText('Kie did not finish within 30 minutes.')).toBeInTheDocument()
+  })
+
+  it('a resumed job that failed, or finished without an output, shows the failure', async () => {
+    pending('rf', 'job-f')
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ job_id: 'job-f', status: 'COMPLETED', outputs: [] })] })
+    const props = blockProps('rf')
+    mount(T2V, props)
+    await waitFor(() => expect(props.setExecutionStatus).toHaveBeenLastCalledWith('error', 'The job finished without a video.'))
+    expect(within(await screen.findByTestId('run-status')).getByText('The generation did not finish')).toBeInTheDocument()
+  })
+
+  it('a normal run of a job cancelled elsewhere shows Cancelled and fails the block with the job text', async () => {
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ status: 'CANCELLED' })] })
+    const props = blockProps('nc')
+    mount(T2V, props)
+    fireEvent.change(await screen.findByLabelText('Generation Prompt'), { target: { value: 'x' } })
+    let error: unknown
+    await act(async () => { error = await latestExecute(props)({}, new AbortController().signal).catch((e) => e) })
+    expect((error as Error).message).toBe('The generation was cancelled.')
+    expect(within(screen.getByTestId('run-status')).getByText('The generation was cancelled')).toBeInTheDocument()
+  })
+
+  it('a normal run that timed out shows Timed out', async () => {
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ status: 'TIMED_OUT', error: { kind: 'timeout', message: 'Too slow.' } })] })
+    const props = blockProps('nt')
+    mount(T2V, props)
+    fireEvent.change(await screen.findByLabelText('Generation Prompt'), { target: { value: 'x' } })
+    await act(async () => { await latestExecute(props)({}, new AbortController().signal).catch(() => undefined) })
+    expect(within(screen.getByTestId('run-status')).getByText('The generation timed out')).toBeInTheDocument()
+  })
+})
+
+describe('GenerationBlockShell between runs', () => {
+  const WARNING = { code: 'unverified_behaviour', severity: 'warning', field: 'settings.real_people', message: 'Kie may reject real people.' }
+  const PROMPT_ERROR = { code: 'prompt_required', severity: 'error', field: 'prompt', message: 'Seedance 2 on Kie needs a prompt for Text to Video.' }
+
+  it("the next run does not show the previous run's warnings", async () => {
+    let call = 0
+    stubGenerationFetch({
+      catalog: CATALOG_BOTH,
+      validate: () => (++call === 1 ? { body: { ok: true, issues: [WARNING] } } : { body: { ok: false, issues: [PROMPT_ERROR] } }),
+      jobs: [jobSnapshot({ status: 'COMPLETED', outputs: [{ kind: 'video', url: 'https://cdn/o.mp4' }] })],
+    })
+    const props = blockProps('w1')
+    mount(T2V, props)
+    fireEvent.change(await screen.findByLabelText('Generation Prompt'), { target: { value: 'x' } })
+    await act(async () => { await latestExecute(props)({}, new AbortController().signal) })
+    // The first run's warning stays visible after it completes.
+    expect(within(screen.getByTestId('run-status')).getByText(WARNING.message)).toBeInTheDocument()
+
+    await act(async () => { await latestExecute(props)({}, new AbortController().signal).catch(() => undefined) })
+    const status = within(screen.getByTestId('run-status'))
+    expect(status.queryByText(WARNING.message)).toBeNull()
+    expect(status.getByText(PROMPT_ERROR.message)).toBeInTheDocument()
+  })
+
+  it("a run refused before it is submitted does not keep showing the previous run's error", async () => {
+    stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ status: 'FAILED', error: { kind: 'content_rejected', message: 'Kie rejected the prompt.' } })] })
+    const props = { ...blockProps('w2'), hasUpstreamProducer: vi.fn(() => true) }
+    seed('w2', { use_upstream_prompt: true })
+    mount(T2V, props)
+    await screen.findByText('Uses the prompt from the upstream block')
+    await act(async () => { await latestExecute(props)({ text: 'a cat' }, new AbortController().signal).catch(() => undefined) })
+    expect(within(screen.getByTestId('run-status')).getByText('Kie rejected the prompt.')).toBeInTheDocument()
+
+    let error: unknown
+    await act(async () => { error = await latestExecute(props)({ text: '  ' }, new AbortController().signal).catch((e) => e) })
+    expect((error as Error).message).toMatch(/^The prompt from the upstream block is empty\./)
+    expect(screen.queryByTestId('run-status')).toBeNull()
+  })
+})
+
 describe('GenerationBlockShell model switching', () => {
   const upstreamImages = (n: number) => ({ image: Array.from({ length: n }, (_, i) => ({ kind: 'image-ref', local: `/outputs/img-${i}.png` })) })
 
@@ -229,6 +341,30 @@ describe('GenerationBlockShell model switching', () => {
     await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('PiAPI'))!)
     expect(screen.getByText('Resolution 4k is not available for Seedance 2 on PiAPI; reset to 480p.')).toBeInTheDocument()
     expect(JSON.parse(sessionStorage.getItem('block_m3_params')!).resolution).toBeNull()
+  })
+
+  it('switching provider keeps a model the new provider does not offer, and says so (behaviour pinned)', async () => {
+    const user = userEvent.setup()
+    const harness = stubGenerationFetch({ catalog: CATALOG_BOTH })
+    seed('m6', { provider: 'kie', model: 'wan-3.0', prompt: 'p' })
+    const props = blockProps('m6')
+    mount(T2V, props)
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('PiAPI'))!)
+    expect(JSON.parse(sessionStorage.getItem('block_m6_provider')!)).toBe('piapi')
+    expect(JSON.parse(sessionStorage.getItem('block_m6_model')!)).toBe('wan-3.0')
+    expect(await screen.findByText('Wan 3.0 is not available on PiAPI')).toBeInTheDocument()
+    await expect(latestExecute(props)({}, new AbortController().signal)).rejects.toThrow(/PiAPI/)
+    expect(harness.requests('/api/generation/validate')).toHaveLength(0)
+  })
+
+  it('does not write the resolved selection back to storage', async () => {
+    stubGenerationFetch({ catalog: CATALOG_BOTH })
+    mount(T2V, blockProps('m7'))
+    expect(await screen.findByRole('combobox', { name: 'Model' })).toHaveTextContent('Seedance 2')
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    expect(sessionStorage.getItem('block_m7_provider')).toBe('null')
+    expect(sessionStorage.getItem('block_m7_model')).toBe('null')
   })
 
   it('says "needs at least 1 image" in the singular', async () => {

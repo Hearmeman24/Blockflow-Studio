@@ -216,6 +216,40 @@ describe('estimate stability', () => {
   })
 })
 
+describe('estimate after the block was not estimable', () => {
+  it("never shows the previous model's price while the new model's estimate loads", async () => {
+    const user = userEvent.setup()
+    let release: (() => void) | null = null
+    let hold = false
+    const harness = stubGenerationFetch({
+      catalog: CATALOG_BOTH,
+      estimate: (body) => ({ body: { ok: true, estimate: { ...ESTIMATE, amount: (body as { model: string }).model === 'wan-3.0' ? 111 : 999 } } }),
+    })
+    const original = harness.fetchMock.getMockImplementation()!
+    harness.fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === '/api/generation/estimate' && hold) await new Promise<void>((resolve) => { release = resolve })
+      return original(input, init)
+    })
+    seed('e1', { provider: 'kie', model: 'wan-3.0', prompt: 'a' })
+    renderGenerationBlock(getBlockDef('textToVideo')!.component, blockProps('e1'))
+    expect(await screen.findByTestId('cost-estimate-chip', {}, { timeout: 2000 })).toHaveTextContent('111')
+
+    // PiAPI does not offer Wan 3.0: no estimate, no chip.
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('PiAPI'))!)
+    await waitFor(() => expect(screen.queryByTestId('cost-estimate-chip')).toBeNull())
+
+    // A model PiAPI offers: while its estimate loads, Wan 3.0's price must not come back.
+    hold = true
+    await user.click(screen.getByRole('combobox', { name: 'Model' }))
+    await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('Seedance 2') && !/Seedance 2(\.5| Fast| Mini)/.test(o.textContent ?? ''))!)
+    await waitFor(() => expect(release).not.toBeNull(), { timeout: 2000 })
+    expect(screen.queryByTestId('cost-estimate-chip')).toBeNull()
+    act(() => release!())
+    expect(await screen.findByTestId('cost-estimate-chip')).toHaveTextContent('999')
+  })
+})
+
 describe('actual cost is not shown in the generation block', () => {
   it('renders no job cost after a job with a cost finishes, and puts it on the output ref', async () => {
     stubGenerationFetch({
