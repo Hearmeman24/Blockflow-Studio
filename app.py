@@ -357,7 +357,7 @@ def main() -> None:
 def _launch() -> LaunchOutcome:
     _line_buffered_output()
     if "--advanced" in sys.argv:
-        os.environ["SGS_ADVANCED"] = "1"
+        os.environ["BLOCKFLOW_ADVANCED"] = "1"
         print("[app] Advanced mode enabled")
 
     packaged = _is_packaged_mode()

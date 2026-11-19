@@ -227,3 +227,29 @@ def test_video_upload_route_reports_local_only_without_network(monkeypatch):
         "error": "Remote asset upload is disabled by local-only storage mode",
         "provider": "local_only",
     }
+
+
+def test_remote_upload_sends_the_app_user_agent(monkeypatch):
+    import io
+    import json
+
+    from backend import asset_uploads, tmpfiles
+
+    seen = []
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake(req, timeout=0):
+        seen.append(req.get_header("User-agent"))
+        body = {"data": {"url": "https://tmpfiles.org/dl/1751980000.deadbeef01/abc/a.png"}}
+        return _Resp(json.dumps(body).encode())
+
+    monkeypatch.setattr(asset_uploads.urllib.request, "urlopen", fake)
+    asset_uploads._upload_to_tmpfiles(b"x", "a.png", "image/png")
+    assert seen == [tmpfiles.USER_AGENT]
+    assert seen == ["Mozilla/5.0 (compatible; BlockFlow-Studio/1.0)"]

@@ -81,3 +81,13 @@ def test_tracked_files_do_not_point_into_private_notes():
     hits = sorted(rel for rel, text in tracked_text().items()
                   if rel not in PRIVATE_PATH_ALLOWED and PRIVATE_PATH.search(text))
     assert not hits, f"paths into {PRIVATE_DOCS}/ in: {hits}"
+
+
+# Identifiers from the project's former name. The metadata key `sgs_meta` in
+# output files is kept on purpose, so only these exact forms are checked.
+OLD_NAME = re.compile(r"SGS_ADVANCED|SGS-UI|sgs-ui-file-picker", re.I)
+
+
+def test_tracked_files_do_not_use_the_old_project_identifiers():
+    hits = sorted(rel for rel, text in tracked_text().items() if OLD_NAME.search(text))
+    assert not hits, f"old project identifiers in: {hits}"

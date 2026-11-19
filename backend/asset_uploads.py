@@ -74,7 +74,7 @@ def _upload_to_tmpfiles(data: bytes, filename: str, content_type: str) -> str:
         headers={
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(multipart_body)),
-            "User-Agent": "Mozilla/5.0 (compatible; SGS-UI/1.0)",
+            "User-Agent": tmpfiles.USER_AGENT,
         },
     )
     with urllib.request.urlopen(req, timeout=120) as resp:

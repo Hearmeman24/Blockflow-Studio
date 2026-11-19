@@ -192,4 +192,4 @@ def _load_env_file(path: Path) -> None:
 _load_env_file(ROOT_DIR / ".env")
 
 # Exposed to the frontend through GET /api/advanced.
-ADVANCED_MODE = os.getenv("SGS_ADVANCED", "").strip().lower() in ("1", "true", "yes")
+ADVANCED_MODE = os.getenv("BLOCKFLOW_ADVANCED", "").strip().lower() in ("1", "true", "yes")

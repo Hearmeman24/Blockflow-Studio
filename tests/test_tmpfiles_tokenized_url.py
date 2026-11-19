@@ -72,3 +72,33 @@ def test_direct_file_response_returns_url_unchanged(monkeypatch):
     )
     url = "https://tmpfiles.org/dl/wTwzvb8k77mC/dummy.png"
     assert tmpfiles.resolve_tokenized_url(url) == url
+
+
+def test_user_agent_is_declared_once_and_names_this_app():
+    assert tmpfiles.USER_AGENT == "Mozilla/5.0 (compatible; BlockFlow-Studio/1.0)"
+
+
+def test_tokenized_url_fetch_sends_the_app_user_agent(monkeypatch):
+    seen = []
+
+    def fake(req, timeout=0):
+        seen.append(req.get_header("User-agent"))
+        return _FakeResponse(PREVIEW_HTML, "text/html; charset=utf-8")
+
+    monkeypatch.setattr(tmpfiles.urllib.request, "urlopen", fake)
+    tmpfiles.resolve_tokenized_url("https://tmpfiles.org/dl/wTwzvb8k77mC/dummy.png")
+    assert seen == [tmpfiles.USER_AGENT]
+
+
+def test_tmpfiles_upload_sends_the_app_user_agent(monkeypatch, tmp_path):
+    seen = []
+
+    def fake(req, timeout=0):
+        seen.append(req.get_header("User-agent"))
+        return _FakeResponse(b'{"data": {"url": "' + TOKENIZED.encode() + b'"}}', "application/json")
+
+    monkeypatch.setattr(tmpfiles.urllib.request, "urlopen", fake)
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x")
+    tmpfiles.upload_to_tmpfiles(f)
+    assert seen == [tmpfiles.USER_AGENT]

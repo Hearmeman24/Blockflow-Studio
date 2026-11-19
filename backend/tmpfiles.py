@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 
 TMPFILES_UPLOAD_URL = "https://tmpfiles.org/api/v1/upload"
+# Sent with every request to tmpfiles.org (backend.asset_uploads uses it too).
+USER_AGENT = "Mozilla/5.0 (compatible; BlockFlow-Studio/1.0)"
 
 # tmpfiles.org direct links are now /dl/<timestamp>.<token>/<id>/<file>;
 # the tokenless /dl/<id>/<file> path serves an HTML preview page instead.
@@ -62,7 +64,7 @@ def upload_to_tmpfiles(file_path: Path) -> str:
         headers={
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(multipart_body)),
-            "User-Agent": "Mozilla/5.0 (compatible; SGS-UI/1.0)",
+            "User-Agent": USER_AGENT,
         },
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -91,7 +93,7 @@ def resolve_tokenized_url(url: str) -> str:
         return url
 
     req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (compatible; SGS-UI/1.0)"}
+        url, headers={"User-Agent": USER_AGENT}
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:

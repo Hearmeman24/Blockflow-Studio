@@ -18,7 +18,7 @@ export interface PickFilesOptions {
   description?: string
 }
 
-const DB_NAME = 'sgs-ui-file-picker'
+const DB_NAME = 'blockflow-studio-file-picker'
 const DB_VERSION = 1
 const STORE = 'handles'
 

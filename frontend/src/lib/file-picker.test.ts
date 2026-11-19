@@ -5,8 +5,10 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 // a getFile() method. Stub a tiny reference-equality IDB instead so tests can
 // store and retrieve the actual handle object.
 const memoryStore = new Map<string, unknown>()
+const openedNames: string[] = []
 const fakeIdb = {
-  open: () => {
+  open: (name: string) => {
+    openedNames.push(name)
     const req: { onupgradeneeded: (() => void) | null; onsuccess: (() => void) | null; onerror: (() => void) | null; result: unknown } = {
       onupgradeneeded: null,
       onsuccess: null,
@@ -207,5 +209,20 @@ describe('pickFiles — fallback (<input>) path', () => {
     const result = await pickFiles({ slug: 'fallback-cancel', accept: 'image/*' })
     expect(result).toBeNull()
     createSpy.mockRestore()
+  })
+})
+
+describe('pickFiles - saved-folder database', () => {
+  it('uses the BlockFlow Studio database name', async () => {
+    // The module keeps its connection after the first open, so this reads the
+    // names recorded since the file started.
+    memoryStore.clear()
+    ;(window as unknown as { showOpenFilePicker: () => Promise<unknown[]> }).showOpenFilePicker = async () => [
+      makeHandle(makeFile('a.png', 'image/png')),
+    ]
+    await pickFiles({ slug: 'db-name-slug', accept: 'image/*', description: 'Images' })
+    delete (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker
+    expect(openedNames.length).toBeGreaterThan(0)
+    expect(new Set(openedNames)).toEqual(new Set(['blockflow-studio-file-picker']))
   })
 })

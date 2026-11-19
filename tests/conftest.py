@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
 # tests that exercise these settings set their own with monkeypatch.
 SESSION_DATA_DIR = Path(tempfile.mkdtemp(prefix="blockflow-test-data-"))
 os.environ["BLOCKFLOW_DATA_DIR"] = str(SESSION_DATA_DIR)
-for _name in ("BLOCKFLOW_HOME", "FRONTEND_PORT", "BACKEND_PORT", "BLOCKFLOW_ALLOWED_ORIGINS"):
+for _name in ("BLOCKFLOW_HOME", "FRONTEND_PORT", "BACKEND_PORT", "BLOCKFLOW_ALLOWED_ORIGINS", "BLOCKFLOW_ADVANCED"):
     os.environ.pop(_name, None)
 atexit.register(shutil.rmtree, SESSION_DATA_DIR, ignore_errors=True)
 
