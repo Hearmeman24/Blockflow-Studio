@@ -1,5 +1,5 @@
 """The FastMCP wrapper (blockflow_mcp/server.py) registers exactly the expected
-tools. Needs fastmcp: run with `uv run --with fastmcp pytest tests/test_mcp_*.py`.
+tools. Needs fastmcp: run with `uv run --with fastmcp python -m pytest tests/test_mcp_*.py`.
 The tool logic itself is tested without FastMCP in test_mcp_tools.py."""
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def test_generate_description_says_it_spends_credits():
 
 
 def test_fastmcp_registers_exactly_the_expected_tools():
-    pytest.importorskip("fastmcp", reason="run with `uv run --with fastmcp pytest tests/test_mcp_*.py`")
+    pytest.importorskip("fastmcp", reason="run with `uv run --with fastmcp python -m pytest tests/test_mcp_*.py`")
     mcp = server.build_server()
     tools = asyncio.run(mcp.list_tools())
     names = {t.name for t in tools}

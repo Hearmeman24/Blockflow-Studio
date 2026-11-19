@@ -115,9 +115,9 @@ needs their explicit yes.
 | `uv run python scripts/setup.py [--check]` | Install or repair everything, idempotently, including the Python dev tools for tests and lint (`uv run app.py` installs only what the app needs). Refuses `npm ci` while this checkout's app is running. |
 | `uv run ruff check .` | Python lint. Before every hand-off. |
 | `uv run pytest tests/ -q` | Backend tests. Focused: `uv run pytest tests/test_byok_service.py -q`. |
-| `uv run --with fastmcp pytest tests/test_mcp_*.py -q` | MCP tests including the FastMCP registration test (skipped without `--with fastmcp`). |
+| `uv run --with fastmcp python -m pytest tests/test_mcp_*.py -q` | MCP tests including the FastMCP registration test (needs `--with fastmcp`; `python -m pytest`, because `.venv/bin/pytest` cannot import the overlay and skips it). |
 | `npm --prefix frontend run gen:custom-blocks` | Block codegen. After adding, renaming or removing a block. |
-| `npm --prefix frontend exec tsc -- --noEmit` | Type check. |
+| `npm --prefix frontend exec -- tsc --noEmit -p frontend` | Type check. |
 | `npm --prefix frontend run lint` | ESLint; 0 errors required, warnings allowed. |
 | `npm --prefix frontend test` | Vitest. Focused: `npm --prefix frontend test -- model-select`. |
 | `npm --prefix frontend run build` | Production build. Not while a dev server from the same checkout is running. |

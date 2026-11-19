@@ -8,7 +8,11 @@ off. Tests that exercise the refresh install their own fake transport.
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,6 +20,20 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The session runs in a known environment, not the shell's. The backend reads
+# these at first import: backend.config resolves the user data folder and
+# backend.db the run-history database path (point both at a throwaway folder,
+# so importing backend.main never opens a database in the user's real data
+# folder), and backend.origin_guard builds the CORS/origin allow-list from the
+# ports and BLOCKFLOW_ALLOWED_ORIGINS (the defaults apply when unset). Any
+# value the shell held is dropped here, before any test imports the backend;
+# tests that exercise these settings set their own with monkeypatch.
+SESSION_DATA_DIR = Path(tempfile.mkdtemp(prefix="blockflow-test-data-"))
+os.environ["BLOCKFLOW_DATA_DIR"] = str(SESSION_DATA_DIR)
+for _name in ("BLOCKFLOW_HOME", "FRONTEND_PORT", "BACKEND_PORT", "BLOCKFLOW_ALLOWED_ORIGINS"):
+    os.environ.pop(_name, None)
+atexit.register(shutil.rmtree, SESSION_DATA_DIR, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
