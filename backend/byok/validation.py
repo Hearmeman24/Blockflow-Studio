@@ -429,17 +429,6 @@ def _rule_keep_sound_needs_video(ctx, params, settings, refs) -> None:
                   "Keeping the original sound needs at least one reference video.")
 
 
-def _rule_keep_audio(ctx, params, settings, refs) -> None:
-    if settings.get("keep_original_audio") is not True:
-        return
-    if not any(r.kind == "video" for r in refs):
-        ctx.error("setting_conflict", "settings.keep_original_audio",
-                  "Keeping the original audio needs at least one reference video.")
-    if effective_setting(ctx.spec, settings, "enable_audio") is not False:
-        ctx.error("setting_conflict", "settings.keep_original_audio",
-                  "Turn off audio generation to keep the reference video's original audio.")
-
-
 def _rule_wan_video_plus_output(ctx, params, settings, refs) -> None:
     durations = [r.duration_s for r in refs if r.kind == "video" and r.duration_s is not None]
     if not durations:
@@ -471,7 +460,6 @@ def _format_rule(allowed: tuple[str, ...], setting: str, value: Any, message: st
 
 _RULES: dict[str, Rule] = {
     "keep_sound_needs_video": _rule_keep_sound_needs_video,
-    "keep_audio_needs_video_and_no_audio": _rule_keep_audio,
     "wan_video_plus_output": _rule_wan_video_plus_output,
     "transparent_needs_png": _format_rule(("png",), "background", "transparent",
                                           "A transparent background needs PNG output."),

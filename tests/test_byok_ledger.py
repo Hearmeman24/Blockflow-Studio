@@ -134,8 +134,6 @@ REFERENCE_LIMITS = [
     ("piapi", "seedance-2.5", "omni_reference_to_video", {"image": 30, "video": 10, "audio": 10}, 50),
     ("kie", "kling-4.0", "omni_reference_to_video", {"image": 10, "video": 5, "audio": 3}, 15),
     ("kie", "kling-4.0-flash", "omni_reference_to_video", {"image": 10, "video": 5}, 15),
-    ("piapi", "kling-4.0", "omni_reference_to_video", {"image": 10, "video": 5, "audio": 3}, 15),
-    ("piapi", "kling-4.0-flash", "omni_reference_to_video", {"image": 10, "video": 5}, 15),
     ("kie", "wan-3.0", "omni_reference_to_video", {"image": 10, "video": 5, "audio": 5}, None),
     ("kie", "wan-3.0-prime", "omni_reference_to_video", {"image": 10, "video": 5, "audio": 5}, None),
     ("kie", "seedream-5-pro", "image_to_image", {"image": 10}, None),
@@ -197,7 +195,7 @@ DURATIONS = [
     ("piapi", "seedance-2.5", "text_to_video", 4, 30, 5, None),
     ("kie", "kling-4.0", "text_to_video", 3, 30, 5, None),
     ("kie", "kling-4.0-flash", "image_to_video", 3, 20, 5, None),
-    ("piapi", "kling-4.0", "omni_reference_to_video", 3, 30, 5, None),
+    ("piapi", "kling-4.0", "image_to_video", 3, 30, 5, None),
     ("piapi", "kling-4.0-flash", "text_to_video", 3, 20, 5, None),
     ("kie", "wan-3.0", "text_to_video", 2, 30, 5, -1),
     ("kie", "wan-3.0-prime", "omni_reference_to_video", 2, 30, 5, -1),
@@ -355,8 +353,8 @@ def test_piapi_seedance_uses_at_image_n(model_id):
 def test_kling_mentions_follow_each_provider():
     kie = _mentions("kie", "kling-4.0", "omni_reference_to_video")
     assert (kie.image, kie.video, kie.audio, kie.documented) == ("@image_{n}", "@video_{n}", "@sound_{n}", True)
-    piapi = _mentions("piapi", "kling-4.0", "omni_reference_to_video")
-    assert (piapi.image, piapi.video, piapi.documented) == ("@image_{n}", "@video_{n}", True)
+    # PiAPI does not offer Kling 4.0 Omni Reference to Video (see test_byok_piapi_kling_omni.py).
+    assert _mentions("piapi", "kling-4.0", "omni_reference_to_video") is None
     frames = _mentions("kie", "kling-4.0", "image_to_video")
     assert (frames.first_frame, frames.last_frame, frames.documented) == ("@first_frame", "@last_frame", True)
 

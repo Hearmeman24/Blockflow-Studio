@@ -136,7 +136,9 @@ describe('getModeSpec and limits', () => {
       'image', 'video', 'audio',
     ])
     expect(mediaLimit(getModeSpec(CATALOG_BOTH, 'kie', 'kling-4.0', 'omni_reference_to_video')!, 'audio')?.max_count).toBe(3)
-    expect(acceptedKinds(getModeSpec(CATALOG_BOTH, 'piapi', 'kling-4.0', 'omni_reference_to_video')!)).toEqual([
+    // PiAPI does not offer Kling 4.0 in Omni Reference to Video (refused by PiAPI on 2026-11-18).
+    expect(getModeSpec(CATALOG_BOTH, 'piapi', 'kling-4.0', 'omni_reference_to_video')).toBeNull()
+    expect(acceptedKinds(getModeSpec(CATALOG_BOTH, 'piapi', 'seedance-2', 'omni_reference_to_video')!)).toEqual([
       'image', 'video', 'audio',
     ])
   })

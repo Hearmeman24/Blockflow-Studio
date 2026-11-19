@@ -116,6 +116,19 @@ def test_get_model_errors_are_structured(backend, args, kind):
     assert result["ok"] is False and result["error"]["kind"] == kind and result["error"]["message"]
 
 
+@pytest.mark.parametrize("model_id", ["kling-4.0", "kling-4.0-flash"])
+def test_piapi_kling_omni_is_not_listed_and_kie_still_is(backend, model_id):
+    # PiAPI refused Kling 4.0 Omni on 2026-11-18 (backend/byok/catalog.py UNVERIFIED).
+    omni = {m["id"]: m for m in list_models(mode="omni_reference_to_video")["models"]}
+    assert set(omni[model_id]["providers"]) == {"kie"}
+    piapi = next(m for m in list_models(provider="piapi")["models"] if m["id"] == model_id)
+    assert piapi["providers"]["piapi"]["modes"] == ["text_to_video", "image_to_video"]
+    refused = get_model(model_id, "piapi", "omni_reference_to_video")
+    assert refused["ok"] is False and refused["error"]["kind"] == "unsupported_mode"
+    assert refused["error"]["available"] == ["text_to_video", "image_to_video"]
+    assert get_model(model_id, "kie", "omni_reference_to_video")["ok"] is True
+
+
 # ------------------------------------------------------------------ estimate / validate
 
 

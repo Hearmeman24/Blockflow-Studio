@@ -497,12 +497,14 @@ def test_piapi_validate_key():
     assert pi.validate_key(KEY).balance == 5.0 and len(t.calls) == 2
 
 
-def test_piapi_kling_omni_request_round_trip():
+def test_piapi_kling_request_round_trip():
+    # Omni Reference to Video is not offered for Kling on PiAPI; image to video is the reference path.
     pi, t = adapter("piapi", _pi_task("pending"))
-    req = piapi_request("kling-4.0", "omni_reference_to_video", [Reference("image", "https://i.test/a.png")])
+    req = piapi_request("kling-4.0", "image_to_video", [Reference("image", "https://i.test/a.png", role="first_frame")])
     pi.submit(req, KEY)
     sent = json.loads(t.calls[0]["body"])
-    assert sent["config"] == {"service_mode": "public"} and sent["task_type"] == "omni_video_generation"
+    assert sent["config"] == {"service_mode": "public"} and sent["task_type"] == "video_generation"
+    assert sent["input"]["image_url"] == "https://i.test/a.png"
 
 
 # =========================================================================

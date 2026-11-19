@@ -229,12 +229,11 @@ def test_piapi_seedance_input_video_is_billed_at_half_rate():
     assert e["amount"] == pytest.approx(0.80 * 10 + 0.40 * 4)
 
 
-def test_piapi_kling_omni_with_reference_video():
+@pytest.mark.parametrize("model_id", ["kling-4.0", "kling-4.0-flash"])
+def test_piapi_kling_omni_is_not_offered_so_not_priced(model_id):
     refs = [{"kind": "video", "url": "https://x.test/a.mp4", "duration_s": 6.667}]
-    e = est("piapi", "kling-4.0", "omni_reference_to_video",
-            {"prompt": "x", "duration": 5, "resolution": "720p"}, refs)
-    # doc example: (5 + 6.667) * $0.10 -> $1.17
-    assert e["amount"] == pytest.approx(1.17)
+    assert est("piapi", model_id, "omni_reference_to_video",
+               {"prompt": "x", "duration": 5, "resolution": "720p"}, refs) is None
 
 
 def test_piapi_kling_video_generation_rounds_to_cents():

@@ -120,7 +120,20 @@ describe('useDownstreamLimits', () => {
     )
     await waitFor(() => expect(consumers()).toBe('Omni Reference to Video:Kling 4.0@Kie=5'))
     act(() => screen.getByRole('button', { name: 'set provider piapi' }).click())
-    await waitFor(() => expect(consumers()).toBe('Omni Reference to Video:Kling 4.0@PiAPI=5'))
+    // PiAPI does not offer Kling 4.0 in Omni Reference to Video (refused by PiAPI on 2026-11-18),
+    // so the consumer no longer accepts videos there.
+    await waitFor(() => expect(consumers()).toBe('Omni Reference to Video:Kling 4.0@PiAPI=no'))
+  })
+
+  it('updates live between two providers that both take the kind', async () => {
+    renderFlow(
+      [{ type: 'videoLoader' }, { type: 'omniReferenceToVideo', config: { provider: 'kie', model: 'seedance-2' } }],
+      'video',
+      <Selector index={1} field="provider" value="piapi" />,
+    )
+    await waitFor(() => expect(consumers()).toBe('Omni Reference to Video:Seedance 2@Kie=3'))
+    act(() => screen.getByRole('button', { name: 'set provider piapi' }).click())
+    await waitFor(() => expect(consumers()).toBe('Omni Reference to Video:Seedance 2@PiAPI=3'))
   })
 
   it('ignores disabled consumers', async () => {

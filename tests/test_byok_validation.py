@@ -138,8 +138,8 @@ def test_media_kind_not_accepted_in_mode():
 
 def test_legacy_voice_kind_is_audio_on_every_model():
     voice = {"kind": "voice", "url": "https://x.test/v.mp3", "name": "Narrator"}
-    for provider in ("piapi", "kie"):
-        assert codes(validate_request(provider, "kling-4.0", "omni_reference_to_video", P, [img(), voice])) == []
+    for provider, model_id in (("piapi", "seedance-2"), ("kie", "kling-4.0")):
+        assert codes(validate_request(provider, model_id, "omni_reference_to_video", P, [img(), voice])) == []
     issue = only(validate_request("kie", "kling-4.0-flash", "omni_reference_to_video", P, [img(), voice]),
                  "media_kind_not_accepted")
     assert issue.field == "references.audio"
@@ -162,7 +162,7 @@ def test_missing_url():
     ("piapi", "seedance-2.5", "image", 30),
     ("kie", "wan-3.0", "video", 5),
     ("kie", "kling-4.0", "audio", 3),
-    ("piapi", "kling-4.0", "audio", 3),
+    ("piapi", "seedance-2", "audio", 3),
 ])
 def test_per_kind_count_boundaries(provider, model_id, kind, limit):
     make = {"image": img, "video": vid, "audio": aud}[kind]
@@ -208,8 +208,7 @@ def test_upscaler_accepts_exactly_one_image():
                                                            [img(), img()]))
 
 
-@pytest.mark.parametrize("provider,model_id", [("kie", "seedance-2"), ("piapi", "seedance-2"),
-                                               ("piapi", "kling-4.0"), ("kie", "kling-4.0")])
+@pytest.mark.parametrize("provider,model_id", [("kie", "seedance-2"), ("piapi", "seedance-2"), ("kie", "kling-4.0")])
 def test_audio_only_forbidden(provider, model_id):
     refs = [aud()]
     assert "audio_only_not_allowed" in codes(validate_request(provider, model_id, "omni_reference_to_video", P, refs))
@@ -455,11 +454,6 @@ def test_kling_keep_sound_rules():
     keep = {**P, "settings": {"keep_original_sound": True}}
     assert "setting_conflict" in codes(validate_request("kie", "kling-4.0", "omni_reference_to_video", keep, [img()]))
     assert codes(validate_request("kie", "kling-4.0", "omni_reference_to_video", keep, [vid()])) == []
-    keep_audio = {**P, "settings": {"keep_original_audio": True}}
-    found = codes(validate_request("piapi", "kling-4.0", "omni_reference_to_video", keep_audio, [vid()]))
-    assert found == ["setting_conflict"]
-    fixed = {**P, "settings": {"keep_original_audio": True, "enable_audio": False}}
-    assert codes(validate_request("piapi", "kling-4.0", "omni_reference_to_video", fixed, [vid()])) == []
 
 
 def test_wan_reference_video_plus_output_limit():

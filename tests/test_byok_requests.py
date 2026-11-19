@@ -262,18 +262,6 @@ PIAPI_CASES = [
       "input": {"prompt": PROMPT, "version": "4.0-flash", "duration": 5, "mode": "std", "aspect_ratio": "9:16",
                 "image_url": I1},
       "config": {"service_mode": "public"}}),
-    ("kling-4.0", "omni_reference_to_video", {"prompt": "@image_1 with audio_1"},
-     [ref("image", I1), ref("audio", A1)],
-     {"model": "kling", "task_type": "omni_video_generation",
-      "input": {"prompt": "@image_1 with audio_1", "version": "4.0", "duration": 5, "resolution": "720p",
-                "aspect_ratio": "auto", "enable_audio": True, "images": [I1], "audio_urls": [A1]},
-      "config": {"service_mode": "public"}}),
-    ("kling-4.0-flash", "omni_reference_to_video",
-     {"prompt": PROMPT, "settings": {"enable_audio": False, "keep_original_audio": True}}, [ref("video", V1)],
-     {"model": "kling", "task_type": "omni_video_generation",
-      "input": {"prompt": PROMPT, "version": "4.0-flash", "duration": 5, "resolution": "720p",
-                "aspect_ratio": "auto", "enable_audio": False, "videos": [V1], "keep_original_audio": True},
-      "config": {"service_mode": "public"}}),
     # --- Seedream --------------------------------------------------------------
     ("seedream-5-pro", "text_to_image", {"prompt": PROMPT}, [],
      {"model": "seedream", "task_type": "seedream-5-pro",
@@ -343,14 +331,13 @@ def test_every_supported_provider_model_mode_has_a_request_case():
 
 def test_kling_on_piapi_sends_only_documented_fields():
     allowed_gen = {"prompt", "version", "duration", "mode", "aspect_ratio", "image_url", "image_tail_url"}
-    allowed_omni = {"prompt", "version", "resolution", "duration", "aspect_ratio", "enable_audio", "images",
-                    "videos", "audio_urls", "keep_original_audio"}
     for model, mode, params, refs, _ in PIAPI_CASES:
         if not model.startswith("kling"):
             continue
         body = build("piapi", model, mode, params, refs).body
-        allowed = allowed_omni if body["task_type"] == "omni_video_generation" else allowed_gen
-        assert set(body["input"]) <= allowed
+        # PiAPI refuses Kling 4.0 omni_video_generation, so only video_generation is ever sent.
+        assert body["task_type"] == "video_generation"
+        assert set(body["input"]) <= allowed_gen
         assert set(body) == {"model", "task_type", "input", "config"}
 
 
@@ -361,13 +348,14 @@ def test_auto_upload_assets_never_sent_on_strict_task_types():
             assert "auto_upload_assets" not in body["input"]
 
 
-def test_kie_kling_audio_is_sent_as_voices_and_piapi_as_audio():
+def test_kie_kling_audio_is_sent_as_voices_and_piapi_kling_omni_is_refused():
     audio = ref("audio", A1)
     kie = build("kie", "kling-4.0", "omni_reference_to_video", {"prompt": PROMPT}, [ref("image", I1), audio]).body
     assert kie["input"]["voices"] == [{"name": "sound_1", "audio_url": A1}]
     assert "audio_urls" not in kie["input"]
-    piapi = build("piapi", "kling-4.0", "omni_reference_to_video", {"prompt": PROMPT}, [ref("image", I1), audio]).body
-    assert "voices" not in piapi["input"]
+    with pytest.raises(ProviderError) as exc:
+        build("piapi", "kling-4.0", "omni_reference_to_video", {"prompt": PROMPT}, [ref("image", I1), audio])
+    assert exc.value.kind == "unsupported" and exc.value.provider_code == "mode_unsupported"
 
 
 def test_build_request_raises_validation_with_issues():

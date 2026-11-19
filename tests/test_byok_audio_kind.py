@@ -109,7 +109,15 @@ def test_other_modes_are_unchanged_except_the_voice_template():
         if key == "kie/kling-4.0-flash/omni_reference_to_video":
             # Kling/Kie: the voice-name rule was declared on Flash too (it took no voices).
             expected["rules"] = [r for r in expected["rules"] if r != "kling_voice_names"]
+        if key in PIAPI_KLING_OMNI_REMOVED:
+            # PiAPI refused Kling 4.0 Omni on 2026-11-18; the offering was removed (test_byok_piapi_kling_omni.py).
+            assert now[key]["supported"] is False and now[key]["unavailable_reason"] == catalog.PIAPI_KLING_NO_OMNI
+            continue
         assert now[key] == expected, key
+    assert PIAPI_KLING_OMNI_REMOVED & set(before), "the exception above is no longer exercised"
+
+
+PIAPI_KLING_OMNI_REMOVED = {"piapi/kling-4.0/omni_reference_to_video", "piapi/kling-4.0-flash/omni_reference_to_video"}
 
 
 def _without_voice_template(value):
@@ -207,9 +215,10 @@ def test_kie_kling_voice_alias_sends_generated_names_only():
     assert "audio_urls" not in body["input"]
 
 
-def test_piapi_kling_and_kie_seedance_take_the_voice_alias_as_plain_audio():
-    audio = build("piapi", "kling-4.0", "omni_reference_to_video", [Reference("image", I1), Reference("audio", A1)])
-    alias = build("piapi", "kling-4.0", "omni_reference_to_video",
+def test_piapi_seedance_and_kie_seedance_take_the_voice_alias_as_plain_audio():
+    # PiAPI no longer offers Kling 4.0 Omni (test_byok_piapi_kling_omni.py); Seedance 2 is the PiAPI case.
+    audio = build("piapi", "seedance-2", "omni_reference_to_video", [Reference("image", I1), Reference("audio", A1)])
+    alias = build("piapi", "seedance-2", "omni_reference_to_video",
                   [{"kind": "image", "url": I1}, {"kind": "voice", "url": A1, "name": "Narrator"}])
     assert alias == audio and "voices" not in json.dumps(audio)
     sd = build("kie", "seedance-2", "omni_reference_to_video",
@@ -309,7 +318,8 @@ def test_validate_route_reads_voice_as_audio(env):
     for kind in ("audio", "voice"):
         r = client.post("/api/generation/validate", json=_body(kind, name="not a valid name!"))
         assert r.json() == {"ok": True, "issues": []}, kind
-    piapi = {**_body("voice", name="Narrator"), "provider": "piapi"}
+    # PiAPI no longer offers Kling 4.0 Omni (test_byok_piapi_kling_omni.py); Seedance 2 takes the alias there.
+    piapi = {**_body("voice", name="Narrator"), "provider": "piapi", "model": "seedance-2"}
     assert client.post("/api/generation/validate", json=piapi).json() == {"ok": True, "issues": []}
 
 

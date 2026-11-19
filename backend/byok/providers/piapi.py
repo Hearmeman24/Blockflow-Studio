@@ -141,28 +141,21 @@ def _seedance(prep: Prepared) -> tuple[str, dict[str, Any], dict[str, Any] | Non
 
 
 def _kling(prep: Prepared) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+    # Only video_generation (text and image to video) is offered: PiAPI refuses Kling 4.0
+    # omni_video_generation (catalog.PIAPI_KLING_NO_OMNI), so no omni body is built.
     p, spec = prep.params, prep.spec
-    body: dict[str, Any] = {"prompt": p["prompt"], "version": spec.ids.version, "duration": p["duration"]}
-    if spec.ids.task_type == "video_generation":
-        body["mode"] = "pro" if p["resolution"] == "1080p" else "std"
-        if p["aspect_ratio"] is not None:
-            body["aspect_ratio"] = p["aspect_ratio"]
-        first, last = prep.frame("first_frame"), prep.frame("last_frame")
-        if first:
-            body["image_url"] = first
-        if last:
-            body["image_tail_url"] = last
-    else:
-        body["resolution"] = p["resolution"]
-        if p["aspect_ratio"] is not None:
-            body["aspect_ratio"] = p["aspect_ratio"]
-        body["enable_audio"] = prep.setting("enable_audio")
-        for kind, field_name in (("image", "images"), ("video", "videos"), ("audio", "audio_urls")):
-            urls = prep.by_kind(kind)
-            if urls:
-                body[field_name] = urls
-        if prep.by_kind("video"):
-            body["keep_original_audio"] = prep.setting("keep_original_audio")
+    if spec.ids.task_type != "video_generation":
+        raise ProviderError("unsupported", f"PiAPI Kling task type '{spec.ids.task_type}' has no request mapping.",
+                            provider="piapi", retryable=False)
+    body: dict[str, Any] = {"prompt": p["prompt"], "version": spec.ids.version, "duration": p["duration"],
+                            "mode": "pro" if p["resolution"] == "1080p" else "std"}
+    if p["aspect_ratio"] is not None:
+        body["aspect_ratio"] = p["aspect_ratio"]
+    first, last = prep.frame("first_frame"), prep.frame("last_frame")
+    if first:
+        body["image_url"] = first
+    if last:
+        body["image_tail_url"] = last
     return spec.ids.task_type, body, {"service_mode": "public"}
 
 

@@ -12,7 +12,6 @@ from dataclasses import replace
 
 from backend.byok.spec import (
     MB,
-    MIB,
     ChoiceSpec,
     DurationSpec,
     FrameSpec,
@@ -247,27 +246,17 @@ def _kie_kling(*, flash: bool) -> ProviderOffering:
     )
 
 
+# PiAPI refused Kling 4.0 omni_video_generation at submit on 2026-11-18; see UNVERIFIED.
+PIAPI_KLING_NO_OMNI = ("PiAPI does not run Kling 4.0 Omni generation yet. Use Kie for Omni Reference to Video, "
+                       "or Text to Video or Image to Video on PiAPI.")
+
+
 def _piapi_kling(*, flash: bool) -> ProviderOffering:
     version = "4.0-flash" if flash else "4.0"
     gen_ids = ProviderModelId("kling", "video_generation", version)
-    omni_ids = ProviderModelId("kling", "omni_video_generation", version)
     prompt = PromptSpec("required", 2500)
     duration = DurationSpec(3, 20 if flash else 30, 5)
     res = ChoiceSpec(("720p",), "720p") if flash else ChoiceSpec(("720p", "1080p"), "720p")
-    omni_media: tuple[MediaLimit, ...] = (
-        MediaLimit("image", 10),
-        MediaLimit("video", 5, formats=("mp4",), max_size_bytes=300 * MIB, min_duration_s=3,
-                   max_duration_s=20 if flash else 30, max_total_duration_s=20 if flash else 30,
-                   min_aspect=0.4, max_aspect=2.5),
-    )
-    if not flash:
-        omni_media += (MediaLimit("audio", 3, formats=("mp3", "wav", "flac"), max_size_bytes=50 * MIB,
-                                  min_duration_s=5, max_duration_s=30),)
-    omni_settings = (
-        _bool("enable_audio", "Generate audio", True, "Generate native audio."),
-        _bool("keep_original_audio", "Keep reference video sound", False,
-              "Keep the reference video's original audio. Needs a reference video and audio generation off."),
-    )
     return ProviderOffering(
         provider="piapi",
         offered=True,
@@ -281,12 +270,7 @@ def _piapi_kling(*, flash: bool) -> ProviderOffering:
                      frames=FrameSpec(first_frame_required=True, last_frame_allowed=not flash),
                      mixed_media_allowed=False,
                      notes=("Without an aspect ratio the output follows the first frame.",)),
-            ModeSpec(mode="omni_reference_to_video", supported=True, ids=omni_ids, prompt=prompt,
-                     duration=duration, resolutions=res,
-                     aspect_ratios=ChoiceSpec(("auto", "16:9", "9:16", "1:1", "21:9"), "auto"),
-                     media=omni_media, max_total_references=15, min_total_references=1,
-                     audio_only_allowed=False, settings=omni_settings,
-                     rules=("keep_audio_needs_video_and_no_audio",)),
+            _unsupported("omni_reference_to_video", PIAPI_KLING_NO_OMNI),
         ),
     )
 
@@ -558,8 +542,6 @@ _PIAPI_SEEDANCE = MentionSpec("@image{n}", "@video{n}", "@audio{n}", documented=
 KIE_KLING_AUDIO_NAME = "sound_{n}"
 _KIE_KLING_OMNI = MentionSpec("@image_{n}", "@video_{n}", documented=True)
 _KIE_KLING_4_OMNI = replace(_KIE_KLING_OMNI, audio="@" + KIE_KLING_AUDIO_NAME)
-# PiAPI writes audio as `audio_1` without the @ (Kling 4.0 omni docs).
-_PIAPI_KLING_OMNI = MentionSpec("@image_{n}", "@video_{n}", "audio_{n}", documented=True)
 _KIE_KLING_FRAMES = MentionSpec("@image_{n}", first_frame="@first_frame", last_frame="@last_frame", documented=True)
 _KIE_WAN_OMNI = MentionSpec("Image{n}", "Video{n}", "Audio{n}", documented=True)
 
@@ -571,8 +553,6 @@ MENTIONS: dict[tuple[str, str, str], MentionSpec] = {
     ("kie", "kling-4.0-flash", "omni_reference_to_video"): _KIE_KLING_OMNI,
     ("kie", "kling-4.0", "image_to_video"): _KIE_KLING_FRAMES,
     ("kie", "kling-4.0-flash", "image_to_video"): _KIE_KLING_FRAMES,
-    ("piapi", "kling-4.0", "omni_reference_to_video"): _PIAPI_KLING_OMNI,
-    ("piapi", "kling-4.0-flash", "omni_reference_to_video"): _PIAPI_KLING_OMNI,
     ("kie", "wan-3.0", "omni_reference_to_video"): _KIE_WAN_OMNI,
     ("kie", "wan-3.0-prime", "omni_reference_to_video"): _KIE_WAN_OMNI,
     ("kie", "minimax-h3-image", "image_to_image"): MentionSpec("<Picture {n}>", documented=True),
@@ -716,10 +696,13 @@ UNVERIFIED: tuple[Unverified, ...] = (
                "No prompt length limit is documented."),
     Unverified("piapi", "seedream-5-pro, seedream-5-lite", "output_format",
                "The overview lists jpeg/png/webp; the schema lists png/jpeg. Only png and jpeg are offered."),
-    Unverified("piapi", "kling-4.0, kling-4.0-flash", "omni audio-only",
-               "Whether audio references alone are allowed is undocumented. Rejected."),
-    Unverified("piapi", "kling-4.0, kling-4.0-flash", "omni images",
-               "No image formats or size limits are documented for omni references."),
+    Unverified("piapi", "kling-4.0, kling-4.0-flash", "omni_reference_to_video",
+               "PiAPI documents Kling 4.0 omni_video_generation, but a real submit on 2026-11-18 (kling-4.0, "
+               "one image and one video reference, 720p, 5 s) was refused with: \"Kling 4.0 Omni generation is "
+               "not available yet. Use video_generation, text_to_video, or image_to_video.\" Nothing was "
+               "charged. Not offered on PiAPI for Kling 4.0 or Kling 4.0 Flash: Flash was sent through the "
+               "same omni_video_generation task type with only version '4.0-flash' differing, and was not "
+               "tried. Re-check both with a real run before offering it again."),
     Unverified("piapi", "image-upscaler", "scale / face_enhance",
                "Both appear required with no documented default. Defaults are 2 and false, always sent."),
     Unverified("piapi", "*", "task status",

@@ -86,6 +86,21 @@ describe('GenerationBlockShell states', () => {
     await expect(latestExecute(props)({}, new AbortController().signal)).rejects.toThrow('Requires a PiAPI API key')
   })
 
+  it('a saved selection the catalog no longer offers (PiAPI Kling 4.0 Omni) says why and sends nothing', async () => {
+    const harness = stubGenerationFetch({ catalog: CATALOG_BOTH })
+    seed('s6', { provider: 'piapi', model: 'kling-4.0', prompt: '@image_1 walks in' })
+    const props = blockProps('s6')
+    mount(OMNI, props)
+    expect(await screen.findByText('Kling 4.0 is not available on PiAPI')).toBeInTheDocument()
+    expect(screen.getByText(/PiAPI does not run Kling 4\.0 Omni generation yet\. Use Kie/)).toBeInTheDocument()
+    // The saved values are kept, not silently replaced.
+    expect(JSON.parse(sessionStorage.getItem('block_s6_provider')!)).toBe('piapi')
+    expect(JSON.parse(sessionStorage.getItem('block_s6_model')!)).toBe('kling-4.0')
+    await expect(latestExecute(props)({}, new AbortController().signal)).rejects.toThrow(/PiAPI does not run Kling 4\.0 Omni/)
+    expect(harness.requests('/api/generation/validate')).toHaveLength(0)
+    expect(harness.requests('/api/generation/submit')).toHaveLength(0)
+  })
+
   it('hides the prompt when the mode takes none', async () => {
     stubGenerationFetch({ catalog: CATALOG_BOTH })
     seed('s5', { model: 'image-upscaler' })

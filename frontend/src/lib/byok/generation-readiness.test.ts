@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import { CATALOG_BOTH, CATALOG_KIE, CATALOG_NONE } from './__fixtures__'
 import { getModeSpec, modelAvailability } from './catalog'
+import { resolveGenerationSelection } from './generation-blocks'
 import {
   readiness,
   readinessRefusal,
@@ -45,6 +46,30 @@ describe('readiness', () => {
   it('no model: nothing chosen, or a model the provider does not support for the mode', () => {
     expect(readiness(input(CATALOG_BOTH, 'kie', null))).toEqual({ kind: 'no_model', reason: null })
     expect(readiness(input(CATALOG_BOTH, 'piapi', 'wan-3.0'))).toEqual({ kind: 'no_model', reason: 'Not offered by PiAPI' })
+  })
+
+  it('no model: a saved selection the catalog no longer offers for the mode (PiAPI Kling 4.0 Omni)', () => {
+    const mode = 'omni_reference_to_video'
+    const resolved = resolveGenerationSelection(CATALOG_BOTH, mode, 'piapi', 'kling-4.0')
+    expect(resolved).toEqual({ provider: 'piapi', model: 'kling-4.0' })
+    const availability = modelAvailability(CATALOG_BOTH, 'kling-4.0', 'piapi', mode)
+    expect(availability.available).toBe(false)
+    const value: ReadinessInput = {
+      load: { status: 'ready', catalog: CATALOG_BOTH, stale: false },
+      provider: 'piapi',
+      model: 'kling-4.0',
+      spec: getModeSpec(CATALOG_BOTH, 'piapi', 'kling-4.0', mode, {}),
+      availability,
+      issues: [],
+    }
+    const r = readiness(value)
+    expect(r.kind).toBe('no_model')
+    expect(unavailableReason(r)).toMatch(/^PiAPI does not run Kling 4\.0 Omni generation yet\. Use Kie/)
+    expect(readinessRefusal(r, { mode: 'Omni Reference to Video', where: 'Kling 4.0 on PiAPI' })).toBe(unavailableReason(r))
+    expect(runnableSelection(r)).toBeNull()
+    // Kie still runs the same model in the same mode.
+    expect(readiness({ ...value, provider: 'kie', spec: getModeSpec(CATALOG_BOTH, 'kie', 'kling-4.0', mode, {}),
+      availability: modelAvailability(CATALOG_BOTH, 'kling-4.0', 'kie', mode) }).kind).toBe('ready')
   })
 
   it('unavailable: the model exists for the mode but cannot run (no key for that provider)', () => {
