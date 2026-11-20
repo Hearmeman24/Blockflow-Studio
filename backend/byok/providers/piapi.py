@@ -18,6 +18,7 @@ from backend.byok.errors import (
     classify,
     mentions_content_rejection,
     mentions_insufficient_credits,
+    provider_message,
     redact,
 )
 from backend.byok.http import NO_RETRY, USER_AGENT, json_body, lenient_json, parse_json, send, with_retry
@@ -265,16 +266,16 @@ class PiAPIAdapter(ProviderAdapter):
         raw = str(task.get("status") or "")
         status = task_status(raw)
         if status == ProviderTaskStatus.FAILED:
-            message, code = _error_detail({"data": task})
-            message = redact(message, api_key).strip()
-            if message and mentions_content_rejection(message):
-                kind, text = "content_rejected", "PiAPI rejected the content of this request."
-            elif message and mentions_insufficient_credits(message):
-                kind, text = "insufficient_credits", "Your PiAPI account does not have enough credits."
+            detail, code = _error_detail({"data": task})
+            detail = redact(detail, api_key).strip()
+            if detail and mentions_content_rejection(detail):
+                kind, generic = "content_rejected", "PiAPI rejected the content of this request."
+            elif detail and mentions_insufficient_credits(detail):
+                kind, generic = "insufficient_credits", "Your PiAPI account does not have enough credits."
             else:
-                kind, text = "provider_failure", "PiAPI could not generate this result."
-            info = ErrorInfo(kind, f"{text} ({message[:300]})" if message else text, False, None,
-                             None if code in (None, 0) else str(code), self.name)
+                kind, generic = "provider_failure", "PiAPI could not generate this result."
+            message, _ = provider_message(self.display_name, detail, generic, api_key)
+            info = ErrorInfo(kind, message, False, None, None if code in (None, 0) else str(code), self.name)
             return PollResult(status, raw, None, (), info, cost=usage_cost(task, status))
         outputs = ()
         cost = usage_cost(task, status) if status == ProviderTaskStatus.COMPLETED else None

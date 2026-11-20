@@ -1376,3 +1376,103 @@ def test_a_resumed_job_keeps_the_rest_of_its_hour(env):
     assert final["status"] == "TIMED_OUT"
     # Age 600 s read at start+0, deadline start+1000+3000; one clock read per poll after that.
     assert len(env.scripts["kie"].poll_calls) == 3
+
+
+# ================================================================== the provider's reason leads the message
+
+_KIE_REFUSAL = ("Content security audit did not pass. The output audio may be related to copyright "
+                "restrictions.")
+_KIE_SUBMITTED = {"code": 200, "msg": "success", "data": {"taskId": "t-why"}}
+_PI_IMAGE_JOB = {"provider": "piapi", "model": "seedream-5-lite", "mode": "text_to_image",
+                 "params": {"prompt": "a cat"}}
+
+
+def _kie_failed_task(fail_msg, fail_code="400"):
+    return {"code": 200, "data": {"taskId": "t-why", "state": "fail", "failCode": fail_code, "failMsg": fail_msg}}
+
+
+def test_kie_copyright_refusal_job_message_leads_with_the_reason(env):
+    env.use_transport("kie", FakeTransport(_KIE_SUBMITTED, _kie_failed_task(_KIE_REFUSAL)))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["status"] == "FAILED" and final["error"]["kind"] == "content_rejected"
+    expected = ("Kie: Content security audit did not pass. The output audio may be related to copyright "
+                "restrictions. Change the prompt or references, then run again.")
+    assert final["error"]["message"] == expected == final["message"]
+
+
+@pytest.mark.parametrize("fail_msg", [None, "<html><body>500</body></html>"])
+def test_kie_failure_without_a_reason_keeps_the_generic_job_message(env, fail_msg):
+    env.use_transport("kie", FakeTransport(_KIE_SUBMITTED, _kie_failed_task(fail_msg, "500")))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["error"]["kind"] == "provider_failure"
+    assert final["error"]["message"] == ("Kie could not generate this result. Try again later; if it keeps "
+                                         "failing, check the Kie status page.")
+
+
+def test_kie_failure_reason_with_the_key_is_redacted_in_the_job(env):
+    env.use_transport("kie", FakeTransport(_KIE_SUBMITTED, _kie_failed_task(f"token {KIE_KEY} expired", "500")))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["error"]["message"] == ("Kie: token [redacted] expired. Try again later; if it keeps failing, "
+                                         "check the Kie status page.")
+    assert KIE_KEY not in json.dumps(final)
+
+
+def test_kie_insufficient_credits_job_message_leads_with_the_reason(env):
+    env.use_transport("kie", FakeTransport(HttpResponse(402, json.dumps(
+        {"code": 402, "msg": "Credits insufficient, please top up"}).encode())))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["error"]["kind"] == "insufficient_credits"
+    assert final["error"]["message"] == ("Kie: Credits insufficient, please top up. Add credits to your Kie "
+                                         "account, then run again.")
+
+
+def test_kie_auth_job_message_leads_with_the_reason(env):
+    env.use_transport("kie", FakeTransport({"code": 401, "msg": "You do not have access permissions"}))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["error"]["kind"] == "auth"
+    assert final["error"]["message"] == ("Kie: You do not have access permissions. Check the Kie API key in "
+                                         "Settings.")
+
+
+def test_kie_auth_without_a_reason_says_the_action_once(env):
+    env.use_transport("kie", FakeTransport(HttpResponse(401, b"")))
+    final = finish(service.submit_generation(video_payload()))
+    assert final["error"]["message"] == "The Kie API key was rejected. Check the Kie API key in Settings."
+
+
+def test_piapi_validation_job_message_leads_with_the_reason(env):
+    omni = ("Kling 4.0 Omni generation is not available yet. Use video_generation, text_to_video, or "
+            "image_to_video")
+    env.use_transport("piapi", FakeTransport(HttpResponse(400, json.dumps({"code": 400, "message": omni}).encode())))
+    final = finish(service.submit_generation(_PI_IMAGE_JOB))
+    assert final["error"]["kind"] == "validation"
+    assert final["error"]["message"] == (
+        "PiAPI: Kling 4.0 Omni generation is not available yet. Use video_generation, text_to_video, or "
+        "image_to_video. Adjust the settings or references, then run again.")
+
+
+def test_piapi_content_refusal_job_message_leads_with_the_reason(env):
+    env.use_transport("piapi", FakeTransport(
+        {"code": 200, "message": "success", "data": {"task_id": "pi-why", "status": "pending"}},
+        {"code": 200, "message": "success", "data": {"task_id": "pi-why", "status": "failed",
+                                                     "error": {"code": 10000,
+                                                               "message": "Prompt flagged by the safety system"}}},
+    ))
+    final = finish(service.submit_generation(_PI_IMAGE_JOB))
+    assert final["error"]["kind"] == "content_rejected"
+    assert final["error"]["message"] == ("PiAPI: Prompt flagged by the safety system. Change the prompt or "
+                                         "references, then run again.")
+
+
+def test_kie_upload_refusal_leads_with_the_reason_without_a_storage_hint(env):
+    """A provider refusal of an upload is not one of media.FALLBACK_CODES, so it
+    fails as itself, led by the provider's words, not as a local-only refusal."""
+    (env.out / "ref.png").write_bytes(b"R")
+    env.use_transport("kie", FakeTransport(HttpResponse(413, json.dumps(
+        {"code": 413, "msg": "File exceeds the upload limit"}).encode())))
+    final = finish(service.submit_generation(
+        {"provider": "kie", "model": "seedream-5-pro", "mode": "image_to_image", "params": {"prompt": "blue"},
+         "references": [{"kind": "image", "local": "/outputs/ref.png"}]}))
+    assert final["error"]["kind"] == "validation"
+    assert final["error"]["message"] == ("Kie: File exceeds the upload limit. Adjust the settings or references, "
+                                         "then run again.")

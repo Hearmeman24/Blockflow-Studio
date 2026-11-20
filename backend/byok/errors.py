@@ -6,6 +6,7 @@ came from a provider, and the key is never stored on the exception.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -70,7 +71,9 @@ def kinds_where(flag: str) -> frozenset[str]:
 _RETRYABLE_BY_DEFAULT = kinds_where("retryable_by_default")
 
 _CONTENT_WORDS = ("content policy", "content review", "content violation", "content moderation", "sensitive",
-                  "nsfw", "moderation", "violat", "inappropriate", "safety", "prohibited")
+                  "nsfw", "moderation", "violat", "inappropriate", "safety", "prohibited",
+                  # Kie: "Content security audit did not pass. ... copyright restrictions."
+                  "security audit", "audit did not pass", "copyright")
 
 REDACTED = "[redacted]"
 
@@ -163,10 +166,88 @@ def _status_kind(status: int) -> tuple[str, bool]:
     return "provider_failure", False
 
 
+# ------------------------------------------------------------------ provider messages
+#
+# One builder for every message that carries provider text: ``classify``
+# and the adapters' failed-task polls. A readable reason leads
+# ("Kie: <the provider's words>."); our generic sentence is used only when
+# the provider said nothing readable. The generation service then appends
+# one action per kind with :func:`with_hint`.
+
+REASON_LIMIT = 300
+_TERMINAL = (".", "!", "?", "…")
+_CLOSERS = ")]}\"'”’»"
+_DANGLING = ",;:-–— "
+_MARKUP = re.compile(r"<\s*(?:!doctype|/?[a-z][a-z0-9-]*)(?:\s[^>]*)?/?\s*>", re.IGNORECASE)
+# Texts that say nothing beyond the status itself.
+_PLACEHOLDERS = frozenset({"null", "none", "nil", "undefined", "nan", "true", "false", "ok", "success",
+                           "error", "failed", "fail", "failure", "unknown", "unknown error"})
+
+
+def _is_prose(text: str) -> bool:
+    """False for what must never lead a message: nothing, an HTML page or
+    tag, a JSON (or Python repr) object or list, a bare code or a placeholder."""
+    if not text or not any(c.isalpha() for c in text):
+        return False
+    if text[0] == "{" or (text[0] == "[" and not text.startswith(REDACTED)):
+        return False
+    if _MARKUP.search(text):
+        return False
+    return text.strip(".!?: ").lower() not in _PLACEHOLDERS
+
+
+def end_sentence(text: str) -> str:
+    """``text`` ending in exactly one terminal mark: a missing full stop is
+    added, a doubled one collapsed, an ellipsis, ``?`` or ``!`` kept, also
+    inside a closing bracket or quote (``(see docs.)``)."""
+    text = text.rstrip()
+    core = text.rstrip(_CLOSERS)
+    tail = text[len(core):]
+    if not core:
+        return text
+    if core.endswith("..."):
+        return text
+    if core.endswith("."):
+        return core.rstrip(".") + "." + tail
+    if core.endswith(_TERMINAL):
+        return text
+    if tail:
+        return text + "."
+    return text.rstrip(_DANGLING) + "."
+
+
+def provider_reason(text: Any, *secrets: str | None) -> str | None:
+    """The provider's words, fit to lead a message: keys redacted, whitespace
+    collapsed, capped at ``REASON_LIMIT`` characters (then "…"), ending in one
+    terminal mark. None when there is nothing readable (see ``_is_prose``)."""
+    cleaned = " ".join(redact(text, *secrets).split())
+    if not _is_prose(cleaned):
+        return None
+    if len(cleaned) > REASON_LIMIT:
+        return cleaned[:REASON_LIMIT].rstrip(_DANGLING + ".") + "…"
+    return end_sentence(cleaned)
+
+
+def provider_message(provider_name: str, text: Any, generic: str, *secrets: str | None) -> tuple[str, str | None]:
+    """(message, reason): ``"<Provider>: <reason>"`` when the provider gave a
+    readable reason, else ``generic``."""
+    reason = provider_reason(text, *secrets)
+    return (f"{provider_name}: {reason}" if reason else generic), reason
+
+
+def with_hint(message: str, hint: str) -> str:
+    """``message`` then ``hint``, one space apart, with ``message`` ending in
+    one terminal mark. The hint is left out when empty or already said."""
+    message = message.strip()
+    if not hint or hint.lower() in message.lower():
+        return message
+    return f"{end_sentence(message)} {hint}" if message else hint
+
+
 _USER_MESSAGES = {
-    "auth": "The {p} API key was rejected. Check the key in Settings.",
+    "auth": "The {p} API key was rejected.",
     "insufficient_credits": "Your {p} account does not have enough credits for this request.",
-    "rate_limited": "{p} is rate limiting requests. Try again shortly.",
+    "rate_limited": "{p} is rate limiting requests.",
     "timeout": "{p} did not respond in time.",
     "provider_failure": "{p} could not complete the request.",
     "validation": "{p} rejected the request parameters.",
@@ -193,7 +274,6 @@ def classify(
         kind, retryable = "content_rejected", False
     elif kind in ("validation", "provider_failure", "auth") and detail and mentions_insufficient_credits(detail):
         kind, retryable = "insufficient_credits", False
-    base = _USER_MESSAGES[kind].format(p=provider_name)
-    message = f"{base} ({detail[:300]})" if detail else base
+    message, _ = provider_message(provider_name, detail, _USER_MESSAGES[kind].format(p=provider_name))
     return ProviderError(kind, message, provider=provider, retryable=retryable, http_status=http_status,
                          provider_code=provider_code if provider_code is not None else status)

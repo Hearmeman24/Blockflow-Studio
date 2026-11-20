@@ -35,7 +35,7 @@ from urllib.parse import quote, urlsplit
 
 from backend import asset_uploads, job_store
 from backend.byok import ledger, media, references
-from backend.byok.errors import ProviderError, kinds_where, redact
+from backend.byok.errors import ProviderError, kinds_where, redact, with_hint
 from backend.byok.http import USER_AGENT, stop_retrying_when
 from backend.byok.providers import PollResult, SubmitResult, get_adapter
 from backend.byok.spec import PROVIDER_NAMES, Reference, canonical_reference, to_jsonable
@@ -143,10 +143,7 @@ def _errors(issues: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
 def error_message(kind: str, message: str, provider: str, key: str | None = None) -> str:
     """User-facing message for a ProviderError kind: the safe provider text plus one action."""
     base = redact(message or "", key).strip() or f"{_pname(provider)} could not complete the request."
-    hint = _HINTS.get(kind, "").format(p=_pname(provider))
-    if hint and hint.lower() not in base.lower():
-        base = f"{base.rstrip('.')}. {hint}"
-    return base
+    return with_hint(base, _HINTS.get(kind, "").format(p=_pname(provider)))
 
 
 # ------------------------------------------------------------------ credentials
@@ -177,10 +174,12 @@ def storage_mode() -> str:
 
 def _local_only_refusal(provider: str, path: Path, err: ProviderError, key: str) -> ProviderError:
     p = _pname(provider)
-    reason = redact(err.message, key).strip().rstrip(".") or f"{p} did not accept the upload"
-    message = (f"{p} would not take {path.name}: {reason}. Storage is set to local only, so BlockFlow did not "
-               f"send the file anywhere else. To continue, switch Storage to \"tmpfiles\" in Settings, or use "
-               "a provider or plan that accepts this upload.")
+    # Reached only for the adapters' own upload refusals (media.FALLBACK_CODES), never provider text.
+    reason = redact(err.message, key).strip() or f"{p} did not accept the upload"
+    message = with_hint(f"{p} would not take {path.name}: {reason}",
+                        "Storage is set to local only, so BlockFlow did not send the file anywhere else. To "
+                        "continue, switch Storage to \"tmpfiles\" in Settings, or use a provider or plan that "
+                        "accepts this upload.")
     return ProviderError("unsupported", message, provider=provider, retryable=False,
                          provider_code=LOCAL_ONLY_CODE)
 

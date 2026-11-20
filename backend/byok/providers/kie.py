@@ -15,7 +15,14 @@ from typing import Any
 from urllib.parse import quote
 
 from backend.byok.catalog import KIE_KLING_AUDIO_NAME
-from backend.byok.errors import ErrorInfo, ProviderError, classify, mentions_content_rejection, redact
+from backend.byok.errors import (
+    ErrorInfo,
+    ProviderError,
+    classify,
+    mentions_content_rejection,
+    provider_message,
+    redact,
+)
 from backend.byok.http import (
     NO_RETRY,
     USER_AGENT,
@@ -248,12 +255,12 @@ class KieAdapter(ProviderAdapter):
         progress = float(progress) if isinstance(progress, (int, float)) and not isinstance(progress, bool) else None
         echo = self._decode_param(task.get("param"))
         if status == ProviderTaskStatus.FAILED:
-            message = redact(task.get("failMsg") or "", key).strip()
-            kind = "content_rejected" if message and mentions_content_rejection(message) else "provider_failure"
-            text = ("Kie rejected the content of this request." if kind == "content_rejected"
-                    else "Kie could not generate this result.")
-            info = ErrorInfo(kind, f"{text} ({message[:300]})" if message else text, False, None,
-                             str(task.get("failCode") or "") or None, self.name)
+            detail = redact(task.get("failMsg") or "", key).strip()
+            kind = "content_rejected" if detail and mentions_content_rejection(detail) else "provider_failure"
+            generic = ("Kie rejected the content of this request." if kind == "content_rejected"
+                       else "Kie could not generate this result.")
+            message, _ = provider_message(self.display_name, detail, generic, key)
+            info = ErrorInfo(kind, message, False, None, str(task.get("failCode") or "") or None, self.name)
             return PollResult(status, state, progress, (), info, echo, credits_cost(task.get("creditsConsumed")))
         outputs = ()
         cost = credits_cost(task.get("creditsConsumed")) if status == ProviderTaskStatus.COMPLETED else None
