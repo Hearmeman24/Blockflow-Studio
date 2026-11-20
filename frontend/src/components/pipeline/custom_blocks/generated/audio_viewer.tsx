@@ -8,6 +8,8 @@ import {
   type BlockComponentProps,
 } from '@/lib/pipeline/registry'
 import { useViewerHistory } from '@/lib/use-viewer-history'
+import { BlockFooter } from '@/components/pipeline/block-footer'
+import { DownloadButton } from '@/components/pipeline/download-button'
 
 const PORT_AUDIO = 'audio'
 
@@ -57,16 +59,6 @@ function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
               autoPlay={false}
               className="w-full"
             />
-            <p className="text-[10px] text-muted-foreground font-mono break-all mt-1">
-              {filenameOf(selected)}
-            </p>
-            <a
-              href={selected}
-              download
-              className="text-[10px] text-muted-foreground hover:text-foreground underline"
-            >
-              download
-            </a>
           </div>
           {displayUrls.length > 1 && (
             <div className="space-y-0.5 max-h-[180px] overflow-y-auto rounded border border-border/60 p-1">
@@ -96,6 +88,12 @@ function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
               clear history
             </button>
           )}
+          <BlockFooter
+            testId="viewer-footer"
+            actions={<DownloadButton url={selected} />}
+          >
+            <span className="min-w-0 flex-1 truncate" title={selected}>{selected}</span>
+          </BlockFooter>
         </>
       )}
     </div>

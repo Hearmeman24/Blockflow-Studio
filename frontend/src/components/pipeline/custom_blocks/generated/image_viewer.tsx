@@ -14,6 +14,7 @@ import { useViewerHistory } from '@/lib/use-viewer-history'
 
 import { toDisplayUrls } from '@/lib/image-ref'
 import { BlockFooter } from '@/components/pipeline/block-footer'
+import { DownloadButton } from '@/components/pipeline/download-button'
 import { OutputCostLabel, PriceMismatchBadge, useOutputMeta } from '@/components/byok/output-cost'
 
 function toImageUrls(value: unknown): string[] {
@@ -106,7 +107,7 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
         </div>
       )}
 
-      <BlockFooter testId="viewer-footer">
+      <BlockFooter testId="viewer-footer" actions={<DownloadButton url={selectedImage} />}>
         <span className="min-w-0 flex-1 truncate" title={selectedImage}>{selectedImage}</span>
         <OutputCostLabel
           meta={metaByUrl.get(selectedImage)}

@@ -542,7 +542,8 @@ is allowed only when labelled as one, with follow-up work tracked.
 - **Shared atoms:** `StatusBadge`, `WarningBadge` with `useHeaderWarnings`,
   `AlertPanel`, `EmptyState`, `PageHeader`, `FavoriteButton`,
   `DeleteIconButton`, `BlockField`, `BlockFooter` (a top-level item of the
-  block, which the body makes a flex column), `BlockRoleTile`,
+  block, which the body makes a flex column; its `actions` slot sits above the
+  divider), `pipeline/download-button` (the viewers' Download link), `BlockRoleTile`,
   `pipeline/collapsible-section`, `pipeline/block-info-button` (rendered by the
   block card from `BlockDef.info`), `ChipTooltip`,
   `byok/media-thumb`, and the `lib/` helpers. Add to a shared module before

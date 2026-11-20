@@ -76,7 +76,8 @@ describe('Audio Viewer history', () => {
     show([url('b')])
     expect(screen.getByText('Connect a block that outputs audio upstream to play it here.')).toBeInTheDocument()
     show([url('c')])
-    expect(screen.getByText('c.mp3')).toBeInTheDocument()
+    // The selected file is named in the footer line (the old standalone file-name line is gone).
+    expect(screen.getByTestId('viewer-footer')).toHaveTextContent('/outputs/c.mp3')
     expect(listed()).toEqual([])
   })
 })

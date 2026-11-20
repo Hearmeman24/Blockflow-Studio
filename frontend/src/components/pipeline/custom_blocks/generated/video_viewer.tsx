@@ -13,6 +13,7 @@ import { usePipeline } from '@/lib/pipeline/pipeline-context'
 import { useViewerHistory } from '@/lib/use-viewer-history'
 import { toDisplayUrls } from '@/lib/video-ref'
 import { BlockFooter } from '@/components/pipeline/block-footer'
+import { DownloadButton } from '@/components/pipeline/download-button'
 import { OutputCostLabel, PriceMismatchBadge, useOutputMeta } from '@/components/byok/output-cost'
 
 function VideoViewerBlock({ blockId, inputs, registerExecute }: BlockComponentProps) {
@@ -104,7 +105,7 @@ function VideoViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
         </div>
       )}
 
-      <BlockFooter testId="viewer-footer">
+      <BlockFooter testId="viewer-footer" actions={<DownloadButton url={selectedVideo} />}>
         <span className="min-w-0 flex-1 truncate" title={selectedVideo}>{selectedVideo}</span>
         <OutputCostLabel
           meta={metaByUrl.get(selectedVideo)}
