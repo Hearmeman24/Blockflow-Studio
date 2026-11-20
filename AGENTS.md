@@ -13,7 +13,7 @@ bugs, and report them (see [Beta status](#beta-status)).
 | | |
 |---|---|
 | Languages | Python 3.12+, TypeScript 5 (React/TSX) |
-| Backend | FastAPI `>=0.115` (locked 0.136.1), uvicorn `>=0.30` (locked 0.47.0), SQLite; `pyproject.toml`, `uv.lock` |
+| Backend | FastAPI `>=0.115` (locked 0.136.1), uvicorn `>=0.30` (locked 0.47.0), SQLite; `pyproject.toml`, `uv.lock`. The app runs on the locked versions: `uv run app.py` uses the project environment, and `app.py` declares no inline script dependencies (`tests/test_app_locked_env.py`) |
 | Frontend | Next.js 16.1.6, React 19.2.3, Tailwind CSS 4, shadcn/ui, Vitest 4, ESLint 9; `frontend/package.json` |
 | Tooling | [uv](https://docs.astral.sh/uv/) for Python, Node.js `>=22.14.0` with npm, ruff, pytest |
 | Entry points | `app.py` (starts both servers), `backend/main.py` (FastAPI app), `frontend/src/app/` (pages), `mcp_server.py` (MCP, stdio) |
@@ -35,8 +35,11 @@ needs their explicit yes.
    *Success:* no `fail` among `git`, `uv`, `python`, `node`, `npm`. For each
    `fail`, give the user the printed `fix` (install uv, Node.js 22.14+, or
    `uv python install 3.12`). Do not install system software without asking.
-2. **Start the app.** `uv run app.py`, as a long-running background process
-   (keep it running; it opens a browser unless `BLOCKFLOW_NO_OPEN=1`). On the
+2. **Start the app.** `uv run app.py` from the repository root, as a
+   long-running background process (keep it running; it opens a browser unless
+   `BLOCKFLOW_NO_OPEN=1`). uv runs it in the project environment (`.venv`,
+   synced from `uv.lock` without the dev extras), so the app runs on the locked
+   versions; from another folder it stops and says where to start it. On the
    first start it installs what is missing before the servers start (`npm ci`
    in `frontend/`, the block codegen, the production build of the web
    interface and a FastMCP download, one line each), which can take a few
@@ -45,11 +48,14 @@ needs their explicit yes.
    fails it stops with a readable error and the command to retry; `uv run
    python scripts/setup.py` repairs the install. Wait for `[app] Ready at`,
    then run `uv run python scripts/doctor.py --expect-running` (during a build
-   it reports `frontend` as `warn`, "being built", not `fail`).
+   it reports `backend` and `frontend` as `warn`, "being built", not `fail`;
+   do not start a second copy).
    *Success:* `backend` and `frontend` are `ok`; the app answers at
    <http://localhost:47300>. If either server stops on its own, `app.py`
-   prints an `[app]` line naming it and its exit code and exits with code 1
-   (Ctrl+C exits 0); run `python3 scripts/doctor.py`, then start it again.
+   prints an `[app]` line naming it and its exit code and exits with code 1;
+   run `python3 scripts/doctor.py`, then start it again. Ctrl+C (one or more),
+   SIGTERM or SIGHUP stops both servers and exits 0, even with a page open: a
+   server that has not exited 5 seconds later is killed with its process group.
 3. **The user enters their key.** Tell the user to open
    <http://localhost:47300> and enter a Kie and/or PiAPI key in the Welcome
    dialog, or later in **Settings, then API keys**. Never ask for a key in chat,
@@ -64,17 +70,20 @@ needs their explicit yes.
    from the repository root:
 
    ```bash
-   claude mcp add blockflow-studio -- uv run --directory "$(pwd)" --with fastmcp mcp_server.py
+   claude mcp add blockflow-studio -- uv run --directory "$(pwd)" --with "fastmcp~=4.2.3" mcp_server.py
    ```
 
    (PowerShell: `"${PWD}"`. Add `--scope user` to use it from any folder. If the
    app runs on another port, add `-e BLOCKFLOW_URL=http://127.0.0.1:<port>`
-   before `--`.) Any other MCP client, with the absolute path filled in:
+   before `--`; `scripts/setup.py` prints the line for the current
+   `BACKEND_PORT`. FastMCP is not in `uv.lock`; `fastmcp~=4.2.3`, the tested
+   release line, is `FASTMCP_REQUIREMENT` in `scripts/doctor.py`.) Any other
+   MCP client, with the absolute path filled in:
 
    ```json
    {"mcpServers": {"blockflow-studio": {
      "command": "uv",
-     "args": ["run", "--directory", "/absolute/path/to/Blockflow-Studio", "--with", "fastmcp", "mcp_server.py"],
+     "args": ["run", "--directory", "/absolute/path/to/Blockflow-Studio", "--with", "fastmcp~=4.2.3", "mcp_server.py"],
      "env": {"BLOCKFLOW_URL": "http://127.0.0.1:47301"}}}}
    ```
 
@@ -114,7 +123,7 @@ needs their explicit yes.
 | Command | When |
 |---|---|
 | `uv run app.py` | Run the app (backend :47301, frontend :47300): the production web interface on the Next.js standalone server, built first when its stamp is missing or stale (`backend/app_update/frontend_build.py`). |
-| `uv run app.py --dev` | The Next.js development server instead (`npm run dev`, also `BLOCKFLOW_DEV=1`): hot reload and errors in the page, about 1 GB more memory. For working on blocks or the app. |
+| `uv run app.py --dev` | The Next.js development server instead (`npm run dev`, also `BLOCKFLOW_DEV=1`): hot reload and errors in the page, about 1.5 to 2 GB of memory against about 115 MB built. For working on blocks or the app. |
 | `uv run app.py --packaged` | Serve the existing build as it is; never installs or builds (also `BLOCKFLOW_PACKAGED=1`). Stops with exit 1 when there is no build; warns when it is stale. |
 | `python3 scripts/doctor.py [--json] [--expect-running]` | Health check; read-only, no keys in the output. `--json` for bug reports. |
 | `uv run python scripts/setup.py [--check]` | Install or repair everything, idempotently, including the Python dev tools for tests and lint (`uv run app.py` installs only what the app needs), and the production build when it is stale. Refuses `npm ci` and the build while this checkout's app is running. |
@@ -231,8 +240,8 @@ no switch: the folder is on disk or it is not.
 4. Run `npm --prefix frontend run gen:custom-blocks`, then tsc, lint and the
    tests. Restart the app (stop it, then `uv run app.py`): the backend loads a
    new sidecar, and because every `frontend.block.tsx` is part of the build
-   stamp, the start rebuilds the web interface with the block (about a
-   minute; a block that does not compile stops the start with the compiler's
+   stamp, the start rebuilds the web interface with the block (usually under
+   a minute; a block that does not compile stops the start with the compiler's
    error). While you iterate on a block, run `uv run app.py --dev` instead: the
    development server picks up frontend edits without a restart.
 
@@ -454,7 +463,7 @@ changes without asking.
 | MCP run recording (`RUN_FOR_JOB_STATUS`) | `backend/mcp_runs.py` | the saved run for each job status, or none |
 | MCP `generate` stages (`GenerateStage`) | `blockflow_mcp/tools_generation.py` | `validate`, `estimate`, `submit`, `wait` |
 | Update engine (`UPDATE_TRANSITIONS`, `STEP_TRANSITIONS`) | `backend/app_update/engine.py` | update states and step statuses |
-| Launcher outcome (`LaunchOutcome`, `EXIT_CODES`) and web interface mode (`FrontendMode`) | `app.py` | `stopped`, `server_exited`, `setup_failed`, `setup_interrupted`, `bad_port`, `port_in_use`, `build_missing`, `build_failed`; `FrontendMode`: `build` (default), `dev` (`--dev`), `prebuilt` (`--packaged`) |
+| Launcher outcome (`LaunchOutcome`, `EXIT_CODES`) and web interface mode (`FrontendMode`) | `app.py` | `stopped`, `server_exited`, `setup_failed`, `setup_interrupted`, `bad_port`, `port_in_use`, `build_missing`, `build_failed`; `FrontendMode`: `build` (default), `dev` (`--dev`), `prebuilt` (`--packaged`); `StopSignals` (`STOP_SIGNALS`: SIGINT, SIGTERM, SIGHUP): running, then stopping after the first signal, when later ones are ignored |
 | Launcher control files, request order, launch mode | `backend/app_update/launcher_protocol.py` | `ControlFile`, `REQUEST_ORDER`, `LaunchMode` (`dev`, `packaged`, `unknown`; `packaged` is the built web interface, from `uv run app.py` or `--packaged`; reported as `launch_mode` by `/api/app/version`) |
 | Production build of the web interface | `backend/app_update/frontend_build.py` | `BuildState`: `missing`, `stale`, `current` (the stamp next to the standalone server against a hash of the build inputs and the backend port) |
 | Install plan | `scripts/install_steps.py` | `StepReason` (incl. `build_missing`, `build_stale`), `FastMCP` outcomes |

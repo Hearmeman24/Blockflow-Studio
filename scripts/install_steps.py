@@ -32,7 +32,7 @@ from doctor import frontend_build  # noqa: E402  (standard library only, like th
 UV_SYNC = ["uv", "sync", "--extra", "dev"]
 NPM_CI = ["npm", "--prefix", "frontend", "ci"]
 CODEGEN = ["npm", "--prefix", "frontend", "run", "gen:custom-blocks"]
-FASTMCP = ["uv", "run", "--with", "fastmcp", "python", "-c", "import fastmcp"]
+FASTMCP = ["uv", "run", "--with", doctor.FASTMCP_REQUIREMENT, "python", "-c", "import fastmcp"]
 BUILD = frontend_build.BUILD_CMD
 INSTALL_TIMEOUT_S = 1800
 
@@ -83,7 +83,6 @@ class StepReason(Enum):
     FASTMCP_NOT_CACHED = "fastmcp_not_cached"            # FastMCP is not in uv's cache, or does not import
     BUILD_MISSING = "build_missing"                      # no production build of the web interface yet
     BUILD_STALE = "build_stale"                          # the sources, a block, the packages or the port changed
-    ALWAYS = "always"                                    # cheap and repeatable (setup.py's codegen)
 
 
 class FastMCP(Enum):
@@ -110,11 +109,11 @@ def _frontend_reason(env: doctor.Env) -> Optional[StepReason]:
     return _FRONTEND_REASONS.get(doctor.frontend_deps_state(env))
 
 
-BUILD_WHEN = "only after an install, an update or a block change"
+BUILD_WHEN = "only after an install, an update, a block change or a new backend port"
 BUILD_MESSAGES = {
     StepReason.BUILD_MISSING: f"Building the web interface, this takes a minute or two ({BUILD_WHEN})...",
-    StepReason.BUILD_STALE: f"The app, a block or the backend port changed: rebuilding the web interface, about a minute "
-                            f"({BUILD_WHEN})...",
+    StepReason.BUILD_STALE: "The app, a block or the backend port changed: rebuilding the web interface, usually "
+                            f"under a minute ({BUILD_WHEN})...",
 }
 
 
@@ -134,6 +133,17 @@ def build_step(env: doctor.Env, *, reinstalled: bool = False) -> Optional[Step]:
     return Step("frontend_build", BUILD, BUILD_MESSAGES[reason], reason) if reason else None
 
 
+def registry_reason(env: doctor.Env, deps: Optional[StepReason]) -> Optional[StepReason]:
+    """Why the block codegen must run, or None. Only after a frontend install or
+    when the registry is missing: every build, development start and test run
+    regenerates it anyway (the npm ``prebuild``, ``predev`` and ``pretest`` scripts)."""
+    if deps:
+        return StepReason.FRONTEND_INSTALLED
+    if doctor.check_block_registry(env).status != doctor.OK:
+        return StepReason.REGISTRY_MISSING
+    return None
+
+
 def first_start_plan(env: doctor.Env, *, build: bool = False) -> List[Step]:
     """The frontend steps a start needs: packages and block registry from two
     files' timestamps and, with ``build`` (every start but ``--dev``), the
@@ -144,10 +154,9 @@ def first_start_plan(env: doctor.Env, *, build: bool = False) -> List[Step]:
     if deps:
         steps.append(Step("frontend_deps", NPM_CI,
                           "First start: installing the frontend packages, this can take a few minutes...", deps))
-    if deps:
-        steps.append(Step("block_registry", CODEGEN, "Registering the blocks...", StepReason.FRONTEND_INSTALLED))
-    elif doctor.check_block_registry(env).status != doctor.OK:
-        steps.append(Step("block_registry", CODEGEN, "Registering the blocks...", StepReason.REGISTRY_MISSING))
+    registry = registry_reason(env, deps)
+    if registry:
+        steps.append(Step("block_registry", CODEGEN, "Registering the blocks...", registry))
     if build:
         step = build_step(env, reinstalled=deps is not None)
         if step:
@@ -158,14 +167,15 @@ def first_start_plan(env: doctor.Env, *, build: bool = False) -> List[Step]:
 def setup_plan(env: doctor.Env) -> List[Step]:
     """``scripts/setup.py``'s steps in order, each with the reason it runs, or
     ``reason=None`` when it is already done. Runs the doctor's read-only checks."""
+    deps = _frontend_reason(env)
     return [
         Step("python_deps", UV_SYNC, "",
              StepReason.PYTHON_DEPS_OUT_OF_DATE if doctor.check_python_deps(env).status != doctor.OK else None),
-        Step("frontend_deps", NPM_CI, "", _frontend_reason(env)),
-        Step("block_registry", CODEGEN, "", StepReason.ALWAYS),
+        Step("frontend_deps", NPM_CI, "", deps),
+        Step("block_registry", CODEGEN, "", registry_reason(env, deps)),
         Step("mcp_cache", FASTMCP, "",
              StepReason.FASTMCP_NOT_CACHED if doctor.check_mcp(env).status != doctor.OK else None),
-        Step("frontend_build", BUILD, "", build_reason(env, reinstalled=_frontend_reason(env) is not None)),
+        Step("frontend_build", BUILD, "", build_reason(env, reinstalled=deps is not None)),
     ]
 
 

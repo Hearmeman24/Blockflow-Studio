@@ -8,8 +8,10 @@ Steps, each skipped when already satisfied:
   1. prerequisites (git optional; uv, Python, Node.js and npm at the project's minimums)
   2. `uv sync --extra dev`               Python dependencies, incl. pytest and ruff
   3. `npm --prefix frontend ci`          frontend dependencies (refused while this checkout's app is running)
-  4. `npm --prefix frontend run gen:custom-blocks`   block registry (always; cheap and repeatable)
-  5. `uv run --with fastmcp python -c "import fastmcp"`   FastMCP into uv's cache for the MCP server
+  4. `npm --prefix frontend run gen:custom-blocks`   block registry (after a frontend install, or when it is
+     missing; every build, dev start and test run regenerates it anyway)
+  5. `uv run --with "fastmcp~=4.2.3" python -c "import fastmcp"`   FastMCP into uv's cache for the MCP server
+     (doctor.FASTMCP_REQUIREMENT)
   6. `npm --prefix frontend run build`   the production web interface `uv run app.py` serves, when its
      build is missing or older than the code, the blocks or the backend port (refused while this
      checkout's app is running)
@@ -46,7 +48,7 @@ def next_steps(env: doctor.Env) -> List[str]:
         "  2. Enter a Kie and/or PiAPI key in the app's Welcome dialog or Settings -> API keys.",
         "     Keys are typed into the app only, never into a terminal, a chat or a file.",
         "  3. Register the MCP server with Claude Code (other clients: see AGENTS.md, step 5):",
-        f'     claude mcp add blockflow-studio -- uv run --directory "{env.root}" --with fastmcp mcp_server.py',
+        f"     {doctor.mcp_add_command(str(env.root), env.backend_port())}",
         "  4. Check everything:  uv run python scripts/doctor.py --expect-running",
     ]
 

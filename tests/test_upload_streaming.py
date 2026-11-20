@@ -197,6 +197,62 @@ def test_an_aborted_upload_leaves_no_file(app, out, index):
     assert _files(out) == before, f"{name} left {set(_files(out)) - set(before)}"
 
 
+@pytest.mark.parametrize("index", range(5), ids=[r[0] for r in _routes(Path("."))])
+def test_an_aborted_upload_is_answered_not_raised(app, out, index, caplog):
+    """A client that goes away mid-upload is normal (a closed tab, a cancelled
+    upload): no exception may leave the app, because the server logs one as
+    "Exception in ASGI application" with a long traceback."""
+    name, path, headers, query, _ = _routes(out)[index]
+    if "{cid}" in path:
+        path = path.format(cid=_make_character(out))
+    before = _files(out)
+    raised = []
+
+    async def run():
+        state = {"sent": 0}
+
+        async def receive():
+            if state["sent"] >= 10:
+                return {"type": "http.disconnect"}
+            state["sent"] += 1
+            return {"type": "http.request", "body": _chunk(state["sent"]), "more_body": True}
+
+        async def send(message):
+            pass
+
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+                 "scheme": "http", "path": path, "raw_path": path.encode(), "root_path": "",
+                 "query_string": query.encode(),
+                 "headers": [(k.lower().encode(), v.encode("latin-1")) for k, v in headers.items()],
+                 "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 47301)}
+        try:
+            await app(scope, receive, send)
+        except Exception as exc:  # what uvicorn would log as an error
+            raised.append(exc)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(run())
+    assert raised == [], f"{name} raised {raised!r}"
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert _files(out) == before
+
+
+def test_the_helper_turns_a_disconnect_into_a_quiet_answer(tmp_path):
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""}, receive)
+
+    async def run():
+        async with upload_stream.receive_upload(request, tmp_path):
+            pass
+
+    with pytest.raises(upload_stream.UploadAborted) as info:
+        asyncio.run(run())
+    assert info.value.status_code == 499
+    assert list(tmp_path.iterdir()) == []
+
+
 # ------------------------------------------------------------------ the helper
 
 

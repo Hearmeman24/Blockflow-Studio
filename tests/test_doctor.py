@@ -94,7 +94,7 @@ def test_dependencies_not_installed(root, fake):
     assert got["frontend_deps"].status == "warn" and "npm --prefix frontend ci" in got["frontend_deps"].fix
     assert got["python_deps"].status == "warn" and "uv sync --extra dev" in got["python_deps"].fix
     assert got["block_registry"].status == "warn" and "gen:custom-blocks" in got["block_registry"].fix
-    assert got["mcp_importable"].status == "warn" and "--with fastmcp" in got["mcp_importable"].fix
+    assert got["mcp_importable"].status == "warn" and '--with "fastmcp~=4.2.3"' in got["mcp_importable"].fix
 
 
 def test_mcp_registration(fake):
@@ -187,6 +187,29 @@ def test_a_build_in_progress_is_not_a_failure(fake, root):
     assert got["frontend_build"].status == "warn" and "being built" in got["frontend_build"].message
     assert got["frontend"].status == "warn" and "being built" in got["frontend"].message
     assert "Ready at" in got["frontend"].fix
+    # The backend starts only after the build: not running yet is not a reason to start a second copy.
+    assert got["backend"].status == "warn" and "after the build" in got["backend"].message
+    assert "Ready at" in got["backend"].fix and "uv run app.py" not in got["backend"].fix
+
+
+def test_mcp_commands_carry_the_fastmcp_bound(fake):
+    fake.failing.add("claude mcp get")
+    got = by_id(doctor.run_checks(fake.env(BACKEND_PORT="48001")))
+    req = doctor.FASTMCP_REQUIREMENT
+    assert req.startswith("fastmcp~=")
+    assert f'--with "{req}"' in got["mcp_importable"].fix or got["mcp_importable"].status == "ok"
+    assert f'--with "{req}" mcp_server.py' in got["mcp_registered"].fix
+    assert "-e BLOCKFLOW_URL=http://127.0.0.1:48001 --" in got["mcp_registered"].fix
+    assert ["uv", "run", "--offline", "--with", req] == next(c for c in fake.calls if c[:3] == ["uv", "run",
+                                                                                                "--offline"])[:5]
+
+
+def test_the_mcp_add_line_names_the_port_only_when_it_is_not_the_default():
+    assert doctor.mcp_add_command("/r", 47301) == (
+        f'claude mcp add blockflow-studio -- uv run --directory "/r" --with "{doctor.FASTMCP_REQUIREMENT}" '
+        "mcp_server.py")
+    assert doctor.mcp_add_command("/r", 48001).startswith(
+        "claude mcp add blockflow-studio -e BLOCKFLOW_URL=http://127.0.0.1:48001 -- uv run")
 
 
 def test_frontend_still_starting(fake):

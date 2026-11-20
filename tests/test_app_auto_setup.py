@@ -24,7 +24,7 @@ install_steps = load_script("install_steps")
 ROOT = Path(__file__).resolve().parent.parent
 NPM_CI = ["npm", "--prefix", "frontend", "ci"]
 CODEGEN = ["npm", "--prefix", "frontend", "run", "gen:custom-blocks"]
-FASTMCP = ["uv", "run", "--with", "fastmcp", "python", "-c", "import fastmcp"]
+FASTMCP = ["uv", "run", "--with", "fastmcp~=4.2.3", "python", "-c", "import fastmcp"]
 UV_SYNC = ["uv", "sync", "--extra", "dev"]
 
 
@@ -387,7 +387,9 @@ def test_a_changed_source_rebuilds_and_stamps_the_build(fake, root):
     assert code == 0, text
     assert [c for c in fake.calls if c[1:] != ["--version"]] == [BUILD]  # after the node/npm prerequisite check
     assert "rebuilding the web interface" in text
-    assert "only after an install, an update or a block change" in text
+    # True and short: a rebuild took 7 to 12 s, and the backend port is one of the reasons.
+    assert "usually under a minute" in text and "about a minute" not in text
+    assert "only after an install, an update, a block change or a new backend port" in text
     assert build_state(root) == "current"
     fake.calls.clear()
     assert built_auto(fake) == (0, "")  # the next start does not build again

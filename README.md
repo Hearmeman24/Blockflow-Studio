@@ -27,10 +27,12 @@ cd Blockflow-Studio
 uv run app.py
 ```
 
-The first start installs the frontend packages and builds the web interface,
-which can take a few minutes. Later starts take a second or two; the app
-rebuilds the web interface (about a minute) only after an update, a change to a
-block, or a different backend port. The app then opens at <http://localhost:47300>. Enter a Kie key, a PiAPI key, or
+Run it from the repository folder: uv then installs the Python packages at the
+exact versions in `uv.lock` into a `.venv` folder there. The first start also
+installs the frontend packages and builds the web interface, which can take a
+few minutes. Later starts take a second or two; the app rebuilds the web
+interface (usually under a minute) only after an update, a change to a block,
+or a different backend port. The app then opens at <http://localhost:47300>. Enter a Kie key, a PiAPI key, or
 both in the Welcome dialog, or later in **Settings, then API keys**. Then open
 **Generate**, add a block, and click **Run Pipeline**.
 
@@ -84,8 +86,8 @@ so updates never touch it. A complete example is in
 [AGENTS.md](AGENTS.md#adding-a-block). After adding or changing a block, start
 the app again: `uv run app.py` rebuilds the web interface with it. While you
 work on a block, `uv run app.py --dev` runs the development server instead,
-which reloads your changes and shows errors in the page (it uses about 1 GB
-more memory).
+which reloads your changes and shows errors in the page (it uses about 1.5 to
+2 GB of memory, against about 115 MB for the built web interface).
 
 ## MCP server
 
@@ -95,10 +97,12 @@ spends your provider credits and accepts a `max_cost_usd` cap; every other tool
 is free. For Claude Code, with the app running, from the repository root:
 
 ```bash
-claude mcp add blockflow-studio -- uv run --directory "$(pwd)" --with fastmcp mcp_server.py
+claude mcp add blockflow-studio -- uv run --directory "$(pwd)" --with "fastmcp~=4.2.3" mcp_server.py
 ```
 
-For other MCP clients, see step 5 in [AGENTS.md](AGENTS.md#set-up-blockflow-studio-for-a-user).
+If the app runs on another backend port, add
+`-e BLOCKFLOW_URL=http://127.0.0.1:<port>` before `--`. For other MCP clients,
+see step 5 in [AGENTS.md](AGENTS.md#set-up-blockflow-studio-for-a-user).
 
 ## Models, prices and updates
 
@@ -120,7 +124,8 @@ keys. Never paste an API key into an issue.
 - **Your data.** Settings, keys and history are kept in a BlockFlow Studio
   folder, separate from the original BlockFlow app's folder: macOS
   `~/Library/Application Support/BlockFlow Studio`, Windows
-  `%LOCALAPPDATA%\BlockFlow Studio`, Linux `~/.local/share/blockflow-studio`.
+  `%LOCALAPPDATA%\BlockFlow Studio`, Linux `$XDG_DATA_HOME/blockflow-studio`
+  or, when that is not set, `~/.local/share/blockflow-studio`.
   Set `BLOCKFLOW_DATA_DIR` to use another folder.
 - **Keys.** Stored locally, readable only by your user, and never returned by
   the app's API.

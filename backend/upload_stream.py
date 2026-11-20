@@ -12,8 +12,9 @@ after the request. Every route that takes a file as its raw body uses
 Chunks are written to a hidden temp file (``TEMP_PREFIX``) in ``folder``, in a
 worker thread, and hashed as they pass, so the event loop never blocks on the
 disk and the route holds one chunk at a time. The temp file is removed when
-the block ends without ``commit``: the client went away (Starlette raises
-``ClientDisconnect``), the body passed ``max_bytes`` (``UploadTooLarge``,
+the block ends without ``commit``: the client went away (``UploadAborted``,
+an ``HTTPException`` the app answers quietly instead of Starlette's
+``ClientDisconnect``, which the server would log as an error), the body passed ``max_bytes`` (``UploadTooLarge``,
 raised as soon as the limit is passed or when ``Content-Length`` already
 declares more), or the route failed. ``folder`` should be the destination's
 folder so the rename stays on one file system; ``commit`` copies across file
@@ -32,10 +33,24 @@ from pathlib import Path
 from typing import BinaryIO
 
 from starlette.concurrency import run_in_threadpool
-from starlette.requests import Request
+from starlette.exceptions import HTTPException
+from starlette.requests import ClientDisconnect, Request
 
 TEMP_PREFIX = ".upload-"
 TEMP_SUFFIX = ".part"
+
+
+class UploadAborted(HTTPException):
+    """The client went away before the body arrived (a closed tab, a cancelled
+    upload). An ``HTTPException``, so the app answers it like any refusal
+    (nobody reads the answer) instead of letting Starlette's
+    ``ClientDisconnect`` leave the app, which the server logs as an error with
+    a long traceback. The partial file is already gone when it is raised."""
+
+    STATUS = 499  # "client closed request", as nginx logs it
+
+    def __init__(self) -> None:
+        super().__init__(status_code=self.STATUS, detail="The client closed the connection before the upload finished.")
 
 
 class UploadTooLarge(Exception):
@@ -124,6 +139,8 @@ async def receive_upload(request: Request, folder: Path, *, max_bytes: int | Non
                 if max_bytes is not None and upload.size > max_bytes:
                     raise UploadTooLarge(max_bytes)
                 await run_in_threadpool(upload._write, fh, chunk)
+        except ClientDisconnect:
+            raise UploadAborted() from None
         finally:
             await run_in_threadpool(fh.close)
         yield upload

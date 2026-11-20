@@ -91,3 +91,9 @@ OLD_NAME = re.compile(r"SGS_ADVANCED|SGS-UI|sgs-ui-file-picker", re.I)
 def test_tracked_files_do_not_use_the_old_project_identifiers():
     hits = sorted(rel for rel, text in tracked_text().items() if OLD_NAME.search(text))
     assert not hits, f"old project identifiers in: {hits}"
+
+
+def test_no_create_next_app_scaffolding_is_shipped():
+    """create-next-app's sample icons are not BlockFlow's and nothing uses them."""
+    scaffolding = {"file.svg", "globe.svg", "next.svg", "vercel.svg", "window.svg"}
+    assert not {p.name for p in (ROOT / "frontend" / "public").iterdir()} & scaffolding

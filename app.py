@@ -1,8 +1,9 @@
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "loguru>=0.7", "Pillow>=10"]
-# ///
 """Single entrypoint: starts FastAPI backend + Next.js frontend, opens browser.
+
+Run it from the repository folder. uv then runs it in the project environment
+(``.venv``, synced from ``uv.lock``), and the backend uses the same Python, so
+the app runs on the locked versions. This file declares no dependencies of its
+own (no inline ``# /// script`` block): that would make uv ignore the lock.
 
     uv run app.py              the production web interface: built when it is missing or stale
                                (after an install, an update or a block change), then served by
@@ -14,6 +15,7 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import signal
@@ -187,6 +189,22 @@ def _check_prebuilt(env=None, out: Callable[[str], None] = print) -> bool:
     return True
 
 
+# What the backend server imports first; both come from uv.lock through the project environment.
+SERVER_MODULES = ("fastapi", "uvicorn")
+
+
+def _missing_server_modules() -> list[str]:
+    return [name for name in SERVER_MODULES if importlib.util.find_spec(name) is None]
+
+
+def _outside_project_line(missing: list[str]) -> str:
+    """Started with a Python that lacks the app's packages: usually `uv run app.py` from
+    another folder, where uv finds no project and so no uv.lock."""
+    return (f"[app] This Python does not have the packages BlockFlow Studio needs ({', '.join(missing)}). Start it "
+            f"from the repository folder, where uv uses the versions in uv.lock: `cd \"{ROOT}\"`, then "
+            "`uv run app.py`.")
+
+
 def _already_running(frontend_port: int) -> str:
     return (f"[app] BlockFlow Studio is already running from this folder at http://localhost:{frontend_port}. "
             "Use that one, or stop it (Ctrl+C in its terminal) and start again.")
@@ -245,9 +263,18 @@ def _find_standalone_server(frontend_dir: Path = FRONTEND_DIR) -> Path:
     )
 
 
+# Stopping: each server gets STOP_GRACE_S seconds in all to exit after SIGTERM,
+# then its process group is killed. Uvicorn stops waiting for open connections
+# sooner (an open page holds the jobs event stream, which never ends by itself).
+STOP_GRACE_S = 5.0
+BACKEND_GRACEFUL_SHUTDOWN_S = 2
+KILL_WAIT_S = 2.0
+
+
 def _backend_command(backend_port: int) -> list[str]:
     return [
         sys.executable, "-m", "uvicorn",
+        "--timeout-graceful-shutdown", str(BACKEND_GRACEFUL_SHUTDOWN_S),
         "backend.main:app",
         "--host", "127.0.0.1",
         "--port", str(backend_port),
@@ -447,18 +474,94 @@ class ProcessSupervisor:
         return True
 
 
-def _stop_processes(procs: list[subprocess.Popen]) -> None:
-    for p in procs:
-        if p.poll() is None:
-            if sys.platform == "win32":
-                p.terminate()
-            else:
-                p.send_signal(signal.SIGTERM)
-    for p in procs:
+def _spawn(cmd: list[str], *, cwd: Path, env: Mapping[str, str]) -> subprocess.Popen:
+    """Start a server. On macOS and Linux it gets its own process group, so a
+    terminal's Ctrl+C reaches only the launcher, which stops each server and
+    everything it started (``npm run dev`` -> ``next dev`` -> workers) in order."""
+    extra = {} if sys.platform == "win32" else {"start_new_session": True}
+    return subprocess.Popen(cmd, cwd=str(cwd), env=env, **extra)
+
+
+def _signal_tree(p: subprocess.Popen, *, kill: bool) -> None:
+    """SIGTERM (or, with ``kill``, SIGKILL) to the server's process group; to
+    the server alone when it does not lead one. Windows: terminate / kill."""
+    if sys.platform == "win32":
+        p.kill() if kill else p.terminate()
+        return
+    sig = signal.SIGKILL if kill else signal.SIGTERM
+    try:
+        os.killpg(p.pid, sig)
+        return
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        p.send_signal(sig)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _stop_processes(procs: list[subprocess.Popen], *, grace: float = STOP_GRACE_S,
+                    signal_tree: Callable[..., None] = _signal_tree,
+                    clock: Callable[[], float] = time.monotonic) -> None:
+    """Ask every running server to stop, wait up to ``grace`` seconds in all
+    (one deadline, not one per server), then kill whatever is still running.
+    Shutdown is never cut short by a later Ctrl+C: ``StopSignals`` ignores it."""
+    live = [p for p in procs if p.poll() is None]
+    for p in live:
+        signal_tree(p, kill=False)
+    deadline = clock() + grace
+    for p in live:
         try:
-            p.wait(timeout=5)
+            p.wait(timeout=max(0.0, deadline - clock()))
         except subprocess.TimeoutExpired:
-            p.kill()
+            pass
+    for p in live:
+        if p.poll() is None:
+            signal_tree(p, kill=True)
+            try:
+                p.wait(timeout=KILL_WAIT_S)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+# Every signal that stops the app: Ctrl+C, a supervisor or `kill`, a closed terminal.
+STOP_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name))
+
+
+class StopSignals:
+    """The first stop signal raises ``KeyboardInterrupt`` where the launcher
+    is; every later one is ignored, so the shutdown it started always
+    finishes. A terminal's Ctrl+C reaches app.py twice (from the terminal, and
+    again from uv, which forwards it), and people press it again when a stop
+    takes a few seconds."""
+
+    def __init__(self) -> None:
+        self.stopping = False
+        self._previous: dict[int, object] = {}
+
+    def install(self) -> None:
+        for sig in STOP_SIGNALS:
+            try:
+                self._previous[sig] = signal.signal(sig, self.handle)
+            except (ValueError, OSError):  # not the main thread, or not settable here
+                pass
+
+    def restore(self) -> None:
+        for sig, previous in self._previous.items():
+            try:
+                signal.signal(sig, previous)
+            except (ValueError, OSError, TypeError):
+                pass
+        self._previous.clear()
+
+    def begin_shutdown(self) -> None:
+        self.stopping = True
+
+    def handle(self, signum, frame) -> None:
+        if self.stopping:
+            return
+        self.stopping = True
+        raise KeyboardInterrupt
 
 
 def _line_buffered_output() -> None:
@@ -480,13 +583,22 @@ def _line_buffered_output() -> None:
 
 def main() -> None:
     """Run the app; exit with the code of how the launch ended (EXIT_CODES).
-    A normal stop (Ctrl+C) returns without calling sys.exit, as always."""
-    code = EXIT_CODES[_launch()]
+    A normal stop (Ctrl+C, SIGTERM, SIGHUP) returns without calling sys.exit."""
+    signals = StopSignals()
+    signals.install()
+    try:
+        outcome = _launch(signals)
+    except KeyboardInterrupt:  # stopped before the servers started (_launch handles it after)
+        print("\n[app] Interrupted. Nothing was started.")
+        outcome = LaunchOutcome.SETUP_INTERRUPTED
+    finally:
+        signals.restore()
+    code = EXIT_CODES[outcome]
     if code:
         sys.exit(code)
 
 
-def _launch() -> LaunchOutcome:
+def _launch(signals: StopSignals) -> LaunchOutcome:
     _line_buffered_output()
     if "--advanced" in sys.argv:
         os.environ["BLOCKFLOW_ADVANCED"] = "1"
@@ -502,6 +614,11 @@ def _launch() -> LaunchOutcome:
         print(ports)
         return LaunchOutcome.BAD_PORT
     backend_port, frontend_port = ports
+
+    missing = _missing_server_modules()
+    if missing:
+        print(_outside_project_line(missing))
+        return LaunchOutcome.SETUP_FAILED
 
     # Install what a fresh clone is missing and, unless --dev, build the web
     # interface when it is missing or stale. --packaged never changes the app
@@ -528,9 +645,9 @@ def _launch() -> LaunchOutcome:
 
     def start_backend() -> subprocess.Popen:
         print(f"[app] Starting FastAPI on :{backend_port}...")
-        return subprocess.Popen(
+        return _spawn(
             _backend_command(backend_port),
-            cwd=str(ROOT),
+            cwd=ROOT,
             env=_backend_env(control_dir=control_dir, packaged=packaged,
                              backend_port=backend_port, frontend_port=frontend_port),
         )
@@ -546,8 +663,8 @@ def _launch() -> LaunchOutcome:
         except FileNotFoundError as exc:
             raise FrontendUnavailable(f"[app] {exc}") from exc
         print(f"[app] Starting Next.js {mode.frontend_label} on :{frontend_port}...")
-        return subprocess.Popen(frontend_cmd, cwd=str(frontend_cwd),
-                                env=_frontend_env(backend_port=backend_port, frontend_port=frontend_port, host=host))
+        return _spawn(frontend_cmd, cwd=frontend_cwd,
+                      env=_frontend_env(backend_port=backend_port, frontend_port=frontend_port, host=host))
 
     def wait_for_servers() -> None:
         print("[app] Waiting for servers to start...")
@@ -587,6 +704,7 @@ def _launch() -> LaunchOutcome:
         print("\n[app] Shutting down...")
         return LaunchOutcome.STOPPED
     finally:
+        signals.begin_shutdown()  # from here on no signal interrupts: the stop below always finishes
         _stop_processes(supervisor.procs())
         shutil.rmtree(control_dir, ignore_errors=True)
         print("[app] Stopped.")

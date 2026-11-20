@@ -5,7 +5,8 @@ A thin client over the local backend (`uv run app.py`, :47301); the backend
 holds the provider keys. Tools live in `blockflow_mcp/`, one module per tool
 group. Registration: AGENTS.md, "Set up BlockFlow Studio for a user".
 
-Run:  uv run --with fastmcp mcp_server.py        (stdio, for an MCP client config)
+Run:  uv run --with "fastmcp~=4.2.3" mcp_server.py   (stdio, for an MCP client config;
+      the bound is FASTMCP_REQUIREMENT in scripts/doctor.py)
 Env:  BLOCKFLOW_URL (default http://127.0.0.1:47301)
 """
 

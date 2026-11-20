@@ -47,6 +47,19 @@ DOCTOR_VERSION = 1
 DEFAULT_BACKEND_PORT = 47301
 DEFAULT_FRONTEND_PORT = 47300
 MCP_SERVER_NAME = "blockflow-studio"
+# FastMCP is not in uv.lock: the MCP server runs with it as a `uv run --with` overlay.
+# Bound to the release line it was tested with (patch releases only), so a new
+# major or minor FastMCP cannot break every registration at once. README.md,
+# AGENTS.md and mcp_server.py show the same requirement (tests/test_app_locked_env.py).
+FASTMCP_REQUIREMENT = "fastmcp~=4.2.3"
+
+
+def mcp_add_command(directory: str, backend_port: int) -> str:
+    """The `claude mcp add` line for this checkout; it names the backend when it
+    is not on the default port (the MCP server's BLOCKFLOW_URL)."""
+    url = "" if backend_port == DEFAULT_BACKEND_PORT else f"-e BLOCKFLOW_URL=http://127.0.0.1:{backend_port} "
+    return (f'claude mcp add {MCP_SERVER_NAME} {url}-- uv run --directory "{directory}" '
+            f'--with "{FASTMCP_REQUIREMENT}" mcp_server.py')
 # The in-app updater's routes. Either may be absent in older builds: reported as "skip".
 VERSION_ROUTE = "/api/app/version"
 UPDATE_ROUTE = "/api/app/update"
@@ -361,22 +374,23 @@ def check_frontend_build(env: Env) -> Check:
         if serving:
             return Check("frontend_build", WARN, "The app is serving a production build that is older than the code "
                          "or the blocks.", "Stop the app (Ctrl+C) and start it again with `uv run app.py`, which "
-                         "rebuilds it (about a minute).")
+                         "rebuilds it (usually under a minute).")
         return Check("frontend_build", WARN, "The production build of the web interface is older than the code, "
-                     "the blocks or the backend port.", "`uv run app.py` rebuilds it when it starts (about a minute).")
+                     "the blocks or the backend port.", "`uv run app.py` rebuilds it when it starts (usually under a "
+                     "minute).")
     return Check("frontend_build", WARN, "The web interface has not been built yet.",
                  "`uv run app.py` builds it when it starts (a minute or two).")
 
 
 def check_mcp(env: Env) -> Check:
-    fix = ("Run `uv run --with fastmcp python -c \"import fastmcp\"` once to download FastMCP into uv's cache "
-           "(or `uv run python scripts/setup.py`).")
+    fix = (f"Run `uv run --with \"{FASTMCP_REQUIREMENT}\" python -c \"import fastmcp\"` once to download FastMCP "
+           "into uv's cache (or `uv run python scripts/setup.py`).")
     if not env.which("uv"):
         return Check("mcp_importable", SKIP, "Needs uv.", "Install uv first (see the uv check).")
-    code, _ = env.run(["uv", "run", "--offline", "--with", "fastmcp", "python", "-c",
+    code, _ = env.run(["uv", "run", "--offline", "--with", FASTMCP_REQUIREMENT, "python", "-c",
                        "import fastmcp, blockflow_mcp.server"], cwd=env.root, timeout=120)
     if code == 0:
-        return Check("mcp_importable", OK, "The MCP server imports with FastMCP (`uv run --with fastmcp`).")
+        return Check("mcp_importable", OK, f"The MCP server imports with FastMCP (`uv run --with \"{FASTMCP_REQUIREMENT}\"`).")
     return Check("mcp_importable", WARN, "FastMCP is not in uv's cache yet, or the MCP package failed to import.",
                  fix)
 
@@ -387,8 +401,7 @@ def check_mcp_registered(env: Env) -> Check:
         return Check("mcp_registered", SKIP, "Claude Code CLI not found; other MCP clients are not checked.",
                      "Register the server in your MCP client (see AGENTS.md, step 5).")
     code, out = env.run(["claude", "mcp", "get", MCP_SERVER_NAME], cwd=env.root, timeout=30)
-    fix = (f"`claude mcp add {MCP_SERVER_NAME} -- uv run --directory \"{tilde(str(env.root), env.home)}\" "
-           "--with fastmcp mcp_server.py` (use the full path).")
+    fix = f"`{mcp_add_command(tilde(str(env.root), env.home), env.backend_port())}` (use the full path)."
     if code != 0:
         return Check("mcp_registered", WARN, f"No MCP server named {MCP_SERVER_NAME} in Claude Code for this folder.",
                      fix)
@@ -461,6 +474,12 @@ def check_ports_and_reachability(env: Env, expect_running: bool) -> Tuple[List[C
                 "BACKEND_PORT=<port> uv run app.py (and set BLOCKFLOW_URL for the MCP server)."))
             checks.append(Check("backend", down, "The BlockFlow Studio backend is not reachable.",
                                 "See backend_port."))
+        elif build_in_progress(env) is not None:
+            # app.py builds the web interface before it starts the backend: it is on its way, not down.
+            checks.append(Check("backend_port", OK, f"Port {bport} is free."))
+            checks.append(Check("backend", WARN, "The web interface is being built; the app starts the backend "
+                                "after the build.", f"Wait for `[app] Ready at http://localhost:{env.frontend_port()}` "
+                                "in the app's terminal, then run the doctor again."))
         else:
             checks.append(Check("backend_port", OK, f"Port {bport} is free."))
             checks.append(Check("backend", down, "The app is not running.", "Start it from the repository root: "
