@@ -29,8 +29,8 @@ import { PipelineTabsProvider } from '@/lib/pipeline/tabs-context'
 import { walkBlocks } from '@/lib/pipeline/tree-utils'
 import { blockProps, jobSnapshot, latestExecute, renderGenerationBlock, stubGenerationFetch } from '@/test-utils/byok-harness'
 
-const MODELS = ['wan-3.0', 'seedance-2.5', 'seedance-2', 'kling-4.0']
-const NAMES = ['Wan 3.0', 'Seedance 2.5', 'Seedance 2', 'Kling 4.0']
+const MODELS = ['wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'seedance-2', 'kling-4.0']
+const NAMES = ['Wan 3.0', 'Wan 3.0 Prime', 'Seedance 2.5', 'Seedance 2', 'Kling 4.0']
 const VIDEO = { kind: 'video-ref', local: '/outputs/drive.mp4' }
 const IMAGE = { kind: 'image-ref', local: '/outputs/face.png' }
 const BOTH = { video: [VIDEO], image: [IMAGE] }
@@ -45,7 +45,11 @@ function seed(blockId: string, values: Record<string, unknown>) {
   for (const [k, v] of Object.entries(values)) sessionStorage.setItem(`block_${blockId}_${k}`, JSON.stringify(v))
 }
 
-const optionName = (o: HTMLElement) => within(o).getByTestId('model-option-name').textContent?.replace(/NSFW$/, '')
+const optionName = (o: HTMLElement) => {
+  const copy = within(o).getByTestId('model-option-name').cloneNode(true) as HTMLElement
+  copy.querySelectorAll('.sr-only').forEach((el) => el.remove())
+  return copy.textContent
+}
 
 async function mount(blockId: string, inputs: Record<string, unknown> = BOTH, catalog: ProviderCatalog = CATALOG_BOTH) {
   const harness = stubGenerationFetch({
@@ -87,6 +91,7 @@ describe('Character Swap definition', () => {
       'Put the driving video in the Video Loader.',
       'Put an image of the person to swap in, in the Image Loader.',
       'Wan 3.0 and Seedance 2.5 give the best quality.',
+      'Wan 3.0 Prime is the faster Wan 3.0 and costs more per second.',
       "Seedance 2 and Kling 4.0 are alternatives; the cost chip shows each model's price.",
     ])
   })
@@ -99,7 +104,7 @@ describe('Character Swap models', () => {
     ['Kie key only', CATALOG_KIE, 'kie'],
     ['PiAPI key only', CATALOG_PIAPI, 'piapi'],
     ['PiAPI key only, Kie selected', CATALOG_PIAPI, 'kie'],
-  ])('lists exactly the four models, each one available as the catalog says (%s)', async (_, catalog, provider) => {
+  ])('lists exactly the five models, each one available as the catalog says (%s)', async (_, catalog, provider) => {
     const user = userEvent.setup()
     seed('m1', { provider })
     await mount('m1', BOTH, catalog)

@@ -120,6 +120,7 @@ def catalog_payload(configured_providers: set[str]) -> dict[str, Any]:
             "name": model.name,
             "output": model.output,
             "nsfw": model.nsfw,
+            "fast": model.fast,
             "description": model.description,
             "available": any(p["available"] for p in providers.values()),
             "providers": providers,

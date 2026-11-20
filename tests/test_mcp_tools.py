@@ -72,6 +72,8 @@ def test_list_models_compact_view_and_availability(backend):
                                    "piapi": {"name": "PiAPI", "key_saved": False}}
     seedance = next(m for m in result["models"] if m["id"] == "seedance-2")
     assert seedance["kind"] == "video" and seedance["nsfw"] is False and seedance["name"] == "Seedance 2"
+    assert seedance["fast"] is False
+    assert {m["id"] for m in result["models"] if m["fast"]} == {"wan-3.0-prime"}
     assert "text_to_video" in seedance["modes"]
     assert seedance["providers"]["kie"]["available"] is True and seedance["providers"]["kie"]["reason"] is None
     assert seedance["providers"]["piapi"]["available"] is False
@@ -95,7 +97,7 @@ def test_list_models_rejects_unknown_mode(backend):
 def test_get_model_full_spec(backend):
     result = get_model("seedance-2", "kie", "image_to_video")
     assert result["ok"] is True and result["available"] is True
-    assert result["model"]["name"] == "Seedance 2"
+    assert result["model"]["name"] == "Seedance 2" and result["model"]["fast"] is False
     assert result["prompt"]["requirement"] == "required"
     assert result["references"][0]["kind"] == "image" and result["references"][0]["max_count"] == 9
     assert result["frames"] == {"first_frame_required": True, "last_frame_allowed": True}

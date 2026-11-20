@@ -40,6 +40,8 @@ AT_UNDERSCORE = "Replace the person from @video_1 with the person from @image_1"
 # provider, model, URL, prompt, provider model fields, field holding the video, field holding the image
 CASES = [
     ("kie", "wan-3.0", KIE_CREATE, PLAIN, {"model": "wan/3-0-video"}, "reference_video_urls", "reference_image_urls"),
+    ("kie", "wan-3.0-prime", KIE_CREATE, PLAIN, {"model": "wan/3-0-video-prime"},
+     "reference_video_urls", "reference_image_urls"),
     ("kie", "seedance-2.5", KIE_CREATE, PLAIN, {"model": "bytedance/seedance-2-5"},
      "reference_video_urls", "reference_image_urls"),
     ("piapi", "seedance-2.5", PIAPI_TASK, AT, {"model": "seedance", "task_type": "seedance-2.5"},
@@ -97,13 +99,14 @@ def references():
     return [Reference("video", VIDEO, duration_s=5, format="mp4"), Reference("image", IMAGE, format="png")]
 
 
-def test_the_block_offers_exactly_the_four_models_and_they_are_in_the_ledger():
+def test_the_block_offers_exactly_the_five_models_and_they_are_in_the_ledger():
     config = block_config()
     assert config["mode"] == MODE
-    assert config["models"] == ["wan-3.0", "seedance-2.5", "seedance-2", "kling-4.0"]
+    assert config["models"] == ["wan-3.0", "wan-3.0-prime", "seedance-2.5", "seedance-2", "kling-4.0"]
     assert config["prompt"] == "Replace the person from {video1} with the person from {image1}"
     names = {m.id: m.name for m in ledger.CATALOG}
-    assert [names[m] for m in config["models"]] == ["Wan 3.0", "Seedance 2.5", "Seedance 2", "Kling 4.0"]
+    assert [names[m] for m in config["models"]] == [
+        "Wan 3.0", "Wan 3.0 Prime", "Seedance 2.5", "Seedance 2", "Kling 4.0"]
 
 
 def test_every_case_is_a_provider_the_ledger_offers_and_none_is_left_out():
@@ -116,8 +119,9 @@ def test_every_case_is_a_provider_the_ledger_offers_and_none_is_left_out():
                 kinds = {limit.kind for limit in spec.media}
                 assert {"video", "image"} <= kinds, (offering.provider, model_id)
     assert {(c[0], c[1]) for c in CASES} == offered
-    # Wan 3.0 is on Kie only, and PiAPI does not run Kling 4.0 in this mode.
+    # Wan 3.0 and Wan 3.0 Prime are on Kie only, and PiAPI does not run Kling 4.0 in this mode.
     assert ("piapi", "wan-3.0") not in offered
+    assert ("piapi", "wan-3.0-prime") not in offered
     assert ("piapi", "kling-4.0") not in offered
 
 

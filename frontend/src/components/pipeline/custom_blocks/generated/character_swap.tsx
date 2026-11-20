@@ -39,6 +39,7 @@ export const blockDef: BlockDef = {
     'Put the driving video in the Video Loader.',
     'Put an image of the person to swap in, in the Image Loader.',
     'Wan 3.0 and Seedance 2.5 give the best quality.',
+    'Wan 3.0 Prime is the faster Wan 3.0 and costs more per second.',
     "Seedance 2 and Kling 4.0 are alternatives; the cost chip shows each model's price.",
   ],
   component: CharacterSwapBlock,

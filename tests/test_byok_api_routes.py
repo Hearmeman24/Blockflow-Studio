@@ -110,6 +110,13 @@ VIDEO = {"provider": "kie", "model": "wan-3.0", "mode": "text_to_video", "params
 # ------------------------------------------------------------------ catalog
 
 
+def test_catalog_carries_fast_for_every_model(env):
+    client, _, _ = env
+    models = client.get("/api/providers/catalog").json()["models"]
+    assert all(isinstance(m["fast"], bool) for m in models)
+    assert {m["id"] for m in models if m["fast"]} == {"wan-3.0-prime"}
+
+
 def test_catalog_reflects_configured_keys(env):
     client, _, _ = env
     body = client.get("/api/providers/catalog").json()

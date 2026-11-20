@@ -13,13 +13,13 @@ const SWAP = GENERATION_BLOCK_CONFIGS.characterSwap
 const OMNI = GENERATION_BLOCK_CONFIGS.omniReferenceToVideo
 
 describe('Character Swap config', () => {
-  it('is an Omni Reference block limited to one video and one image, with four models', () => {
+  it('is an Omni Reference block limited to one video and one image, with five models', () => {
     expect(generationBlockConfig('characterSwap')).toBe(SWAP)
     expect(SWAP).toMatchObject({
       mode: 'omni_reference_to_video',
       output: 'video',
       referenceKinds: ['video', 'image'],
-      models: ['wan-3.0', 'seedance-2.5', 'seedance-2', 'kling-4.0'],
+      models: ['wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'seedance-2', 'kling-4.0'],
       exactReferences: { video: 1, image: 1 },
       loaders: { video: 'videoLoader', image: 'uploadImageToTmpfiles' },
       fixedPrompt: 'Replace the person from {video1} with the person from {image1}',
@@ -42,7 +42,7 @@ describe('Character Swap config', () => {
 
 describe('modelsForBlock', () => {
   it('returns the allowed models in the block order, with the catalog names', () => {
-    expect(modelsForBlock(CATALOG_BOTH, SWAP).map((m) => m.name)).toEqual(['Wan 3.0', 'Seedance 2.5', 'Seedance 2', 'Kling 4.0'])
+    expect(modelsForBlock(CATALOG_BOTH, SWAP).map((m) => m.name)).toEqual(['Wan 3.0', 'Wan 3.0 Prime', 'Seedance 2.5', 'Seedance 2', 'Kling 4.0'])
   })
 
   it('returns every model for the mode when the block has no list', () => {
@@ -50,7 +50,7 @@ describe('modelsForBlock', () => {
   })
 
   it('drops an allowed id the catalog no longer lists', () => {
-    const catalog = { ...CATALOG_BOTH, models: CATALOG_BOTH.models.filter((m) => m.id !== 'wan-3.0') }
+    const catalog = { ...CATALOG_BOTH, models: CATALOG_BOTH.models.filter((m) => m.id !== 'wan-3.0' && m.id !== 'wan-3.0-prime') }
     expect(modelsForBlock(catalog, SWAP).map((m) => m.id)).toEqual(['seedance-2.5', 'seedance-2', 'kling-4.0'])
   })
 })

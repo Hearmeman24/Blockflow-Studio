@@ -38,7 +38,7 @@ export const GENERATION_BLOCK_CONFIGS: Readonly<Record<string, GenerationBlockCo
     mode: 'omni_reference_to_video',
     output: 'video',
     referenceKinds: ['video', 'image'],
-    models: ['wan-3.0', 'seedance-2.5', 'seedance-2', 'kling-4.0'],
+    models: ['wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'seedance-2', 'kling-4.0'],
     fixedPrompt: 'Replace the person from {video1} with the person from {image1}',
     exactReferences: { video: 1, image: 1 },
     loaders: { video: 'videoLoader', image: 'uploadImageToTmpfiles' },

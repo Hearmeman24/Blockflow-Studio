@@ -141,6 +141,7 @@ export interface CatalogModel {
   name: string
   output: 'video' | 'image'
   nsfw: boolean
+  fast: boolean
   description: string
   available: boolean
   providers: Record<ProviderId, ProviderStatus>

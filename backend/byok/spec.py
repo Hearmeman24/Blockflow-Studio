@@ -216,6 +216,9 @@ class ModelEntry:
     nsfw: bool
     offerings: tuple[ProviderOffering, ...]
     description: str = ""
+    # Marked only where the provider's own page says so (Kie lists Wan 3.0 Prime's
+    # generation speed as "Faster" against "Standard" for Wan 3.0, same capabilities).
+    fast: bool = False
 
     def offering(self, provider: str) -> ProviderOffering | None:
         for offering in self.offerings:

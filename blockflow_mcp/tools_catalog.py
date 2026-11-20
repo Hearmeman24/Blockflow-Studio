@@ -26,7 +26,8 @@ def list_models(mode: str = "", provider: str = "") -> dict[str, Any]:
     """List the image and video models BlockFlow offers, with where each one can run.
 
     Each model has: `id`, `name`, `kind` (image | video output), `nsfw`
-    (true when the model allows adult content), `modes` it supports, and per
+    (true when the model allows adult content), `fast` (true when the provider
+    lists it as the faster variant of a model), `modes` it supports, and per
     provider (`kie`, `piapi`) whether it is `available` now and, if not, the
     `reason` (usually: no API key saved for that provider in Settings).
 
@@ -62,6 +63,7 @@ def list_models(mode: str = "", provider: str = "") -> dict[str, Any]:
             continue
         models.append({
             "id": m["id"], "name": m.get("name", m["id"]), "kind": m.get("output"), "nsfw": bool(m.get("nsfw")),
+            "fast": bool(m.get("fast")),
             "modes": sorted({k for p in per_provider.values() for k in p["modes"]}, key=modes.index),
             "providers": per_provider,
         })
@@ -108,7 +110,8 @@ def get_model(model: str, provider: str, mode: str) -> dict[str, Any]:
     return {
         "ok": True,
         "model": {"id": entry["id"], "name": entry.get("name"), "kind": entry.get("output"),
-                  "nsfw": bool(entry.get("nsfw")), "description": entry.get("description") or ""},
+                  "nsfw": bool(entry.get("nsfw")), "fast": bool(entry.get("fast")),
+                  "description": entry.get("description") or ""},
         "provider": provider,
         "mode": mode,
         "available": available,

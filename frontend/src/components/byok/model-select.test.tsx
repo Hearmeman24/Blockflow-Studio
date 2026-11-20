@@ -16,7 +16,11 @@ async function arrowTo(user: ReturnType<typeof userEvent.setup>, name: string) {
   throw new Error(`could not highlight ${name}`)
 }
 
-const optionName = (o: HTMLElement) => within(o).getByTestId('model-option-name').textContent?.replace(/NSFW$/, '')
+const optionName = (o: HTMLElement) => {
+  const copy = within(o).getByTestId('model-option-name').cloneNode(true) as HTMLElement
+  copy.querySelectorAll('.sr-only').forEach((el) => el.remove())
+  return copy.textContent
+}
 
 function option(name: string) {
   return screen.getAllByRole('option').find((o) => optionName(o) === name)!
@@ -100,6 +104,22 @@ describe('ModelSelect', () => {
     await user.click(trigger)
     expect(option('Wan 3.0').querySelector('[data-icon="lips"]')).not.toBeNull()
     expect(option('Seedance 2').querySelector('[data-icon="lips"]')).toBeNull()
+  })
+
+  it('shows the bolt on the fast option and on the trigger when it is selected, and on no other option', async () => {
+    const user = userEvent.setup()
+    render(<ModelSelect catalog={CATALOG_KIE} mode="text_to_video" provider="kie" value="wan-3.0-prime" onChange={vi.fn()} />)
+    const trigger = screen.getByRole('combobox', { name: 'Model' })
+    expect(within(trigger).getByText('Fast')).toHaveClass('sr-only')
+    expect(trigger.querySelector('[data-fast]')).not.toBeNull()
+    expect(trigger.querySelector('[data-icon="lips"]')).not.toBeNull()
+    await user.click(trigger)
+    const prime = option('Wan 3.0 Prime')
+    expect(prime.querySelector('[data-fast]')).not.toBeNull()
+    expect(prime.querySelector('[data-icon="lips"]')).not.toBeNull()
+    expect(prime.getAttribute('aria-description')).toContain('Fast.')
+    const withBolt = screen.getAllByRole('option').filter((o) => o.querySelector('[data-fast]'))
+    expect(withBolt).toEqual([prime])
   })
 })
 

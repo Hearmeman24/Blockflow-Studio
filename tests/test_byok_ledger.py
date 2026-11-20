@@ -74,6 +74,11 @@ def test_nsfw_flags_are_exactly_as_listed():
     assert {m.id for m in ledger.CATALOG if m.nsfw} == NSFW_IDS
 
 
+def test_only_wan_prime_is_marked_fast():
+    """Kie's model page lists Prime's speed as "Faster"; no source was checked for any other model."""
+    assert {m.id for m in ledger.CATALOG if m.fast} == {"wan-3.0-prime"}
+
+
 @pytest.mark.parametrize("model_id", sorted(set(VIDEO_IDS) | set(IMAGE_IDS)))
 def test_provider_offering_matches_docs(model_id):
     model = ledger.get_model(model_id)

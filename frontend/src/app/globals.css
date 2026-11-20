@@ -26,6 +26,7 @@
   --color-link: var(--link);
   --color-link-hover: var(--link-hover);
   --color-nsfw: var(--nsfw);
+  --color-fast: var(--fast);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
@@ -86,6 +87,8 @@
   --link-hover: oklch(0.809 0.105 251.813);
   /* NSFW model names. 5.4:1 against white (light seed only). */
   --nsfw: oklch(0.55 0.2 355);
+  /* Fast model bolt. Dark yellow, about 5:1 against white (light seed only). */
+  --fast: oklch(0.5 0.12 85);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -131,6 +134,12 @@
    * NsfwBadge always pairs it with an icon and an "NSFW" text label.
    */
   --nsfw: oklch(0.72 0.2 350);
+  /*
+   * Yellow for the fast-model bolt. oklch 0.85 is well above 4.5:1 on --popover /
+   * --card and on --accent / --muted. Never colour alone: the bolt always comes
+   * with "Fast" screen-reader text and a title.
+   */
+  --fast: oklch(0.85 0.17 90);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);

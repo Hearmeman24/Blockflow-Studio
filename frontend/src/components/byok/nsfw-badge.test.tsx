@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { CATALOG_BOTH } from '@/lib/byok/__fixtures__'
-import { ModelName, NsfwBadge, NSFW_DESCRIPTION } from './nsfw-badge'
+import { FAST_DESCRIPTION, ModelName, NsfwBadge, NSFW_DESCRIPTION } from './nsfw-badge'
 
 describe('NsfwBadge', () => {
   it('has screen-reader text, the lips icon, and a tooltip on keyboard focus', async () => {
@@ -36,6 +36,51 @@ describe('ModelName', () => {
     rerender(<ModelName name="Seedance 2" nsfw={false} />)
     expect(screen.queryByText('NSFW')).toBeNull()
     expect(screen.getByText('Seedance 2').closest('[data-nsfw]')).toBeNull()
+  })
+
+  it('shows a bolt and "Fast" text after the name when fast, with the token colour on the bolt only', () => {
+    render(<ModelName name="Wan 3.0 Prime" nsfw={false} fast />)
+    const name = screen.getByText('Wan 3.0 Prime')
+    expect(name.closest('[data-nsfw]')).toBeNull()
+    expect(screen.getByText('Fast')).toHaveClass('sr-only')
+    const bolt = screen.getByText('Fast').closest('[data-fast]') as HTMLElement
+    expect(bolt).toHaveClass('text-fast')
+    expect(bolt.querySelector('svg')).not.toBeNull()
+    expect(bolt).toHaveAttribute('title', FAST_DESCRIPTION)
+    expect(screen.queryByText('NSFW')).toBeNull()
+  })
+
+  it('shows both marks, NSFW first then the bolt, when the model is NSFW and fast', () => {
+    render(<ModelName name="Wan 3.0 Prime" nsfw fast />)
+    const nsfw = screen.getByText('NSFW')
+    const fast = screen.getByText('Fast')
+    expect(nsfw.compareDocumentPosition(fast) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('Wan 3.0 Prime').compareDocumentPosition(nsfw) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('shows a focusable bolt with a tooltip when interactive', async () => {
+    const user = userEvent.setup()
+    render(<ModelName name="Wan 3.0 Prime" nsfw={false} fast interactive />)
+    await user.tab()
+    expect(document.querySelector('[data-slot="fast-badge"]')).toHaveFocus()
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Generates quicker than the standard model')
+  })
+
+  it('adds nothing for models that are not fast', () => {
+    render(<ModelName name="Seedance 2" nsfw={false} fast={false} />)
+    expect(screen.queryByText('Fast')).toBeNull()
+  })
+
+  it('is shown for exactly the fast models in the catalog', () => {
+    render(
+      <ul>
+        {CATALOG_BOTH.models.map((m) => (
+          <li key={m.id} data-testid={`f-${m.id}`}><ModelName name={m.name} nsfw={m.nsfw} fast={m.fast} /></li>
+        ))}
+      </ul>,
+    )
+    const marked = CATALOG_BOTH.models.filter((m) => screen.getByTestId(`f-${m.id}`).querySelector('[data-fast]')).map((m) => m.id)
+    expect(marked).toEqual(['wan-3.0-prime'])
   })
 
   it('is shown for exactly the NSFW models in the catalog', () => {
