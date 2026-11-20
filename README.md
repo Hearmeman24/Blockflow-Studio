@@ -9,6 +9,8 @@
 
 Open source visual pipelines for AI image and video generation, with your own API keys.
 
+Made by [HearmemanAI](https://hearmemanai.com/)
+
 ![An Image Loader, Image to Image and Image Viewer pipeline on the canvas](.github/assets/pipeline.webp)
 
 </div>
