@@ -7,7 +7,7 @@
  * popover. Every chip has a tooltip with the full name and the ledger
  * description. Only icons and short labels are keyed by setting key here.
  */
-import { useState, type ComponentType, type ReactNode } from 'react'
+import { useId, useState, type ComponentType, type ReactNode } from 'react'
 import {
   AlertTriangle,
   AudioLines,
@@ -248,6 +248,7 @@ function toWholeNumber(raw: string): number | null {
 
 function NumberChip({ setting, value, invalid, onChange }: { setting: SettingSpec; value: SettingValue; invalid: boolean; onChange: (v: number | null) => void }) {
   const Icon = ICONS[setting.key] ?? SlidersHorizontal
+  const inputId = useId()
   const shown = typeof value === 'number' ? String(value) : setting.key === 'seed' ? 'Random' : 'Default'
   const [draft, setDraft] = useState<string>(typeof value === 'number' ? String(value) : '')
   const [popoverOpen, setPopoverOpen] = useState(false)
@@ -268,9 +269,9 @@ function NumberChip({ setting, value, invalid, onChange }: { setting: SettingSpe
         </PopoverTrigger>
       </WithTip>
       <PopoverContent align="start" className="w-48 space-y-1.5 p-2">
-        <label className="text-2xs font-medium" htmlFor={`chip-${setting.key}`}>{setting.label}</label>
+        <label className="text-2xs font-medium" htmlFor={inputId}>{setting.label}</label>
         <Input
-          id={`chip-${setting.key}`}
+          id={inputId}
           type="number"
           inputMode="numeric"
           min={setting.minimum ?? undefined}

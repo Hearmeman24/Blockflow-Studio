@@ -79,8 +79,11 @@ def backend_port(environ: Mapping[str, str]) -> int:
 
 def build_env(environ: Mapping[str, str], port: int) -> Dict[str, str]:
     """The environment ``npm run build`` runs with: the caller's, with the
-    backend port fixed for the proxy (next.config.ts) and the browser bundle."""
-    return {**environ, "BACKEND_PORT": str(port), "NEXT_PUBLIC_BACKEND_PORT": str(port)}
+    backend port fixed for the proxy (next.config.ts) and the browser bundle, and
+    Next.js telemetry off."""
+    return {**environ, "BACKEND_PORT": str(port), "NEXT_PUBLIC_BACKEND_PORT": str(port),
+            # Next.js sends anonymous telemetry unless told not to; this local app does not.
+            "NEXT_TELEMETRY_DISABLED": "1"}
 
 
 def standalone_server(frontend_dir: Path) -> Optional[Path]:

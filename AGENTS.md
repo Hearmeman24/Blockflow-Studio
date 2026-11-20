@@ -122,7 +122,7 @@ needs their explicit yes.
 
 | Command | When |
 |---|---|
-| `uv run app.py` | Run the app (backend :47301, frontend :47300): the production web interface on the Next.js standalone server, built first when its stamp is missing or stale (`backend/app_update/frontend_build.py`). |
+| `uv run app.py` | Run the app (backend :47301, frontend :47300): the production web interface on the Next.js standalone server, built first when its stamp is missing or stale (`backend/app_update/frontend_build.py`). The launcher and the build set `NEXT_TELEMETRY_DISABLED=1`. |
 | `uv run app.py --dev` | The Next.js development server instead (`npm run dev`, also `BLOCKFLOW_DEV=1`): hot reload and errors in the page, about 1.5 to 2 GB of memory against about 115 MB built. For working on blocks or the app. |
 | `uv run app.py --packaged` | Serve the existing build as it is; never installs or builds (also `BLOCKFLOW_PACKAGED=1`). Stops with exit 1 when there is no build; warns when it is stale. |
 | `python3 scripts/doctor.py [--json] [--expect-running]` | Health check; read-only, no keys in the output. `--json` for bug reports. |

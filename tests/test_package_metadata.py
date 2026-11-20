@@ -69,6 +69,8 @@ def test_licence_is_mit_everywhere():
     assert "Copyright (c) 2026 BlockFlow contributors" in licence
     assert "Permission is hereby granted, free of charge" in licence
     assert _package()["license"] == "MIT"
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["license"] == "MIT"
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "PolyForm" not in readme
     assert "source-available" not in readme.lower()

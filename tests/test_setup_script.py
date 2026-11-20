@@ -100,7 +100,8 @@ def test_a_fresh_checkout_builds_the_web_interface_last(fake, root):
     code, text = run(fake)
     assert code == 0, text
     assert [c for c in fake.calls if c in (*INSTALLS, BUILD)] == [UV_SYNC, NPM_CI, CODEGEN, FASTMCP, BUILD]
-    assert fake.extra_envs[" ".join(BUILD)] == {"BACKEND_PORT": "47301", "NEXT_PUBLIC_BACKEND_PORT": "47301"}
+    assert fake.extra_envs[" ".join(BUILD)] == {
+        "BACKEND_PORT": "47301", "NEXT_PUBLIC_BACKEND_PORT": "47301", "NEXT_TELEMETRY_DISABLED": "1"}
     assert install_steps.frontend_build.build_state(root, 47301).value == "current"
     assert "frontend_build: done" in text
 

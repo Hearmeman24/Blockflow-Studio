@@ -406,7 +406,8 @@ def test_a_new_private_block_rebuilds(fake, root):
 def test_the_build_gets_the_backend_port(fake, root):
     code, _ = built_auto(fake, BACKEND_PORT="48201")  # another port: a rebuild
     assert code == 0
-    assert fake.extra_envs[" ".join(BUILD)] == {"BACKEND_PORT": "48201", "NEXT_PUBLIC_BACKEND_PORT": "48201"}
+    assert fake.extra_envs[" ".join(BUILD)] == {
+        "BACKEND_PORT": "48201", "NEXT_PUBLIC_BACKEND_PORT": "48201", "NEXT_TELEMETRY_DISABLED": "1"}
     assert build_state(root, 48201) == "current"
     assert build_state(root, 47301) == "stale"
 
@@ -572,3 +573,10 @@ def test_frontend_env_binds_the_launcher_host_and_fixes_the_ports():
     assert env["NEXT_PUBLIC_BACKEND_PORT"] == "48201"
     assert env["HOSTNAME"] == "127.0.0.1"
     assert env["PATH"] == "/bin"
+
+
+def test_frontend_env_turns_next_telemetry_off_for_the_server_and_dev():
+    # One environment starts both `next dev` and the standalone server; a shell value cannot turn it back on.
+    env = app._frontend_env(backend_port=48201, frontend_port=48200, host="127.0.0.1",
+                            base={"PATH": "/bin", "NEXT_TELEMETRY_DISABLED": "0"})
+    assert env["NEXT_TELEMETRY_DISABLED"] == "1"

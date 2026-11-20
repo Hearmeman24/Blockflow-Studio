@@ -213,6 +213,11 @@ def test_the_build_environment_fixes_the_backend_port():
     assert env["PATH"] == "/bin"
 
 
+def test_the_build_environment_turns_next_telemetry_off():
+    env = fb.build_env({"PATH": "/bin", "NEXT_TELEMETRY_DISABLED": "0"}, 48201)
+    assert env["NEXT_TELEMETRY_DISABLED"] == "1"
+
+
 @pytest.mark.parametrize("raw,port", [(None, 47301), ("", 47301), ("48201", 48201), ("nope", 47301)])
 def test_backend_port_reads_the_environment(raw, port):
     environ = {} if raw is None else {"BACKEND_PORT": raw}

@@ -184,7 +184,7 @@ function ShellBody({
       )}
 
       {promptRule !== 'none' && (
-        <PromptField state={state} optional={promptRule === 'optional'} maxLength={spec?.prompt.max_length ?? null} />
+        <PromptField blockId={blockId} state={state} optional={promptRule === 'optional'} maxLength={spec?.prompt.max_length ?? null} />
       )}
 
       {spec && (
@@ -242,8 +242,9 @@ function SourceControls({ state, blockId }: { state: GenerationBlockState; block
   )
 }
 
-function PromptField({ state, optional, maxLength }: { state: GenerationBlockState; optional: boolean; maxLength: number | null }) {
-  const id = `prompt-${state.names.mode}`
+function PromptField({ blockId, state, optional, maxLength }: { blockId: string; state: GenerationBlockState; optional: boolean; maxLength: number | null }) {
+  // Per block: blocks of one mode (or two of one type) share a canvas, and a label's `for` is document-wide.
+  const id = `${blockId}-prompt`
   const label = optional ? 'Generation Prompt (optional)' : 'Generation Prompt'
   const text = state.prompt
   const over = maxLength !== null && text.length > maxLength

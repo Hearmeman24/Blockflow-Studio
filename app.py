@@ -322,6 +322,8 @@ def _frontend_env(*, backend_port: int, frontend_port: int, host: str,
         # 127.0.0.1 unless allowed origins are set (launcher_protocol.frontend_host):
         # on shared Wi-Fi anyone could otherwise read the GET routes and /outputs.
         "HOSTNAME": host,
+        # Next.js sends anonymous telemetry unless told not to; this local app does not.
+        "NEXT_TELEMETRY_DISABLED": "1",
     }
 
 
