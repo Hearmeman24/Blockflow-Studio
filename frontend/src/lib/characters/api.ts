@@ -55,17 +55,21 @@ export async function listCharacters(): Promise<Character[]> {
   return body.characters as Character[]
 }
 
-/** Raw-bytes headers shared by the face and media uploads; the backend decodes `X-Filename`. */
-function rawUpload(file: File): Promise<RequestInit> {
-  return file.arrayBuffer().then((body) => ({
+/**
+ * Raw-bytes request shared by the face and media uploads; the backend decodes
+ * `X-Filename`. The body is the File itself, which the browser streams from
+ * disk (an explicit Content-Type wins over `file.type`).
+ */
+function rawUpload(file: File): RequestInit {
+  return {
     method: 'POST',
     headers: {
       'Content-Type': 'application/octet-stream',
       'X-Filename': encodeURIComponent(file.name),
       'X-Content-Type': file.type || 'application/octet-stream',
     },
-    body,
-  }))
+    body: file,
+  }
 }
 
 function setMeta(params: URLSearchParams, meta: CharacterMediaMeta): void {
@@ -84,7 +88,7 @@ export async function createCharacter({ name, face, meta = {} }: CharacterCreate
   const params = new URLSearchParams({ name })
   setMeta(params, meta)
   const url = directBackendUrl(`${CHARACTERS_URL}?${params}`)
-  return characterOf(await request(url, await rawUpload(face), 'create the character'), 'create the character')
+  return characterOf(await request(url, rawUpload(face), 'create the character'), 'create the character')
 }
 
 export async function getCharacter(id: string): Promise<Character> {
@@ -112,7 +116,7 @@ export async function uploadCharacterMedia(
   const params = new URLSearchParams({ kind })
   setMeta(params, meta)
   const url = directBackendUrl(`${characterUrl(id)}/media?${params}`)
-  const body = await request(url, await rawUpload(file), `add ${file.name}`)
+  const body = await request(url, rawUpload(file), `add ${file.name}`)
   const character = characterOf(body, `add ${file.name}`)
   return { media: body.media as CharacterMedia, character }
 }

@@ -10,6 +10,7 @@ import {
 import { useViewerHistory } from '@/lib/use-viewer-history'
 import { BlockFooter } from '@/components/pipeline/block-footer'
 import { DownloadButton } from '@/components/pipeline/download-button'
+import { ShowOlderButton } from '@/components/pipeline/viewer-strip'
 
 const PORT_AUDIO = 'audio'
 
@@ -35,7 +36,9 @@ function filenameOf(url: string): string {
 
 function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
   const currentUrls = toAudioUrls(inputs.audio)
-  const { history: accumulated, displayUrls, selectedIndex, select: setSelectedIndex, clear } = useViewerHistory(currentUrls)
+  const {
+    history: accumulated, displayUrls, selectedIndex, select: setSelectedIndex, clear, stripStart, hiddenOlder, showOlder,
+  } = useViewerHistory(currentUrls)
   const selected = useMemo(() => {
     if (displayUrls.length === 0) return ''
     return displayUrls[Math.min(selectedIndex, displayUrls.length - 1)]
@@ -62,21 +65,25 @@ function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
           </div>
           {displayUrls.length > 1 && (
             <div className="space-y-0.5 max-h-[180px] overflow-y-auto rounded border border-border/60 p-1">
-              {displayUrls.map((u, i) => (
-                <button
-                  key={u}
-                  type="button"
-                  onClick={() => setSelectedIndex(i)}
-                  className={`w-full text-left px-1.5 py-1 rounded text-[10px] font-mono truncate transition-colors ${
-                    i === selectedIndex
-                      ? 'bg-primary/15 text-foreground'
-                      : 'text-muted-foreground hover:bg-muted/30 hover:text-foreground'
-                  }`}
-                >
-                  <span className="mr-1.5 text-muted-foreground">#{i + 1}</span>
-                  {filenameOf(u)}
-                </button>
-              ))}
+              <ShowOlderButton hidden={hiddenOlder} onClick={showOlder} />
+              {displayUrls.slice(stripStart).map((u, j) => {
+                const i = stripStart + j
+                return (
+                  <button
+                    key={u}
+                    type="button"
+                    onClick={() => setSelectedIndex(i)}
+                    className={`w-full text-left px-1.5 py-1 rounded text-[10px] font-mono truncate transition-colors ${
+                      i === selectedIndex
+                        ? 'bg-primary/15 text-foreground'
+                        : 'text-muted-foreground hover:bg-muted/30 hover:text-foreground'
+                    }`}
+                  >
+                    <span className="mr-1.5 text-muted-foreground">#{i + 1}</span>
+                    {filenameOf(u)}
+                  </button>
+                )
+              })}
             </div>
           )}
           {accumulated.length > 0 && (

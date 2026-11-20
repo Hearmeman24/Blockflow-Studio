@@ -33,11 +33,15 @@ if str(ROOT) not in sys.path:
 
 # Standard library only (it is imported before anything is installed).
 from backend.app_update.launcher_protocol import (  # noqa: E402
+    ALL_IPV4_HOST,
     LAUNCH_MODE_ENV,
+    ORIGINS_ENV,
     REQUEST_ORDER,
     SUPERVISOR_ENV,
     ControlFile,
     LaunchMode,
+    frontend_host,
+    settings_db_path,
 )
 
 # Arbitrary, uncommon ports (scripts/doctor.py DEFAULT_*_PORT): 3000/8000 collide
@@ -250,17 +254,36 @@ def _backend_command(backend_port: int) -> list[str]:
     ]
 
 
-def _frontend_command(*, packaged: bool, frontend_port: int) -> tuple[list[str], Path]:
+def _frontend_command(*, packaged: bool, frontend_port: int, host: str) -> tuple[list[str], Path]:
     if packaged:
         server = _find_standalone_server()
         return ["node", str(server)], server.parent
-    return ["npm", "run", "dev", "--", "--port", str(frontend_port)], FRONTEND_DIR
+    return ["npm", "run", "dev", "--", "--port", str(frontend_port), "--hostname", host], FRONTEND_DIR
 
 
-def _frontend_env(*, backend_port: int, frontend_port: int, base: Mapping[str, str] | None = None) -> dict[str, str]:
+def _current_frontend_host() -> str:
+    """Where the web interface listens, decided now: ``BLOCKFLOW_ALLOWED_ORIGINS``
+    (environment, else the repository ``.env``) or the stored ``allowed_origins``
+    preference, read-only (launcher_protocol.frontend_host). Called on every
+    start of the web interface, so a restart applies a change."""
+    return frontend_host(os.environ, ROOT / ".env", settings_db_path(os.environ))
+
+
+def _listen_line(host: str) -> str:
+    """The one launcher line about where the web interface listens."""
+    if host == ALL_IPV4_HOST:
+        return (f"[app] The web interface listens on every network address ({host}): {ORIGINS_ENV} or the "
+                "allowed origins setting is set, so other devices can open it. Clear both and restart to keep "
+                "it on this computer only.")
+    return (f"[app] The web interface listens on this computer only ({host}). To use it from another device, "
+            f"set {ORIGINS_ENV} to that address and restart (see README.md).")
+
+
+def _frontend_env(*, backend_port: int, frontend_port: int, host: str,
+                  base: Mapping[str, str] | None = None) -> dict[str, str]:
     """The web server's environment. ``PORT`` and ``HOSTNAME`` are read by the
-    standalone server when it starts; ``next dev`` takes ``--port`` and keeps
-    its own default address. The backend port is also fixed in a production
+    standalone server when it starts; ``next dev`` takes ``--port`` and
+    ``--hostname`` instead. The backend port is also fixed in a production
     build (the build stamp includes it) and read by ``next dev`` at start."""
     return {
         **(os.environ if base is None else base),
@@ -269,11 +292,9 @@ def _frontend_env(*, backend_port: int, frontend_port: int, base: Mapping[str, s
         # can reach FastAPI directly without going through the Next.js proxy.
         "NEXT_PUBLIC_BACKEND_PORT": str(backend_port),
         "PORT": str(frontend_port),
-        # Every IPv4 address, like `next dev`: the app stays reachable from
-        # another device where it was before. The backend still listens on
-        # 127.0.0.1 only, and its origin guard refuses changes from pages not
-        # listed in BLOCKFLOW_ALLOWED_ORIGINS.
-        "HOSTNAME": "0.0.0.0",
+        # 127.0.0.1 unless allowed origins are set (launcher_protocol.frontend_host):
+        # on shared Wi-Fi anyone could otherwise read the GET routes and /outputs.
+        "HOSTNAME": host,
     }
 
 
@@ -518,13 +539,15 @@ def _launch() -> LaunchOutcome:
         if frontend_mode is FrontendMode.BUILD:
             # A no-op stamp check after the first start or an update's own build step.
             _ensure_frontend_build()
+        host = _current_frontend_host()  # again on every (re)start: settings may have changed
+        print(_listen_line(host))
         try:
-            frontend_cmd, frontend_cwd = _frontend_command(packaged=packaged, frontend_port=frontend_port)
+            frontend_cmd, frontend_cwd = _frontend_command(packaged=packaged, frontend_port=frontend_port, host=host)
         except FileNotFoundError as exc:
             raise FrontendUnavailable(f"[app] {exc}") from exc
         print(f"[app] Starting Next.js {mode.frontend_label} on :{frontend_port}...")
         return subprocess.Popen(frontend_cmd, cwd=str(frontend_cwd),
-                                env=_frontend_env(backend_port=backend_port, frontend_port=frontend_port))
+                                env=_frontend_env(backend_port=backend_port, frontend_port=frontend_port, host=host))
 
     def wait_for_servers() -> None:
         print("[app] Waiting for servers to start...")

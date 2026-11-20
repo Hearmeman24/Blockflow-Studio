@@ -79,5 +79,10 @@ describe('image_inspector metadata', () => {
     expect(screen.getByText('42')).toBeInTheDocument()
     expect(screen.getByText('seedream')).toBeInTheDocument()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/file-metadata/fox.png'))
+    // The save sends the File itself (streamed by the browser), not a copy in memory.
+    const save = fetchMock.mock.calls.find(([url]) => url === '/api/blocks/upload_image_to_tmpfiles/save-local') as
+      | unknown[]
+      | undefined
+    expect((save?.[1] as RequestInit).body).toBe(file)
   })
 })

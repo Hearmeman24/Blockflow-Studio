@@ -26,13 +26,14 @@ import json
 import os
 import time
 from typing import Iterable
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-ORIGINS_ENV = "BLOCKFLOW_ALLOWED_ORIGINS"
-ORIGINS_PREF = "allowed_origins"
+# Declared with the launcher: setting it also makes the web interface listen
+# on every network address (launcher_protocol.frontend_host).
+from backend.app_update.launcher_protocol import ORIGINS_ENV, ORIGINS_PREF, parse_origins, parse_origins_pref
+
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 DEFAULT_FRONTEND_PORT = 47300
 DEFAULT_BACKEND_PORT = 47301
@@ -48,31 +49,6 @@ def _port(env: str, default: int) -> int:
         return default
 
 
-def parse_origins(raw: str | Iterable[str] | None) -> list[str]:
-    """Normalised ``scheme://host[:port]`` origins; wildcards and anything
-    that is not http(s) are dropped."""
-    if raw is None:
-        return []
-    items = raw.split(",") if isinstance(raw, str) else list(raw)
-    out: list[str] = []
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        value = item.strip()
-        if not value or "*" in value:
-            continue
-        try:
-            parts = urlsplit(value)
-        except ValueError:
-            continue
-        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
-            continue
-        origin = f"{parts.scheme}://{parts.netloc}".lower()
-        if origin not in out:
-            out.append(origin)
-    return out
-
-
 def allowed_origins(*, frontend_port: int, backend_port: int, extra: Iterable[str]) -> list[str]:
     hosts = ("localhost", "127.0.0.1", "[::1]")
     base = [f"http://{h}:{p}" for p in (frontend_port, backend_port) for h in hosts]
@@ -86,13 +62,8 @@ def _pref_origins() -> list[str]:
         raw = settings_store.get_app_pref(ORIGINS_PREF)
     except Exception:  # noqa: BLE001 - an unreadable settings DB means "none"
         return []
-    if not raw:
-        return []
-    try:
-        value = json.loads(raw)
-    except ValueError:
-        value = raw
-    return parse_origins(value if isinstance(value, (list, str)) else None)
+    # The same reading as the launcher's (launcher_protocol.stored_origins).
+    return parse_origins_pref(raw)
 
 
 class _Origins:

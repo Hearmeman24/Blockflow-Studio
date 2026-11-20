@@ -208,8 +208,8 @@ def api_runs_list(
     mk = _multi_filter(media_kind, RUN_MEDIA_KINDS)
     pq = q.strip() if q and q.strip() else None
     src = _multi_filter(source, RUN_SOURCES)
-    total = db.count_runs(favorited_only=favorited, media_kind=mk, prompt_query=pq, hide_partial=hide_partial, source=src, character=chars)
-    runs = db.list_runs(limit=limit, offset=offset, favorited_only=favorited, media_kind=mk, prompt_query=pq, hide_partial=hide_partial, source=src, character=chars)
+    runs, total = db.list_runs_page(limit=limit, offset=offset, favorited_only=favorited, media_kind=mk,
+                                    prompt_query=pq, hide_partial=hide_partial, source=src, character=chars)
     return JSONResponse({"ok": True, "runs": runs, "total": total, "limit": limit, "offset": offset})
 
 

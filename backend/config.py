@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import sys
 from pathlib import Path
+
+from backend.app_update import launcher_protocol
+from backend.app_update.launcher_protocol import read_env_file
 
 APP_TITLE = "BlockFlow"
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -18,44 +20,15 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 # from the legacy ROOT_DIR layout on first launch.
 
 # Default user-data folder names (see resolve_user_data_dir).
-_DIR_NAME = "BlockFlow Studio"
-_DIR_SLUG = "blockflow-studio"
+_DIR_NAME = launcher_protocol.DIR_NAME
+_DIR_SLUG = launcher_protocol.DIR_SLUG
 
 
 def resolve_user_data_dir() -> Path:
-    """Resolution order:
-      1. $BLOCKFLOW_DATA_DIR (explicit override; respected verbatim).
-      2. $BLOCKFLOW_HOME (portable product home; respected verbatim).
-      3. macOS:   ~/Library/Application Support/BlockFlow Studio
-      3. Linux:   $XDG_DATA_HOME/blockflow-studio if set, else ~/.local/share/blockflow-studio
-      4. Windows: %LOCALAPPDATA%\\BlockFlow Studio if set, else ~/AppData/Local/BlockFlow Studio
-                  (LOCALAPPDATA is machine-local — right choice for a multi-GB
-                  SQLite DB; APPDATA would sync via Windows roaming profiles.)
-      5. Other:   ~/.blockflow-studio (catch-all so worktrees don't fragment).
-
-    The names differ from the original BlockFlow app's folder on purpose: that
-    folder holds the original app's database, which this app must not open.
-    Nothing is migrated from it.
-    """
-    explicit = os.environ.get("BLOCKFLOW_DATA_DIR")
-    if explicit:
-        return Path(explicit).expanduser()
-    home = os.environ.get("BLOCKFLOW_HOME")
-    if home:
-        return Path(home).expanduser()
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / _DIR_NAME
-    if sys.platform.startswith("linux"):
-        xdg = os.environ.get("XDG_DATA_HOME")
-        if xdg:
-            return Path(xdg) / _DIR_SLUG
-        return Path.home() / ".local" / "share" / _DIR_SLUG
-    if sys.platform == "win32" or sys.platform.startswith("cygwin"):
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        if local_appdata:
-            return Path(local_appdata) / _DIR_NAME
-        return Path.home() / "AppData" / "Local" / _DIR_NAME
-    return Path.home() / f".{_DIR_SLUG}"
+    """The user data folder (resolution order in
+    ``launcher_protocol.resolve_user_data_dir``, which app.py shares to find
+    the settings database without importing this module)."""
+    return launcher_protocol.resolve_user_data_dir(os.environ)
 
 
 def ensure_directory(path: Path) -> Path:
@@ -172,20 +145,14 @@ def __getattr__(name: str):
 FLOWS_DIR = USER_DATA_DIR / "flows"
 ensure_directory(FLOWS_DIR)
 PROMPT_LIBRARY_PATH = USER_DATA_DIR / "prompt_library.json"
-RUN_HISTORY_DB_PATH = USER_DATA_DIR / "run_history.db"
+RUN_HISTORY_DB_PATH = USER_DATA_DIR / launcher_protocol.SETTINGS_DB_NAME
 
 
 def _load_env_file(path: Path) -> None:
-    if not path.exists():
-        return
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        key = key.strip()
-        val = val.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+    """Values from ``path`` for names the environment does not set. The parser
+    is shared with app.py, so both agree on what the file says."""
+    for key, val in read_env_file(path).items():
+        if key not in os.environ:
             os.environ[key] = val
 
 

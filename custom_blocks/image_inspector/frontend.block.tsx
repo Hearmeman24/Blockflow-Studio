@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { useSessionState } from '@/lib/use-session-state'
 import { pickFiles } from '@/lib/file-picker'
+import { postFile } from '@/lib/post-file'
 import {
   PORT_IMAGE,
   type BlockDef,
@@ -33,16 +34,7 @@ interface ImageEntry {
 }
 
 async function saveLocal(file: File): Promise<string> {
-  const res = await fetch(SAVE_LOCAL_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'X-Filename': file.name,
-      'X-Content-Type': file.type || 'application/octet-stream',
-    },
-    body: await file.arrayBuffer(),
-  })
-  const data = await res.json()
+  const data = await postFile(SAVE_LOCAL_ENDPOINT, file)
   if (!data.ok) throw new Error(data.error || 'Save failed')
   return data.image_url as string
 }

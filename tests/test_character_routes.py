@@ -295,15 +295,44 @@ def test_no_route_creates_a_faceless_character(client):
     assert client.get("/api/characters").json()["characters"] == []
 
 
-def test_create_failure_while_writing_leaves_nothing(client, out, monkeypatch):
-    def boom(self, data):
+@pytest.mark.parametrize("where", ["receiving", "moving into place"])
+def test_create_failure_while_writing_leaves_nothing(client, out, monkeypatch, where):
+    # The body streams to a temp file (upload_stream) that is then moved into
+    # the character's folder: a full disk can fail either step.
+    from backend import upload_stream
+
+    def boom(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
     with monkeypatch.context() as mp:
-        mp.setattr(Path, "write_bytes", boom)
+        if where == "receiving":
+            mp.setattr(upload_stream.ReceivedUpload, "_write", boom)
+        else:
+            mp.setattr(upload_stream, "move_into_place", boom)
         r = _post(client, {"name": "Ana"}, headers={"X-Filename": "a.png"})
     assert r.status_code == 500 and r.json()["ok"] is False
+    assert r.json()["error"] == "The file could not be saved: No space left on device."
     _nothing_left(client, out)
+
+
+@pytest.mark.parametrize("where", ["receiving", "moving into place"])
+def test_upload_failure_while_writing_leaves_nothing(client, out, monkeypatch, where):
+    from backend import upload_stream
+
+    c = _mk(client)
+    before = sorted(p for p in out.rglob("*") if p.is_file())
+
+    def boom(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    with monkeypatch.context() as mp:
+        if where == "receiving":
+            mp.setattr(upload_stream.ReceivedUpload, "_write", boom)
+        else:
+            mp.setattr(upload_stream, "move_into_place", boom)
+        r = _up(client, c["id"], name="b.png")
+    assert r.status_code == 500 and r.json()["error"] == "The file could not be saved: No space left on device."
+    assert sorted(p for p in out.rglob("*") if p.is_file()) == before
 
 
 def test_create_failure_in_the_database_leaves_no_file(client, out, monkeypatch):

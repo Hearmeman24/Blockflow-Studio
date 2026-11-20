@@ -1,5 +1,6 @@
 """Tool group: generation jobs (/api/jobs). Status, waiting, cancelling, listing."""
 
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -18,8 +19,19 @@ POLL_INTERVAL_S = 3.0
 DEFAULT_TIMEOUT_S = 600.0
 MAX_TIMEOUT_S = 3600.0
 
+# Set when the client is gone (stdin ended, or the process is exiting; see
+# server.main). A wait then returns between polls with the jobs still pending.
+# Only the waiting stops: no job is cancelled.
+STOP = threading.Event()
+
+
+def _pause(seconds: float) -> None:
+    """Sleep between polls, waking at once when STOP is set."""
+    STOP.wait(seconds)
+
+
 # Injection points (tests replace these).
-sleep: Callable[[float], None] = time.sleep
+sleep: Callable[[float], None] = _pause
 clock: Callable[[], float] = time.monotonic
 
 
@@ -98,7 +110,8 @@ def _timeout(timeout_s: float | None) -> float:
 
 
 def wait_for(job_ids: list[str], timeout_s: float) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Poll until every job is terminal or the timeout passes. (jobs by id, still-pending ids)."""
+    """Poll until every job is terminal, the timeout passes or STOP is set.
+    (jobs by id, still-pending ids)."""
     deadline = clock() + timeout_s
     jobs: dict[str, dict[str, Any]] = {}
     while True:
@@ -106,9 +119,11 @@ def wait_for(job_ids: list[str], timeout_s: float) -> tuple[dict[str, dict[str, 
             if job_id not in jobs or jobs[job_id].get("status") not in TERMINAL:
                 jobs[job_id] = fetch_job(job_id)
         pending = [j for j in job_ids if jobs[j].get("status") not in TERMINAL]
-        if not pending or clock() >= deadline:
+        if not pending or clock() >= deadline or STOP.is_set():
             return jobs, pending
         sleep(min(POLL_INTERVAL_S, max(0.0, deadline - clock())))
+        if STOP.is_set():
+            return jobs, pending
 
 
 @tool(read_only=True)

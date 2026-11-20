@@ -1,7 +1,8 @@
 // Shared raw-bytes POST for block upload endpoints (/api/blocks/*/upload,
 // /save-local). Responses are expected to be JSON; anything else (e.g. a
 // plain-text error from the Next.js proxy or uvicorn) becomes a readable
-// Error instead of a JSON SyntaxError.
+// Error instead of a JSON SyntaxError. The backend streams the body to disk
+// (backend/upload_stream.py).
 export interface PostFileResponse {
   ok?: boolean
   error?: string
@@ -19,7 +20,9 @@ export async function postFile(
       'X-Filename': file.name,
       'X-Content-Type': file.type || 'application/octet-stream',
     },
-    body: await file.arrayBuffer(),
+    // The File itself: the browser streams it from disk instead of copying it
+    // into memory first. The explicit Content-Type above wins over file.type.
+    body: file,
   })
   const text = await res.text()
   try {

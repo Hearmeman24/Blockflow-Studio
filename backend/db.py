@@ -306,6 +306,29 @@ def count_runs(
     return len(_filtered_runs(favorited_only, media_kind, prompt_query, hide_partial, source, character))
 
 
+def list_runs_page(
+    limit: int = 50,
+    offset: int = 0,
+    favorited_only: bool = False,
+    media_kind: RunFilter = None,
+    prompt_query: str | None = None,
+    hide_partial: bool = False,
+    source: RunFilter = None,
+    character: RunFilter = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """``(list_runs(...), count_runs(...))`` for one request. With a filter the
+    runs are loaded and parsed once and both come from that one list (the
+    Artifacts page always filters); without one, two cheap SQL queries."""
+    media_kind = _filter_set(media_kind)
+    source = _filter_set(source)
+    character = _character_filter(character)
+    if not media_kind and not prompt_query and not hide_partial and not source and not character:
+        return (list_runs(limit=limit, offset=offset, favorited_only=favorited_only),
+                count_runs(favorited_only=favorited_only))
+    filtered = _filtered_runs(favorited_only, media_kind, prompt_query, hide_partial, source, character)
+    return filtered[offset : offset + limit], len(filtered)
+
+
 # MCP-generated runs use this id prefix.
 _MCP_RUN_PREFIX = "run-mcp-"
 

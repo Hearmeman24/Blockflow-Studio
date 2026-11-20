@@ -1,13 +1,15 @@
 """HTTP API for characters (`/api/characters*`). Logic lives in backend.characters."""
 from __future__ import annotations
 
+import functools
 from typing import Any
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
-from backend import characters
+from backend import characters, upload_stream
 
 router = APIRouter()
 
@@ -54,30 +56,44 @@ def list_characters() -> JSONResponse:
 async def create_character(request: Request) -> JSONResponse:
     """`POST /api/characters?name=&width=&height=`: the face image is the raw
     body and its file name the `X-Filename` header. A character cannot exist
-    without a name and a face, so the old JSON body is refused."""
+    without a name and a face, so the old JSON body is refused. The body
+    streams to disk (`upload_stream`) and the store moves it into place."""
     params = request.query_params
-    body = await request.body()
-    if body and request.headers.get("content-type", "").lower().startswith("application/json"):
-        return _err(NAME_AND_FACE_REQUIRED, 422)
+
+    async def save(body: upload_stream.ReceivedUpload) -> JSONResponse:
+        if body.size and request.headers.get("content-type", "").lower().startswith("application/json"):
+            return _err(NAME_AND_FACE_REQUIRED, 422)
+        try:
+            name = characters.clean_name(params.get("name") or "")
+        except characters.CharacterError as exc:
+            return _from_exc(exc)
+        if not body.size:
+            return _err("A character needs a face image.", 400)
+        try:
+            character = await run_in_threadpool(functools.partial(
+                characters.create_character_with_face,
+                name,
+                filename=decode_filename(request.headers.get("X-Filename")),
+                source=body.path,
+                width=params.get("width"),
+                height=params.get("height"),
+            ))
+        except characters.CharacterError as exc:
+            return _from_exc(exc)
+        return JSONResponse({"ok": True, "character": character})
+
+    return await _receive(request, save)
+
+
+async def _receive(request: Request, save) -> JSONResponse:
+    """Stream the body into the characters folder and answer with ``save``;
+    a disk error while receiving or storing is a readable 500."""
     try:
-        name = characters.clean_name(params.get("name") or "")
-    except characters.CharacterError as exc:
-        return _from_exc(exc)
-    if not body:
-        return _err("A character needs a face image.", 400)
-    try:
-        character = characters.create_character_with_face(
-            name,
-            filename=decode_filename(request.headers.get("X-Filename")),
-            data=body,
-            width=params.get("width"),
-            height=params.get("height"),
-        )
-    except characters.CharacterError as exc:
-        return _from_exc(exc)
+        folder = await run_in_threadpool(characters.upload_folder)
+        async with upload_stream.receive_upload(request, folder) as body:
+            return await save(body)
     except OSError as exc:
         return _err(f"The file could not be saved: {exc.strerror or 'disk error'}.", 500)
-    return JSONResponse({"ok": True, "character": character})
 
 
 @router.get("/api/characters/{character_id}")
@@ -120,31 +136,32 @@ def delete_character(character_id: str) -> JSONResponse:
 async def upload_media(character_id: str, request: Request) -> JSONResponse:
     params = request.query_params
     try:
-        characters.get_character(character_id)
+        await run_in_threadpool(characters.get_character, character_id)
     except characters.CharacterError as exc:
         return _from_exc(exc)
     kind = characters.canonical_kind(params.get("kind"))  # "voice" is audio
     if kind not in characters.KINDS:
         return _err(characters.KINDS_MESSAGE, 422)
-    body = await request.body()
-    if not body:
-        return _err("The file is empty.", 400)
-    filename = decode_filename(request.headers.get("X-Filename"))
-    try:
-        media, character = characters.add_media(
-            character_id,
-            kind=kind,
-            filename=filename,
-            data=body,
-            width=params.get("width"),
-            height=params.get("height"),
-            duration_s=params.get("duration_s"),
-        )
-    except characters.CharacterError as exc:
-        return _from_exc(exc)
-    except OSError as exc:
-        return _err(f"The file could not be saved: {exc.strerror or 'disk error'}.", 500)
-    return JSONResponse({"ok": True, "media": media, "character": character})
+
+    async def save(body: upload_stream.ReceivedUpload) -> JSONResponse:
+        if not body.size:
+            return _err("The file is empty.", 400)
+        try:
+            media, character = await run_in_threadpool(functools.partial(
+                characters.add_media,
+                character_id,
+                kind=kind,
+                filename=decode_filename(request.headers.get("X-Filename")),
+                source=body.path,
+                width=params.get("width"),
+                height=params.get("height"),
+                duration_s=params.get("duration_s"),
+            ))
+        except characters.CharacterError as exc:
+            return _from_exc(exc)
+        return JSONResponse({"ok": True, "media": media, "character": character})
+
+    return await _receive(request, save)
 
 
 @router.put("/api/characters/{character_id}/media/order")

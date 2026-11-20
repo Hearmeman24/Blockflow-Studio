@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from backend import config, db
+from backend import config, db, upload_stream
 
 KINDS: tuple[str, ...] = ("image", "video", "audio")
 # Old clients may still say ``voice``; it is the same kind as audio.
@@ -330,19 +330,42 @@ def create_character(name: Any, description: Any = None) -> dict[str, Any]:
             conn.close()
 
 
+def upload_folder() -> Path:
+    """Where an upload is received before ``source=`` moves it into a
+    character's folder: the characters root, on the same file system."""
+    root = _characters_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _store(dest: Path, data: bytes, source: Path | None) -> None:
+    if source is not None:
+        upload_stream.move_into_place(source, dest)
+    else:
+        dest.write_bytes(data)
+
+
+def _size(data: bytes, source: Path | None) -> int:
+    return source.stat().st_size if source is not None else len(data)
+
+
 def create_character_with_face(
     name: Any,
     *,
     filename: Any,
-    data: bytes,
+    data: bytes = b"",
+    source: Path | None = None,
     width: Any = None,
     height: Any = None,
 ) -> dict[str, Any]:
     """Create a character together with its first image, which is its default
-    face. All or nothing: when the name or file is refused, or the write or the
-    database fails, no row, file or folder is left behind."""
+    face. The image is ``data``, or the file ``source`` (moved into place, so a
+    streamed upload is never read into memory). All or nothing: when the name
+    or file is refused, or the write or the database fails, no row, file or
+    folder is left behind."""
     clean = clean_name(name)
-    if not data:
+    size = _size(data, source)
+    if not size:
         raise ValidationError("A character needs a face image.")
     label = safe_filename(filename)
     ext = _extension(label)
@@ -363,7 +386,7 @@ def create_character_with_face(
         try:
             try:
                 folder.mkdir(parents=True, exist_ok=True)
-                dest.write_bytes(data)
+                _store(dest, data, source)
                 conn.execute(
                     "INSERT INTO characters (id, name, description, default_face_id, created_at, updated_at) "
                     "VALUES (?, ?, '', ?, ?, ?)",
@@ -373,7 +396,7 @@ def create_character_with_face(
                     "INSERT INTO character_media (id, character_id, kind, label, filename, "
                     "size_bytes, width, height, duration_s, position, created_at) "
                     "VALUES (?, ?, 'image', ?, ?, ?, ?, ?, NULL, 0, ?)",
-                    (media_id, character_id, label, stored, len(data),
+                    (media_id, character_id, label, stored, size,
                      _positive_int(width), _positive_int(height), now),
                 )
                 conn.commit()
@@ -477,12 +500,14 @@ def add_media(
     *,
     kind: Any,
     filename: Any,
-    data: bytes,
+    data: bytes = b"",
+    source: Path | None = None,
     width: Any = None,
     height: Any = None,
     duration_s: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Store a file and its row. Returns (media, character)."""
+    """Store a file (``data``, or the file ``source`` moved into place) and its
+    row. Returns (media, character)."""
     _check_char_id(character_id)
     with _lock:
         conn = _open()
@@ -491,7 +516,8 @@ def add_media(
             kind = canonical_kind(kind)
             if kind not in KINDS:
                 raise ValidationError(KINDS_MESSAGE)
-            if not data:
+            size = _size(data, source)
+            if not size:
                 raise ValidationError("The file is empty.")
             label = safe_filename(filename)
             ext = _extension(label)
@@ -505,7 +531,7 @@ def add_media(
             folder = _char_dir(character_id)
             folder.mkdir(parents=True, exist_ok=True)
             dest = folder / stored
-            dest.write_bytes(data)
+            _store(dest, data, source)
             try:
                 position = conn.execute(
                     "SELECT COUNT(*) FROM character_media WHERE character_id = ? AND kind = ?",
@@ -517,7 +543,7 @@ def add_media(
                     "size_bytes, width, height, duration_s, position, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        media_id, character_id, kind, label, stored, len(data),
+                        media_id, character_id, kind, label, stored, size,
                         _positive_int(width), _positive_int(height), _positive_number(duration_s),
                         position, now,
                     ),

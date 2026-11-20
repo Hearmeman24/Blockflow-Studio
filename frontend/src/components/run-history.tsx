@@ -32,6 +32,8 @@ export function artifactsListStatus({ isLoading, error, runs, placeholders }: {
   return runs === 0 && placeholders === 0 ? 'empty' : 'ready'
 }
 const NO_JOBS: JobSnapshot[] = []
+/** Wait this long after the last MCP job event before refetching runs and jobs. */
+const MCP_REFETCH_DEBOUNCE_MS = 1000
 
 /** Mixed shapes for the loading skeleton, so it reads as a masonry grid. */
 const SKELETON_ASPECTS = [0.8, 1.25, 1, 0.75, 1.5, 1, 0.8, 1.33]
@@ -81,12 +83,14 @@ export function RunHistory() {
   const offset = (page - 1) * PAGE_SIZE
   const mcpView = source === 'mcp'
   // SSE drives live updates in MCP view; the 15s poll is a fallback if the stream buffers.
+  // A batch of MCP jobs sends many events and each refetch filters the whole run
+  // history on the backend, so events are collapsed (MCP_REFETCH_DEBOUNCE_MS).
   const { runs, total, isLoading, error, mutate } = useRuns(
     PAGE_SIZE, offset, favoritesOnly, mediaKind, urlQuery, hidePartial, source,
     mcpView ? 15000 : 0, character,
   )
   const { jobs: mcpJobs, resource: mcpJobsResource, mutate: mutateJobs } = useMcpJobs(mcpView)
-  useMcpStream(mcpView, () => { mutate(); mutateJobs() })
+  useMcpStream(mcpView, () => { mutate(); mutateJobs() }, { debounceMs: MCP_REFETCH_DEBOUNCE_MS })
 
   const activeJobs = useMemo(() => mcpJobs.filter(isActiveJob), [mcpJobs])
   // Only show placeholders on page 1 (newest), where freshly-started jobs belong.

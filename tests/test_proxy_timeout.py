@@ -5,6 +5,7 @@ own readable error. Next.js drops a proxied request after
 Prompt Writer runs into a bare HTTP 500."""
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
@@ -26,8 +27,12 @@ def _proxy_timeout_s() -> int:
 
 
 def _longest_step_timeout(path: Path) -> int:
-    """The largest ``timeout=<n>`` of one blocking step in a sidecar."""
-    found = [int(n) for n in re.findall(r"timeout=(\d+)", path.read_text(encoding="utf-8"))]
+    """The largest ``<NAME>_TIMEOUT_S`` of one blocking step in a sidecar (its
+    children run through backend.cancellable with these limits)."""
+    spec = importlib.util.spec_from_file_location(f"_proxy_timeout_{path.parent.name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    found = [value for name, value in vars(module).items() if name.endswith("_TIMEOUT_S")]
     assert found
     return max(found)
 

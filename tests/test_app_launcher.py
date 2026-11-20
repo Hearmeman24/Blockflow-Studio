@@ -59,9 +59,10 @@ def test_find_standalone_server_missing_is_clear(tmp_path):
 def test_frontend_command_dev_uses_npm_dev():
     app = _load_app_module()
 
-    command, cwd = app._frontend_command(packaged=False, frontend_port=4123)
+    command, cwd = app._frontend_command(packaged=False, frontend_port=4123, host="127.0.0.1")
 
-    assert command == ["npm", "run", "dev", "--", "--port", "4123"]
+    # `next dev` listens on every interface unless told otherwise.
+    assert command == ["npm", "run", "dev", "--", "--port", "4123", "--hostname", "127.0.0.1"]
     assert cwd == app.FRONTEND_DIR
 
 
@@ -72,7 +73,7 @@ def test_frontend_command_packaged_uses_standalone_server(monkeypatch, tmp_path)
     server.write_text("", encoding="utf-8")
     monkeypatch.setattr(app, "_find_standalone_server", lambda: server)
 
-    command, cwd = app._frontend_command(packaged=True, frontend_port=4123)
+    command, cwd = app._frontend_command(packaged=True, frontend_port=4123, host="127.0.0.1")
 
     assert command == ["node", str(server)]
     assert cwd == server.parent

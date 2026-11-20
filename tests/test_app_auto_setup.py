@@ -561,9 +561,12 @@ def test_a_frontend_that_cannot_start_stops_the_app_with_its_reason(tmp_path, ca
     assert "could not be built" in capsys.readouterr().out
 
 
-def test_frontend_env_binds_like_the_dev_server_and_fixes_the_ports():
-    env = app._frontend_env(backend_port=48201, frontend_port=48200, base={"PATH": "/bin", "HOSTNAME": "mac"})
+def test_frontend_env_binds_the_launcher_host_and_fixes_the_ports():
+    # The host comes from launcher_protocol.frontend_host (tests/test_app_listen_address.py);
+    # the shell's own HOSTNAME never leaks through.
+    env = app._frontend_env(backend_port=48201, frontend_port=48200, host="127.0.0.1",
+                            base={"PATH": "/bin", "HOSTNAME": "mac"})
     assert env["PORT"] == "48200" and env["BACKEND_PORT"] == "48201"
     assert env["NEXT_PUBLIC_BACKEND_PORT"] == "48201"
-    assert env["HOSTNAME"] == "0.0.0.0"
+    assert env["HOSTNAME"] == "127.0.0.1"
     assert env["PATH"] == "/bin"

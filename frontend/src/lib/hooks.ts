@@ -72,17 +72,38 @@ export function parseJobEvent(data: unknown): JobSnapshot | null {
 
 /** Subscribe to the job-store SSE stream and call `onEvent` for every change to
  * an MCP-sourced job, so callers can revalidate. The stream carries all sources;
- * pipeline jobs are ignored here. EventSource auto-reconnects on drop. */
-export function useMcpStream(enabled: boolean, onEvent: (job: JobSnapshot) => void) {
+ * pipeline jobs are ignored here. EventSource auto-reconnects on drop. With
+ * `debounceMs`, events are collapsed: one call (with the latest job) once
+ * `debounceMs` passes without another MCP event, the same scheduler as
+ * `useProviderBalances`. A pending call is dropped on unmount. */
+export function useMcpStream(
+  enabled: boolean,
+  onEvent: (job: JobSnapshot) => void,
+  options: { debounceMs?: number } = {},
+) {
+  const debounceMs = options.debounceMs ?? 0
   const cb = useRef(onEvent)
   useEffect(() => { cb.current = onEvent })
   useEffect(() => {
     if (!enabled || typeof window === 'undefined') return
+    let timer: ReturnType<typeof setTimeout> | null = null
     const es = new EventSource('/api/jobs/events')
     es.onmessage = (event) => {
       const job = parseJobEvent(event.data)
-      if (job?.source === 'mcp') cb.current(job)
+      if (job?.source !== 'mcp') return
+      if (debounceMs <= 0) {
+        cb.current(job)
+        return
+      }
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        cb.current(job)
+      }, debounceMs)
     }
-    return () => es.close()
-  }, [enabled])
+    return () => {
+      if (timer) clearTimeout(timer)
+      es.close()
+    }
+  }, [enabled, debounceMs])
 }

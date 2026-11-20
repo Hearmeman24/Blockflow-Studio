@@ -69,6 +69,53 @@ describe('useMcpStream', () => {
   })
 })
 
+const MCP_REFETCH_DEBOUNCE_MS = 1000
+
+describe('useMcpStream with debounceMs', () => {
+  beforeEach(() => {
+    FakeEventSource.instances = []
+    vi.stubGlobal('EventSource', FakeEventSource)
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  test('ten job events inside the window cause one call, with the latest job', () => {
+    const onEvent = vi.fn()
+    renderHook(() => useMcpStream(true, onEvent, { debounceMs: MCP_REFETCH_DEBOUNCE_MS }))
+    const es = FakeEventSource.instances[0]
+
+    for (let i = 0; i < 10; i++) {
+      es.emit(jobEvent('mcp', `m${i}`))
+      vi.advanceTimersByTime(MCP_REFETCH_DEBOUNCE_MS / 10)
+    }
+    expect(onEvent).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(MCP_REFETCH_DEBOUNCE_MS)
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    expect(onEvent.mock.calls[0][0]).toMatchObject({ job_id: 'm9' })
+
+    es.emit(jobEvent('mcp', 'later'))
+    vi.advanceTimersByTime(MCP_REFETCH_DEBOUNCE_MS)
+    expect(onEvent).toHaveBeenCalledTimes(2)
+  })
+
+  test('pipeline jobs do not start the timer, and unmount drops a pending call', () => {
+    const onEvent = vi.fn()
+    const { unmount } = renderHook(() => useMcpStream(true, onEvent, { debounceMs: 500 }))
+    const es = FakeEventSource.instances[0]
+    es.emit(jobEvent('pipeline', 'p1'))
+    vi.advanceTimersByTime(1000)
+    expect(onEvent).not.toHaveBeenCalled()
+
+    es.emit(jobEvent('mcp', 'm1'))
+    unmount()
+    vi.advanceTimersByTime(1000)
+    expect(onEvent).not.toHaveBeenCalled()
+  })
+})
+
 describe('fetchMcpJobs', () => {
   afterEach(() => vi.unstubAllGlobals())
 

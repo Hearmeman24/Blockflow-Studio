@@ -65,8 +65,8 @@ function VideoStitcherBlock({
 
   const runStitch = useCallback(
     // `signal` is the run's: after a cancel nothing here writes a status or an
-    // output, so the runner's `cancelled` stays. (The server finishes the
-    // ffmpeg work it started; there is no route to stop it.)
+    // output, so the runner's `cancelled` stays. Aborting the request also
+    // stops the server's ffmpeg: the route watches for the client leaving.
     async (videos: string[], signal?: AbortSignal): Promise<string> => {
       if (videos.length === 0) throw new Error('No input videos')
       setIsStitching(true)

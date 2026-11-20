@@ -7,8 +7,13 @@ module to ``TOOL_GROUPS``. Tools reach the backend through
 ``references.normalize_references``.
 """
 
+import atexit
+import io
+import os
+import sys
+import threading
 from types import ModuleType
-from typing import Any
+from typing import Any, TextIO
 
 from blockflow_mcp import (
     tools_account,
@@ -69,5 +74,38 @@ def build_server() -> Any:
     return mcp
 
 
+def relay_stdin(source_fd: int, stop: threading.Event) -> TextIO:
+    """A text stream that carries everything read from ``source_fd`` and sets
+    ``stop`` when ``source_fd`` reaches its end (the client closed stdin).
+
+    The stdio transport reads ``sys.stdin``; giving it this relay is how the
+    server learns that its client is gone even while a tool (a long
+    ``wait_for_jobs``) is still running, which the transport alone only
+    notices after that tool returns."""
+    read_fd, write_fd = os.pipe()
+
+    def pump() -> None:
+        try:
+            while True:
+                block = os.read(source_fd, 64 * 1024)
+                if not block:
+                    break
+                view = memoryview(block)
+                while view:
+                    view = view[os.write(write_fd, view):]
+        except OSError:
+            pass
+        finally:
+            stop.set()
+            os.close(write_fd)
+
+    threading.Thread(target=pump, name="stdin-relay", daemon=True).start()
+    return io.TextIOWrapper(io.BufferedReader(io.FileIO(read_fd, "rb")), encoding="utf-8")
+
+
 def main() -> None:
+    from blockflow_mcp import tools_jobs
+
+    atexit.register(tools_jobs.STOP.set)
+    sys.stdin = relay_stdin(sys.stdin.fileno(), tools_jobs.STOP)
     build_server().run()

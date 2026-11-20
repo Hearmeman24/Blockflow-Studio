@@ -68,7 +68,9 @@ describe('characters api', () => {
     expect(headers.get('Content-Type')).toBe('application/octet-stream')
     expect(headers.get('X-Filename')).toBe(encodeURIComponent('Zoë 李 face #1.png'))
     expect(headers.get('X-Content-Type')).toBe('image/png')
-    expect(new Uint8Array(init.body as ArrayBuffer)).toEqual(new Uint8Array([9, 8, 7]))
+    // The File itself (streamed by the browser), not a copy read into memory.
+    expect(init.body).toBeInstanceOf(Blob)
+    expect(new Uint8Array(await (init.body as Blob).arrayBuffer())).toEqual(new Uint8Array([9, 8, 7]))
   })
 
   it('creates without metadata when the probe found none', async () => {
@@ -139,7 +141,9 @@ describe('characters api', () => {
     expect(headers.get('Content-Type')).toBe('application/octet-stream')
     expect(headers.get('X-Filename')).toBe(encodeURIComponent('é 1.png'))
     expect(headers.get('X-Content-Type')).toBe('image/png')
-    expect(new Uint8Array(init.body as ArrayBuffer)).toEqual(new Uint8Array([1, 2, 3]))
+    // The File itself (streamed by the browser), not a copy read into memory.
+    expect(init.body).toBeInstanceOf(Blob)
+    expect(new Uint8Array(await (init.body as Blob).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]))
   })
 
   it('sends the duration for audio and omits missing metadata', async () => {

@@ -13,6 +13,7 @@ import { useViewerHistory } from '@/lib/use-viewer-history'
 import { toDisplayUrls } from '@/lib/image-ref'
 import { BlockFooter } from '@/components/pipeline/block-footer'
 import { DownloadButton } from '@/components/pipeline/download-button'
+import { ShowOlderButton } from '@/components/pipeline/viewer-strip'
 import { OutputCostLabel, PriceMismatchBadge, useOutputMeta } from '@/components/byok/output-cost'
 
 function toImageUrls(value: unknown): string[] {
@@ -30,7 +31,9 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
   const metaByUrl = useOutputMeta([inputs.image, blockStates.get(blockId)?.outputs.image])
 
   const currentUrls = imageUrls.length > 0 ? imageUrls : ownOutputUrls
-  const { history: accumulatedUrls, displayUrls, selectedIndex, select: setSelectedIndex, clear } = useViewerHistory(currentUrls)
+  const {
+    history: accumulatedUrls, displayUrls, selectedIndex, select: setSelectedIndex, clear, stripStart, hiddenOlder, showOlder,
+  } = useViewerHistory(currentUrls)
   const isStale = !isLooping && currentUrls.length === 0 && accumulatedUrls.length > 0
 
   const selectedImage = useMemo(() => {
@@ -79,8 +82,10 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
 
       {displayUrls.length > 1 && (
         <div className="overflow-y-auto max-h-[min(50vh,400px)] pr-1">
+          <ShowOlderButton hidden={hiddenOlder} onClick={showOlder} />
           <div className="grid grid-cols-4 gap-2">
-            {displayUrls.map((url, idx) => {
+            {displayUrls.slice(stripStart).map((url, i) => {
+              const idx = stripStart + i
               const isActive = idx === Math.min(selectedIndex, displayUrls.length - 1)
               return (
                 <button
@@ -93,6 +98,8 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
                   <img
                     src={url}
                     alt={`Variant ${idx + 1}`}
+                    loading="lazy"
+                    decoding="async"
                     className="w-full bg-black/30"
                   />
                   <span className="absolute right-1 top-1 rounded bg-black/70 px-1 text-[10px] text-white">

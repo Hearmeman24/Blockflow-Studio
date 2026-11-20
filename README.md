@@ -131,8 +131,16 @@ keys. Never paste an API key into an issue.
   interface, built when needed. `uv run app.py --dev` (or `BLOCKFLOW_DEV=1`)
   runs the Next.js development server; `uv run app.py --packaged` (or
   `BLOCKFLOW_PACKAGED=1`) serves the existing build and never builds. The web
-  interface listens on every network address of the computer, as the
-  development server always did; the backend only on this computer.
+  interface and the backend listen on this computer only (`127.0.0.1`).
+- **Another device.** To open the app from a phone or another computer, set
+  `BLOCKFLOW_ALLOWED_ORIGINS` to the address you will use, for example
+  `BLOCKFLOW_ALLOWED_ORIGINS=http://192.168.1.20:47300 uv run app.py` (or put
+  that line in a `.env` file in the repository folder). Origins saved in the
+  app's allowed-origins setting count the same. The web interface then
+  listens on every network address, so anyone on the same network can open it
+  and see your generated files; the app accepts changes only from the listed
+  addresses. The address is chosen when the web interface starts, so restart
+  the app after changing either; the launcher prints one line saying which it is.
 - **Repair.** `python3 scripts/doctor.py` checks the install and changes
   nothing; `uv run python scripts/setup.py` reinstalls what is missing (and the
   developer tools for tests and lint).

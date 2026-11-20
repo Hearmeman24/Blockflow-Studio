@@ -91,6 +91,27 @@ describe('postFile', () => {
     expect(headers['X-Content-Type']).toBe('video/mp4')
   })
 
+  it('sends the File itself, not a copy read into memory, with the same bytes and headers on the wire', async () => {
+    const mockFetch = vi.mocked(global.fetch)
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }))
+    const file = makeFile('v.mp4', 'video/mp4', 'raw video bytes')
+    const read = vi.spyOn(file, 'arrayBuffer')
+
+    await postFile('/api/blocks/video_loader/save-local', file)
+
+    const [, init] = mockFetch.mock.calls[0]
+    expect((init as RequestInit).body).toBe(file)
+    expect(read).not.toHaveBeenCalled()
+    // The same headers as before; an explicit Content-Type wins over the
+    // File's own type in fetch, so the backend still sees octet-stream.
+    expect((init as RequestInit).headers).toEqual({
+      'Content-Type': 'application/octet-stream',
+      'X-Filename': 'v.mp4',
+      'X-Content-Type': 'video/mp4',
+    })
+    expect(await ((init as RequestInit).body as Blob).text()).toBe('raw video bytes')
+  })
+
   it('falls back to application/octet-stream when file.type is empty', async () => {
     const mockFetch = vi.mocked(global.fetch)
     mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }))

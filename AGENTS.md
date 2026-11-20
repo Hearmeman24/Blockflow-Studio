@@ -17,7 +17,7 @@ bugs, and report them (see [Beta status](#beta-status)).
 | Frontend | Next.js 16.1.6, React 19.2.3, Tailwind CSS 4, shadcn/ui, Vitest 4, ESLint 9; `frontend/package.json` |
 | Tooling | [uv](https://docs.astral.sh/uv/) for Python, Node.js `>=22.14.0` with npm, ruff, pytest |
 | Entry points | `app.py` (starts both servers), `backend/main.py` (FastAPI app), `frontend/src/app/` (pages), `mcp_server.py` (MCP, stdio) |
-| Ports | frontend `47300`, backend `47301`; override with `FRONTEND_PORT` / `BACKEND_PORT` |
+| Ports | frontend `47300`, backend `47301`; override with `FRONTEND_PORT` / `BACKEND_PORT`. Both listen on `127.0.0.1`; `BLOCKFLOW_ALLOWED_ORIGINS` (environment or the repository `.env`) or a stored `allowed_origins` preference with at least one origin makes the web interface listen on every IPv4 address, for use from another device. Decided at each start of the web interface (a restart applies a change) by `frontend_host` in `backend/app_update/launcher_protocol.py`, which reads that one preference read-only |
 | User data | settings database (keys), jobs, runs, flows. Default: macOS `~/Library/Application Support/BlockFlow Studio`, Windows `%LOCALAPPDATA%\BlockFlow Studio`, Linux `$XDG_DATA_HOME/blockflow-studio` or `~/.local/share/blockflow-studio`. `BLOCKFLOW_DATA_DIR` (or `BLOCKFLOW_HOME`) overrides it. |
 | Output folder | `<user data>/output` unless the user chose another in Settings, then App |
 | Providers | Kie and PiAPI, described by the capability ledger in `backend/byok/` |
@@ -472,7 +472,7 @@ changes without asking.
 | Loader item display | `frontend/src/lib/byok/loader-item-display.ts` | `saving`, `not_saved`, `broken`, `flagged`, `unverified`, `ok` |
 | Transfer restore | `frontend/src/lib/byok/transfer-status.ts` | `ready`, `error`, `interrupted` |
 | Reference health check | `frontend/src/lib/byok/use-reference-health.ts` | `idle`, `checking`, `checked`, `failed` |
-| Viewer history | `frontend/src/lib/use-viewer-history.ts` | `viewerHistoryReducer` |
+| Viewer history | `frontend/src/lib/use-viewer-history.ts` | `viewerHistoryReducer` (`output`, `clear`, `select`, `show_older`; at most `MAX_VIEWER_HISTORY` kept, the strip shows the latest `revealed`) |
 | Async read (`useResource`) | `frontend/src/lib/resource.ts` | `loading`, `error`, `ready` |
 | Async write (`useMutation`) | `frontend/src/lib/mutation.ts` | `idle`, `pending`, `error` |
 | Updater dialog | `frontend/src/components/app-update/update-view.ts` | `closed`, `confirm`, `progress` |
@@ -533,6 +533,15 @@ is allowed only when labelled as one, with follow-up work tracked.
 - Filters and sort state belong in URL search params.
 - Use the existing structured parsers and shared helpers; prefer existing block
   and pipeline patterns over new abstractions.
+- A route that takes a file as its raw body streams it to disk with
+  `backend/upload_stream.py` (`receive_upload`), never `await request.body()`,
+  and runs blocking work (hashing, folder scans, image processing, uploads)
+  with `run_in_threadpool`. The browser sends the `File` itself
+  (`lib/post-file.ts`), not `file.arrayBuffer()`.
+- A route that runs a long child process (ffmpeg, RIFE) or downloads a source
+  uses `backend/cancellable.py`: `run_while_connected` stops the work when the
+  client goes away, `run_child` terminates (then kills) the child on cancel or
+  timeout, `download_to` streams to disk. Remove partial outputs when it raises.
 
 ### UI design system
 
@@ -555,7 +564,10 @@ is allowed only when labelled as one, with follow-up work tracked.
   `AlertPanel`, `EmptyState`, `PageHeader`, `FavoriteButton`,
   `DeleteIconButton`, `BlockField`, `BlockFooter` (a top-level item of the
   block, which the body makes a flex column; its `actions` slot sits above the
-  divider), `pipeline/download-button` (the viewers' Download link), `BlockRoleTile`,
+  divider), `pipeline/download-button` (the viewers' Download link),
+  `pipeline/viewer-strip` (`ShowOlderButton` and `LazyVideoThumb` for the
+  viewer strips, which render the latest `VIEWER_STRIP_PAGE` entries of
+  `useViewerHistory`), `BlockRoleTile`,
   `pipeline/collapsible-section`, `pipeline/block-info-button` (rendered by the
   block card from `BlockDef.info`), `ChipTooltip`,
   `byok/media-thumb`, and the `lib/` helpers. Add to a shared module before
