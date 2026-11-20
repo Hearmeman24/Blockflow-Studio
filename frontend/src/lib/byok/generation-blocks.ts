@@ -14,9 +14,16 @@ export interface GenerationBlockConfig {
   referenceKinds: MediaKind[]
   /** Catalog model ids this block offers, in display order. Omitted: every model the ledger lists for the mode. */
   models?: readonly string[]
-  /** A prompt the user cannot edit. `{image1}`, `{video1}`, `{audio1}` (any number) become the
-   *  ledger's way of naming that reference for the selected provider and model. */
-  fixedPrompt?: string
+  /** The prompt a fresh block starts with; the user can edit it. `{image1}`, `{video1}`, `{audio1}`
+   *  (any number) become the ledger's way of naming that reference for the selected provider and
+   *  model. While the stored prompt is this template in any of the ledger's syntaxes
+   *  (`isDefaultPrompt`), it follows the selected model; an edit is kept as written. */
+  defaultPrompt?: string
+  /** False: the block never takes its prompt from an upstream text block (no switch). Default true. */
+  upstreamPrompt?: boolean
+  /** True: the block needs a prompt whatever the ledger's prompt rule says; an empty or
+   *  whitespace-only prompt is a blocking issue and the run stops before anything is sent. */
+  promptRequired?: boolean
   /** Kinds the block uses an exact number of; any other count stops the run. */
   exactReferences?: Partial<Record<MediaKind, number>>
   /** The loader block type that supplies each kind. Omitted: the mode's one loader. */
@@ -39,7 +46,10 @@ export const GENERATION_BLOCK_CONFIGS: Readonly<Record<string, GenerationBlockCo
     output: 'video',
     referenceKinds: ['video', 'image'],
     models: ['wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'seedance-2', 'kling-4.0'],
-    fixedPrompt: 'Replace the person from {video1} with the person from {image1}',
+    defaultPrompt: 'Replace the person from {video1} with the person from {image1}',
+    upstreamPrompt: false,
+    // A swap without an instruction would spend credits for nothing, even where the ledger allows it.
+    promptRequired: true,
     exactReferences: { video: 1, image: 1 },
     loaders: { video: 'videoLoader', image: 'uploadImageToTmpfiles' },
   },
@@ -68,9 +78,34 @@ export function modelsForBlock(
   return config.models.flatMap((id) => listed.filter((m) => m.id === id))
 }
 
-/** A block's fixed prompt with each `{kindN}` written the way the selected mode names that reference. */
-export function fixedPromptText(template: string, spec: ModeSpec | null | undefined): string {
+/** A block's default prompt with each `{kindN}` written the way the selected mode names that reference. */
+export function defaultPromptText(template: string, spec: ModeSpec | null | undefined): string {
   return template.replace(/\{(image|video|audio)(\d+)\}/g, (_, kind: MediaKind, n: string) => mentionText(spec, kind, Number(n)))
+}
+
+/**
+ * Whether a stored prompt is still the block's default: the template written
+ * in the plain syntax or in the syntax of any provider, model (or variant) the
+ * catalog lists for the mode. Anything else, an empty prompt included, is the
+ * user's own text. Decided from the text alone, so a flow or run saved before
+ * the prompt was editable (it holds the default text) loads as the default.
+ */
+export function isDefaultPrompt(
+  text: string,
+  template: string,
+  catalog: ProviderCatalog | undefined,
+  mode: GenerationMode,
+): boolean {
+  if (text === defaultPromptText(template, null)) return true
+  for (const model of catalog?.models ?? []) {
+    for (const status of Object.values(model.providers)) {
+      const spec = status.modes[mode]
+      if (!spec) continue
+      if (text === defaultPromptText(template, spec)) return true
+      if (spec.variants.some(([, variant]) => text === defaultPromptText(template, variant))) return true
+    }
+  }
+  return false
 }
 
 /** "a" or "an" before a block or media label. */

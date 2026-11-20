@@ -4,8 +4,9 @@
 
 /**
  * Character Swap: replaces the person in a driving video with the person from
- * an image. A generation block with a fixed prompt and a fixed set of models;
- * the video and the image come from the two loaders spawned with it.
+ * an image. A generation block with a default prompt the user can edit and a
+ * fixed set of models; the video and the image come from the two loaders
+ * spawned with it. It never takes a prompt from upstream (no text input).
  */
 import { GenerationBlockShell } from '@/components/byok/generation-block-shell'
 import { GENERATION_BLOCK_CONFIGS } from '@/lib/byok/generation-blocks'
@@ -33,7 +34,7 @@ export const blockDef: BlockDef = {
   outputs: [{ name: 'video', kind: PORT_VIDEO }],
   // Spawned directly upstream when this block is added: the driving video, then the person.
   starterPrereqs: ['videoLoader', 'uploadImageToTmpfiles'],
-  // The prompt is fixed; the key holds the text that was sent, so a saved run shows it.
+  // `prompt` holds the text that is sent: the default for the selected model, or the user's edit.
   configKeys: ['provider', 'model', 'prompt', 'params'],
   info: [
     'Put the driving video in the Video Loader.',
@@ -41,6 +42,7 @@ export const blockDef: BlockDef = {
     'Wan 3.0 and Seedance 2.5 give the best quality.',
     'Wan 3.0 Prime is the faster Wan 3.0 and costs more per second.',
     "Seedance 2 and Kling 4.0 are alternatives; the cost chip shows each model's price.",
+    'The prompt is written for the selected model; you can edit it.',
   ],
   component: CharacterSwapBlock,
 }

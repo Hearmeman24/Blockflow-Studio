@@ -3,8 +3,9 @@ import { CATALOG_BOTH, CATALOG_KIE, CATALOG_PIAPI } from './__fixtures__'
 import { getModeSpec, modelAvailability, modelsForMode } from './catalog'
 import {
   GENERATION_BLOCK_CONFIGS,
-  fixedPromptText,
+  defaultPromptText,
   generationBlockConfig,
+  isDefaultPrompt,
   modelsForBlock,
   resolveGenerationSelection,
 } from './generation-blocks'
@@ -22,8 +23,15 @@ describe('Character Swap config', () => {
       models: ['wan-3.0', 'wan-3.0-prime', 'seedance-2.5', 'seedance-2', 'kling-4.0'],
       exactReferences: { video: 1, image: 1 },
       loaders: { video: 'videoLoader', image: 'uploadImageToTmpfiles' },
-      fixedPrompt: 'Replace the person from {video1} with the person from {image1}',
+      defaultPrompt: 'Replace the person from {video1} with the person from {image1}',
+      upstreamPrompt: false,
+      promptRequired: true,
     })
+    // The other blocks follow the ledger's prompt rule.
+    for (const [type, config] of Object.entries(GENERATION_BLOCK_CONFIGS)) {
+      if (type !== 'characterSwap') expect(config.promptRequired, type).toBeUndefined()
+    }
+    expect(SWAP).not.toHaveProperty('fixedPrompt')
   })
 
   it('names only models the ledger lists for the mode, each taking a video and an image', () => {
@@ -79,9 +87,9 @@ describe('resolveGenerationSelection with an allowed list', () => {
   })
 })
 
-describe('fixedPromptText', () => {
-  const template = SWAP.fixedPrompt!
-  const text = (provider: string, model: string) => fixedPromptText(template, getModeSpec(CATALOG_BOTH, provider, model, SWAP.mode))
+describe('defaultPromptText', () => {
+  const template = SWAP.defaultPrompt!
+  const text = (provider: string, model: string) => defaultPromptText(template, getModeSpec(CATALOG_BOTH, provider, model, SWAP.mode))
 
   it.each([
     ['kie', 'wan-3.0', 'Replace the person from Video1 with the person from Image1'],
@@ -100,7 +108,42 @@ describe('fixedPromptText', () => {
   })
 
   it('uses the plain form without a spec, and leaves other braces alone', () => {
-    expect(fixedPromptText(template, null)).toBe('Replace the person from Video1 with the person from Image1')
-    expect(fixedPromptText('{image2} and {other} and {audio3}', null)).toBe('Image2 and {other} and Audio3')
+    expect(defaultPromptText(template, null)).toBe('Replace the person from Video1 with the person from Image1')
+    expect(defaultPromptText('{image2} and {other} and {audio3}', null)).toBe('Image2 and {other} and Audio3')
+  })
+})
+
+describe('isDefaultPrompt', () => {
+  const template = SWAP.defaultPrompt!
+  const is = (text: string, catalog = CATALOG_BOTH) => isDefaultPrompt(text, template, catalog, SWAP.mode)
+
+  it('is true for the template written in any mention syntax the ledger has for the mode', () => {
+    expect(is('Replace the person from Video1 with the person from Image1')).toBe(true)
+    expect(is('Replace the person from @video1 with the person from @image1')).toBe(true)
+    expect(is('Replace the person from @video_1 with the person from @image_1')).toBe(true)
+  })
+
+  it('is true for every provider and model of the block, whatever the catalog keys', () => {
+    for (const catalog of [CATALOG_BOTH, CATALOG_KIE, CATALOG_PIAPI]) {
+      for (const id of SWAP.models!) {
+        for (const provider of Object.keys(catalog.providers)) {
+          const spec = getModeSpec(catalog, provider, id, SWAP.mode)
+          if (spec) expect(is(defaultPromptText(template, spec), catalog)).toBe(true)
+        }
+      }
+    }
+  })
+
+  it('without a catalog only the plain form is known', () => {
+    expect(isDefaultPrompt('Replace the person from Video1 with the person from Image1', template, undefined, SWAP.mode)).toBe(true)
+    expect(isDefaultPrompt('Replace the person from @video1 with the person from @image1', template, undefined, SWAP.mode)).toBe(false)
+  })
+
+  it('is false for an edit, an empty prompt, extra spaces, or a mix of two syntaxes', () => {
+    expect(is('')).toBe(false)
+    expect(is('Replace the person from Video1 with the woman from Image1')).toBe(false)
+    expect(is('Replace the person from Video1 with the person from Image1 ')).toBe(false)
+    expect(is('Replace the person from @video1 with the person from Image1')).toBe(false)
+    expect(is('Replace the person from {video1} with the person from {image1}')).toBe(false)
   })
 })

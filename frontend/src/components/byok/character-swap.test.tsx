@@ -1,9 +1,9 @@
 /**
- * Character Swap: a generation block with a fixed prompt, four models, one
- * driving video and one image. Its two loaders arrive with it.
+ * Character Swap: a generation block with a default prompt the user can edit,
+ * five models, one driving video and one image. Its two loaders arrive with it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useEffect } from 'react'
 import { SWRConfig } from 'swr'
@@ -93,6 +93,7 @@ describe('Character Swap definition', () => {
       'Wan 3.0 and Seedance 2.5 give the best quality.',
       'Wan 3.0 Prime is the faster Wan 3.0 and costs more per second.',
       "Seedance 2 and Kling 4.0 are alternatives; the cost chip shows each model's price.",
+      'The prompt is written for the selected model; you can edit it.',
     ])
   })
 })
@@ -136,26 +137,159 @@ describe('Character Swap models', () => {
   })
 })
 
+const PLAIN = 'Replace the person from Video1 with the person from Image1'
+const AT = 'Replace the person from @video1 with the person from @image1'
+const AT_UNDERSCORE = 'Replace the person from @video_1 with the person from @image_1'
+const RESET = 'Reset to default'
+const NEEDS_PROMPT = 'Character Swap needs a prompt. Write one, or reset it to the default.'
+// "(optional)" for Wan 3.0, whose prompt the ledger marks optional.
+const promptBox = () => screen.getByRole('textbox', { name: /^Generation Prompt/ }) as HTMLTextAreaElement
+/** The coloured mentions of the prompt's highlight layer, as [text, kind]. */
+const coloured = () => Array.from(screen.getByTestId('mention-highlight').querySelectorAll('[data-mention-kind]'))
+  .map((el) => [el.textContent, el.getAttribute('data-mention-kind')])
+
+async function chooseModel(user: ReturnType<typeof userEvent.setup>, name: string) {
+  await user.click(screen.getByRole('combobox', { name: 'Model' }))
+  await user.click(screen.getAllByRole('option').find((o) => optionName(o) === name)!)
+}
+
 describe('Character Swap prompt', () => {
-  it('is fixed, collapsed by default and not editable', async () => {
-    const user = userEvent.setup()
+  it('is an editable prompt box filled with the default, with the reference badges and the prompt library', async () => {
     seed('f1', { provider: 'kie', model: 'wan-3.0' })
     await mount('f1')
-    expect(screen.queryByRole('textbox')).toBeNull()
-    expect(screen.queryByRole('group', { name: 'Insert a reference' })).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Saved generation prompts' })).toBeNull()
+    expect(promptBox()).toHaveValue(PLAIN)
+    expect(promptBox()).not.toHaveAttribute('readonly')
+    const badges = screen.getByRole('group', { name: 'Insert a reference' })
+    expect(within(badges).getAllByRole('button').map((b) => b.textContent)).toEqual(['Image 1', 'Video 1'])
+    expect(screen.getByRole('button', { name: 'Saved generation prompts' })).toBeInTheDocument()
+    expect(coloured()).toEqual([['Video1', 'video'], ['Image1', 'image']])
+    // The default needs no way back.
+    expect(screen.queryByRole('button', { name: RESET })).toBeNull()
     expect(screen.queryByTestId('fixed-prompt')).toBeNull()
-    await user.click(screen.getByRole('button', { name: 'Prompt' }))
-    expect(screen.getByTestId('fixed-prompt')).toHaveTextContent(/^Replace the person from Video1 with the person from Image1$/)
-    expect(screen.queryByRole('textbox')).toBeNull()
   })
 
-  it('shows the reference names of the selected provider and model', async () => {
-    const user = userEvent.setup()
+  it('a fresh block shows the reference names of the selected provider and model', async () => {
     seed('f2', { provider: 'piapi', model: 'seedance-2' })
     await mount('f2')
-    await user.click(screen.getByRole('button', { name: 'Prompt' }))
-    expect(screen.getByTestId('fixed-prompt')).toHaveTextContent(/^Replace the person from @video1 with the person from @image1$/)
+    await waitFor(() => expect(promptBox()).toHaveValue(AT))
+    expect(coloured()).toEqual([['@video1', 'video'], ['@image1', 'image']])
+  })
+
+  it('while it is the default, it follows a model or provider change', async () => {
+    const user = userEvent.setup()
+    seed('f6', { provider: 'kie', model: 'wan-3.0' })
+    const { harness, props } = await mount('f6')
+    await chooseModel(user, 'Kling 4.0')
+    await waitFor(() => expect(promptBox()).toHaveValue(AT_UNDERSCORE))
+    expect(JSON.parse(sessionStorage.getItem('block_f6_prompt')!)).toBe(AT_UNDERSCORE)
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('PiAPI'))!)
+    await chooseModel(user, 'Seedance 2')
+    await waitFor(() => expect(promptBox()).toHaveValue(AT))
+    expect(screen.queryByRole('button', { name: RESET })).toBeNull()
+    expect(await run(props, BOTH)).toBeUndefined()
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
+    expect(submitted.params.prompt).toBe(AT)
+  })
+
+  it('an edited prompt is kept as written through a model change, and is what the block sends', async () => {
+    const user = userEvent.setup()
+    seed('f7', { provider: 'kie', model: 'wan-3.0' })
+    const { harness, props } = await mount('f7')
+    const box = promptBox()
+    box.focus()
+    box.setSelectionRange(PLAIN.length, PLAIN.length)
+    await user.keyboard(', keep the lighting')
+    const edited = `${PLAIN}, keep the lighting`
+    expect(box).toHaveValue(edited)
+    await chooseModel(user, 'Kling 4.0')
+    expect(promptBox()).toHaveValue(edited)
+    // Video1 and Image1 are not Kling's names, so they are no longer coloured.
+    expect(coloured()).toEqual([])
+    expect(await run(props, BOTH)).toBeUndefined()
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
+    expect(submitted.params.prompt).toBe(edited)
+  })
+
+  it('Reset to default brings back the default for the selected model', async () => {
+    const user = userEvent.setup()
+    seed('f8', { provider: 'kie', model: 'kling-4.0', prompt: 'swap @video_1 for @image_1 please' })
+    await mount('f8')
+    expect(promptBox()).toHaveValue('swap @video_1 for @image_1 please')
+    expect(coloured()).toEqual([['@video_1', 'video'], ['@image_1', 'image']])
+    await user.click(screen.getByRole('button', { name: RESET }))
+    expect(promptBox()).toHaveValue(AT_UNDERSCORE)
+    expect(screen.queryByRole('button', { name: RESET })).toBeNull()
+    // Back to the default: it follows the model again.
+    await chooseModel(user, 'Wan 3.0')
+    await waitFor(() => expect(promptBox()).toHaveValue(PLAIN))
+  })
+
+  it('inserting a reference from a badge edits the prompt like in the other blocks', async () => {
+    const user = userEvent.setup()
+    seed('f9', { provider: 'kie', model: 'wan-3.0' })
+    await mount('f9')
+    const box = promptBox()
+    box.focus()
+    box.setSelectionRange(0, PLAIN.length)
+    await user.click(screen.getByRole('button', { name: 'Insert reference to Image 1' }))
+    expect(box).toHaveValue('Image1')
+    expect(box).toHaveFocus()
+    expect(coloured()).toEqual([['Image1', 'image']])
+    expect(screen.getByRole('button', { name: RESET })).toBeInTheDocument()
+  })
+
+  it('an emptied prompt stays empty while typing; the run stops before anything is sent', async () => {
+    const user = userEvent.setup()
+    seed('f10', { provider: 'kie', model: 'kling-4.0' })
+    const { harness, props } = await mount('f10')
+    await user.clear(promptBox())
+    expect(promptBox()).toHaveValue('')
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+    expect(promptBox()).toHaveValue('')
+    expect(JSON.parse(sessionStorage.getItem('block_f10_prompt')!)).toBe('')
+    expect(screen.getByRole('button', { name: RESET })).toBeInTheDocument()
+
+    const error = await run(props, BOTH)
+    expect(error?.message).toBe(NEEDS_PROMPT)
+    expect(harness.requests('/api/generation/validate')).toEqual([])
+    expect(harness.requests('/api/generation/submit')).toEqual([])
+    expect(promptBox()).toHaveValue('')
+  })
+
+  it.each(['wan-3.0', 'wan-3.0-prime'])('needs a prompt even where the ledger marks it optional (%s): the label does not say optional', async (model) => {
+    seed(`f12-${model}`, { provider: 'kie', model })
+    await mount(`f12-${model}`)
+    expect(screen.getByRole('textbox', { name: 'Generation Prompt' })).toHaveValue(PLAIN)
+    expect(screen.queryByRole('textbox', { name: 'Generation Prompt (optional)' })).toBeNull()
+    expect(screen.queryByText(NEEDS_PROMPT)).toBeNull()
+  })
+
+  it.each([
+    ['An empty', ''],
+    ['A whitespace-only', ' \n\t '],
+  ])('%s prompt on Wan 3.0 blocks the run before anything is sent, says so, and Reset makes it ready again', async (_, text) => {
+    const user = userEvent.setup()
+    seed('f13', { provider: 'kie', model: 'wan-3.0' })
+    const { harness, props } = await mount('f13')
+    fireEvent.change(promptBox(), { target: { value: text } })
+    // Shown before any run, with the block's other blocking issues.
+    const panel = (await screen.findByText('Fix before running')).closest('[role]') ?? document.body
+    expect(within(panel as HTMLElement).getByText(NEEDS_PROMPT)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: RESET })).toBeVisible()
+
+    expect((await run(props, BOTH))?.message).toBe(NEEDS_PROMPT)
+    expect(harness.requests('/api/generation/validate')).toEqual([])
+    expect(harness.requests('/api/generation/submit')).toEqual([])
+    expect(props.setOutput).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: RESET }))
+    expect(promptBox()).toHaveValue(PLAIN)
+    await waitFor(() => expect(screen.queryByText(NEEDS_PROMPT)).toBeNull())
+    expect(screen.queryByText('Fix before running')).toBeNull()
+    expect(await run(props, BOTH)).toBeUndefined()
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
+    expect(submitted.params.prompt).toBe(PLAIN)
   })
 
   it('PiAPI does not run Kling 4.0 here: the option says why, and a saved choice stops the run before anything is sent', async () => {
@@ -181,7 +315,7 @@ describe('Character Swap prompt', () => {
     ['kie', 'seedance-2', 'Replace the person from Video1 with the person from Image1'],
     ['piapi', 'seedance-2', 'Replace the person from @video1 with the person from @image1'],
     ['kie', 'kling-4.0', 'Replace the person from @video_1 with the person from @image_1'],
-  ])('%s %s: the request carries the fixed prompt, the video and the image', async (provider, model, prompt) => {
+  ])('%s %s: the request carries the default prompt, the video and the image', async (provider, model, prompt) => {
     seed('f3', { provider, model })
     const { harness, props } = await mount('f3')
     expect(await run(props, BOTH)).toBeUndefined()
@@ -199,7 +333,7 @@ describe('Character Swap prompt', () => {
     expect(props.setOutput).toHaveBeenCalledWith('video', expect.objectContaining({ kind: 'video-ref', url: 'https://cdn/out.mp4' }))
   })
 
-  it('ignores text from upstream and a prompt saved in the block', async () => {
+  it('ignores text from upstream: no switch, and it sends its own prompt', async () => {
     seed('f4', { provider: 'kie', model: 'wan-3.0', prompt: 'something else', use_upstream_prompt: true })
     const harness = stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ status: 'COMPLETED', outputs: [{ kind: 'video', url: 'https://cdn/o.mp4' }] })] })
     const props = { ...blockProps('f4', { ...BOTH, text: 'a prompt from upstream' }), hasUpstreamProducer: vi.fn(() => true) }
@@ -207,9 +341,44 @@ describe('Character Swap prompt', () => {
     await screen.findByRole('combobox', { name: 'Model' })
     expect(screen.queryByTestId('upstream-prompt-source')).toBeNull()
     expect(screen.queryByRole('switch', { name: 'Use the upstream prompt' })).toBeNull()
+    expect(promptBox()).toHaveValue('something else')
     expect(await run(props, { ...BOTH, text: 'a prompt from upstream' })).toBeUndefined()
     const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
-    expect(submitted.params.prompt).toBe('Replace the person from Video1 with the person from Image1')
+    expect(submitted.params.prompt).toBe('something else')
+  })
+
+  it('ignores upstream text with the default prompt too', async () => {
+    seed('f11', { provider: 'kie', model: 'wan-3.0', use_upstream_prompt: true })
+    const harness = stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ status: 'COMPLETED', outputs: [{ kind: 'video', url: 'https://cdn/o.mp4' }] })] })
+    const props = { ...blockProps('f11', { ...BOTH, text: 'a prompt from upstream' }), hasUpstreamProducer: vi.fn(() => true) }
+    renderGenerationBlock(def().component, props)
+    await screen.findByRole('combobox', { name: 'Model' })
+    expect(await run(props, { ...BOTH, text: 'a prompt from upstream' })).toBeUndefined()
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
+    expect(submitted.params.prompt).toBe(PLAIN)
+  })
+})
+
+describe('Character Swap prompt saved before it was editable', () => {
+  it('the old fixed text of another model loads as the default and follows the selected model', async () => {
+    // A flow saved on Kie, its model since switched to PiAPI Seedance 2 in the file.
+    seed('o1', { provider: 'piapi', model: 'seedance-2', prompt: PLAIN })
+    const { harness, props } = await mount('o1')
+    await waitFor(() => expect(promptBox()).toHaveValue(AT))
+    expect(screen.queryByRole('button', { name: RESET })).toBeNull()
+    expect(await run(props, BOTH)).toBeUndefined()
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
+    expect(submitted.params.prompt).toBe(AT)
+  })
+
+  it('a saved run or flow holding the old text for its own model loads unchanged, as the default', async () => {
+    const user = userEvent.setup()
+    seed('o2', { provider: 'kie', model: 'kling-4.0', prompt: AT_UNDERSCORE })
+    await mount('o2')
+    expect(promptBox()).toHaveValue(AT_UNDERSCORE)
+    expect(screen.queryByRole('button', { name: RESET })).toBeNull()
+    await chooseModel(user, 'Wan 3.0')
+    await waitFor(() => expect(promptBox()).toHaveValue(PLAIN))
   })
 })
 
@@ -340,6 +509,35 @@ describe('Character Swap saved with the flow', () => {
     expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('PiAPI')
     expect(screen.getByRole('combobox', { name: 'Model' })).toHaveTextContent(/Seedance 2(?!\.5)/)
     expect(await run(props, BOTH)).toBeUndefined()
+  })
+})
+
+describe('Character Swap edited prompt saved with the flow', () => {
+  const EDITED = 'Put the person from Image1 into Video1, keep the background'
+
+  it('reloads with the edit, which a model change then leaves alone', async () => {
+    const user = userEvent.setup()
+    const { view } = await mount('rt-edit')
+    fireEvent.change(promptBox(), { target: { value: EDITED } })
+    let config: Record<string, unknown> = {}
+    await waitFor(() => {
+      config = exportFlow({ id: 'p', blocks: [{ id: 'rt-edit', type: 'characterSwap' }] }, 'swap').blocks[0].config as Record<string, unknown>
+      expect(config.prompt).toBe(EDITED)
+    })
+    view.unmount()
+
+    sessionStorage.clear()
+    const flow = exportFlow({ id: 'p', blocks: [{ id: 'rt-edit', type: 'characterSwap' }] }, 'swap')
+    flow.blocks[0].config = config
+    const pipeline = importFlow(JSON.stringify(flow))
+    const { harness, props } = await mount(pipeline.blocks[0].id)
+    expect(promptBox()).toHaveValue(EDITED)
+    expect(screen.getByRole('button', { name: RESET })).toBeInTheDocument()
+    await chooseModel(user, 'Kling 4.0')
+    expect(promptBox()).toHaveValue(EDITED)
+    expect(await run(props, BOTH)).toBeUndefined()
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: { prompt: string } }>
+    expect(submitted.params.prompt).toBe(EDITED)
   })
 })
 

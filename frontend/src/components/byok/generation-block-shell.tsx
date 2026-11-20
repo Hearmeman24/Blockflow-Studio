@@ -6,14 +6,13 @@ import { ExternalLink, Film, Image as ImageIcon, Info, Music } from 'lucide-reac
 import { AlertPanel } from '@/components/alert-panel'
 import { PromptLibraryButton } from '@/components/prompt-library/prompt-library-button'
 import { BlockField } from '@/components/pipeline/block-field'
-import { CollapsibleSection } from '@/components/pipeline/collapsible-section'
 import { SourceModeControl } from '@/components/pipeline/source-mode-control'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { Textarea } from '@/components/ui/textarea'
 import { providerIds, providerName } from '@/lib/byok/catalog'
 import { article } from '@/lib/byok/generation-blocks'
+import { kindAccent } from '@/lib/byok/kind-accent'
 import { insertMention } from '@/lib/byok/mentions'
 import type { MediaKind, ProviderCatalog } from '@/lib/byok/types'
 import { unavailableReason } from '@/lib/byok/generation-readiness'
@@ -23,8 +22,10 @@ import { useOptionalPipeline } from '@/lib/pipeline/pipeline-context'
 import type { BlockComponentProps, BlockWarning } from '@/lib/pipeline/registry'
 import { useHeaderWarnings } from '@/lib/pipeline/use-header-warnings'
 import { PROVIDER_REFERRALS } from '@/lib/provider-referrals'
+import { cn } from '@/lib/utils'
 import { CostEstimateChip } from './cost-chip'
 import { GenerationSettings } from './generation-settings'
+import { MentionTextarea } from './mention-textarea'
 import { ModelSelect } from './model-select'
 import { NsfwBadge } from './nsfw-badge'
 import { ProviderSelect } from './provider-select'
@@ -139,7 +140,8 @@ function ShellBody({
     })
   }
   useHeaderWarnings(setHeaderWarnings, warnings)
-  const promptRule = spec?.prompt.requirement ?? 'required'
+  // A block that needs a prompt (Character Swap) says so whatever the ledger's rule for the model.
+  const promptRule = config.promptRequired ? 'required' : spec?.prompt.requirement ?? 'required'
   const modelEntry = catalog.models.find((m) => m.id === state.model)
   const keyMissing = Boolean(state.provider && !catalog.providers[state.provider]?.configured)
 
@@ -181,12 +183,7 @@ function ShellBody({
         </AlertPanel>
       )}
 
-      {state.fixedPrompt !== null ? (
-        // The block writes its own prompt: shown for reference, not edited.
-        <CollapsibleSection label="Prompt">
-          <p data-testid="fixed-prompt" className="text-muted-foreground text-xs">{state.fixedPrompt}</p>
-        </CollapsibleSection>
-      ) : promptRule !== 'none' && (
+      {promptRule !== 'none' && (
         <PromptField state={state} optional={promptRule === 'optional'} maxLength={spec?.prompt.max_length ?? null} />
       )}
 
@@ -294,7 +291,17 @@ function PromptField({ state, optional, maxLength }: { state: GenerationBlockSta
     <BlockField
       label={label}
       htmlFor={id}
-      action={<PromptLibraryButton type="generation" value={state.prompt} onChange={state.setPrompt} />}
+      action={(
+        <div className="flex items-center gap-2">
+          {/* A block with a default prompt (Character Swap) offers the way back to it once edited. */}
+          {state.defaultPrompt !== null && state.prompt !== state.defaultPrompt && (
+            <Button type="button" variant="link" size="xs" className="text-link h-auto px-0 text-3xs" onClick={state.resetPrompt}>
+              Reset to default
+            </Button>
+          )}
+          <PromptLibraryButton type="generation" value={state.prompt} onChange={state.setPrompt} />
+        </div>
+      )}
       hint={maxLength !== null ? `${text.length} / ${maxLength} characters` : undefined}
     >
       {state.hasUpstreamText && (
@@ -320,7 +327,7 @@ function PromptField({ state, optional, maxLength }: { state: GenerationBlockSta
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={badge.thumbnail} alt="" className="size-5 rounded-full object-cover" />
               ) : (
-                <span aria-hidden className="bg-muted flex size-5 items-center justify-center rounded-full">
+                <span aria-hidden className={cn('flex size-5 items-center justify-center rounded-full', kindAccent(badge.kind).chip)}>
                   <BadgeIcon kind={badge.kind} />
                 </span>
               )}
@@ -329,10 +336,11 @@ function PromptField({ state, optional, maxLength }: { state: GenerationBlockSta
           ))}
         </div>
       )}
-      <Textarea
+      <MentionTextarea
         ref={area}
         id={id}
         value={text}
+        mentions={state.badges}
         aria-invalid={over || undefined}
         onFocus={() => { focusedOnce.current = true }}
         onChange={(e) => state.setPrompt(e.target.value)}

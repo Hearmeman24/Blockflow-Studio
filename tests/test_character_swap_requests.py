@@ -1,7 +1,8 @@
 """Character Swap: what reaches the provider for one driving video and one image.
 
 The block has no backend of its own: it submits an Omni Reference request with
-a fixed prompt whose reference names come from the ledger. These tests read the
+a default prompt (the user can edit it) whose reference names come from the
+ledger. These tests read the
 block's model list and prompt template from the frontend config, check both
 against the ledger, and send the request through the real adapters with a fake
 HTTP transport. No network, no real keys.
@@ -82,7 +83,7 @@ def block_config() -> dict:
     assert entry, "characterSwap is missing from GENERATION_BLOCK_CONFIGS"
     body = entry.group(1)
     models = re.search(r"models:\s*\[(.*?)\]", body, re.S)
-    prompt = re.search(r"fixedPrompt:\s*'([^']*)'", body)
+    prompt = re.search(r"defaultPrompt:\s*'([^']*)'", body)
     mode = re.search(r"mode:\s*'([^']*)'", body)
     assert models and prompt and mode
     return {"mode": mode.group(1), "models": re.findall(r"'([^']+)'", models.group(1)), "prompt": prompt.group(1)}

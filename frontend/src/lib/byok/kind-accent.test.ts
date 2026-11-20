@@ -22,6 +22,16 @@ describe('kindAccent', () => {
     }
   })
 
+  it('colours mentions in a prompt with a light text tone readable on the dark field', () => {
+    expect(kindAccent('image').mention).toMatch(/\btext-violet-(200|300)\b/)
+    expect(kindAccent('video').mention).toMatch(/\btext-blue-(200|300)\b/)
+    expect(kindAccent('audio').mention).toMatch(/\btext-amber-(200|300)\b/)
+    // Colour only: a different weight or size would move the text off the caret.
+    for (const kind of ['image', 'video', 'audio'] as const) {
+      expect(kindAccent(kind).mention).not.toMatch(/\b(font-|text-(xs|sm|base|lg)|p[xytrbl]?-|m[xytrbl]?-|tracking-|leading-)/)
+    }
+  })
+
   it('has no accent for a retired kind (voice is audio)', () => {
     expect(kindAccent('voice' as never)).toBeUndefined()
   })

@@ -20,6 +20,10 @@ export interface KindAccent {
   wave: string
   /** Waveform bars before the playhead while playing. */
   wavePlayed: string
+  /** A mention of a reference of this kind in a prompt: colour and a faint tint only, so the
+   *  text keeps the textarea's exact metrics (no weight, size or spacing). The 300 tones
+   *  stay well above 7:1 contrast on the dark field. */
+  mention: string
 }
 
 const ACCENTS: Record<CharacterMediaKind, KindAccent> = {
@@ -30,6 +34,7 @@ const ACCENTS: Record<CharacterMediaKind, KindAccent> = {
     addDragging: 'border-violet-400 bg-violet-500/15 text-violet-200',
     wave: 'text-violet-300/45',
     wavePlayed: 'text-violet-200',
+    mention: 'rounded-sm bg-violet-500/15 text-violet-300',
   },
   video: {
     chip: 'bg-blue-500/15 text-blue-300',
@@ -38,6 +43,7 @@ const ACCENTS: Record<CharacterMediaKind, KindAccent> = {
     addDragging: 'border-blue-400 bg-blue-500/15 text-blue-200',
     wave: 'text-blue-300/45',
     wavePlayed: 'text-blue-200',
+    mention: 'rounded-sm bg-blue-500/15 text-blue-300',
   },
   audio: {
     chip: 'bg-amber-500/15 text-amber-300',
@@ -46,6 +52,7 @@ const ACCENTS: Record<CharacterMediaKind, KindAccent> = {
     addDragging: 'border-amber-400 bg-amber-500/15 text-amber-200',
     wave: 'text-amber-300/45',
     wavePlayed: 'text-amber-200',
+    mention: 'rounded-sm bg-amber-500/15 text-amber-300',
   },
 }
 

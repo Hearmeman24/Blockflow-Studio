@@ -345,10 +345,19 @@ the other four and Character Swap) have no sidecar; they use `/api/generation/*`
 `/api/jobs*`, take references only from loader blocks (`starterPrereqs`), and
 read every selector and limit from the ledger. A block's entry in
 `GENERATION_BLOCK_CONFIGS` (`lib/byok/generation-blocks.ts`) may narrow that:
-a subset of the ledger's model ids (`models`), a `fixedPrompt` whose
-`{video1}`-style names follow the ledger's mentions, exact reference counts and
-a loader per kind (Character Swap); whether a model runs on a provider still
-comes from the catalog.
+a subset of the ledger's model ids (`models`), a `defaultPrompt` whose
+`{video1}`-style names follow the ledger's mentions (the user can edit it;
+while the stored text is that template in any of the ledger's syntaxes,
+`isDefaultPrompt`, it follows the selected model, and an edit is kept),
+`upstreamPrompt: false` for a block that never takes its prompt from upstream,
+`promptRequired: true` for a block that needs a prompt even where the ledger
+marks it optional (an empty prompt is a blocking issue and the run stops before
+anything is sent),
+exact reference counts and a loader per kind (Character Swap); whether a model
+runs on a provider still comes from the catalog. Every generation prompt field
+is a `MentionTextarea` (`components/byok/mention-textarea.tsx`): the mentions
+of the attached references (`mentionSegments` in `lib/byok/mentions.ts`) are
+coloured with `kindAccent(kind).mention` by a layer over the textarea.
 
 **Adding a model or provider:** add a `ModelEntry` to `backend/byok/catalog.py`
 (types in `spec.py`), map the request in the provider adapter, test the exact

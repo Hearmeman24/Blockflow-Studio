@@ -94,3 +94,57 @@ export function insertMention(value: string, start: number, end: number, text: s
   const next = `${before}${lead}${text}${trail}${after}`
   return { value: next, caret: before.length + lead.length + text.length }
 }
+
+/** A mention to find in a prompt, and the kind of the reference it names. */
+export interface MentionTarget {
+  text: string
+  kind: MediaKind
+}
+
+/** One run of a prompt: plain text (`kind` null) or a mention of an attached reference. */
+export interface MentionSegment {
+  text: string
+  kind: MediaKind | null
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')
+}
+
+/**
+ * Split a prompt into plain text and mentions of the given references, for
+ * colouring. Only whole mentions count: where a mention starts or ends with a
+ * letter, digit or underscore, the character beyond that edge must not be one
+ * ("Image1" is not found in "Image10" or "MyImage1"; "@image_1" not in
+ * "@image_12"). The longer of two overlapping mentions wins. Case-sensitive,
+ * like the providers' syntax. One regular-expression pass over literal
+ * alternatives: linear in the prompt length. The segments joined give back
+ * the prompt.
+ */
+export function mentionSegments(value: string, mentions: readonly MentionTarget[]): MentionSegment[] {
+  if (!value) return []
+  const kinds = new Map<string, MediaKind>()
+  for (const m of mentions) if (m.text && !kinds.has(m.text)) kinds.set(m.text, m.kind)
+  if (kinds.size === 0) return [{ text: value, kind: null }]
+  const alternatives = [...kinds.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((text) => {
+      const chars = Array.from(text)
+      const before = WORD_CHAR.test(chars[0]) ? '(?<![\\p{L}\\p{N}_])' : ''
+      const after = WORD_CHAR.test(chars[chars.length - 1]) ? '(?![\\p{L}\\p{N}_])' : ''
+      return `${before}${escapeRegExp(text)}${after}`
+    })
+  const pattern = new RegExp(alternatives.join('|'), 'gu')
+  const out: MentionSegment[] = []
+  let last = 0
+  for (const match of value.matchAll(pattern)) {
+    const start = match.index
+    if (start > last) out.push({ text: value.slice(last, start), kind: null })
+    out.push({ text: match[0], kind: kinds.get(match[0]) ?? null })
+    last = start + match[0].length
+  }
+  if (last < value.length) out.push({ text: value.slice(last), kind: null })
+  return out
+}

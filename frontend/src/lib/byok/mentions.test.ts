@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { CATALOG_BOTH } from './__fixtures__'
 import { getModeSpec } from './catalog'
-import { insertMention, referenceBadges } from './mentions'
+import { insertMention, mentionSegments, referenceBadges } from './mentions'
 import type { GenerationReference } from './references'
 
 const ref = (kind: GenerationReference['kind'], label: string, extra: Partial<GenerationReference> = {}): GenerationReference => ({
@@ -129,4 +129,76 @@ it('caps a long character name on the badge (the chip does not wrap) without tou
   // Unicode is cut by code point, never mid-character.
   const [emoji] = referenceBadges(null, [ref('image', 'a.png', { character: '😀'.repeat(25) })])
   expect(emoji.label).toBe(`${'😀'.repeat(20)}… · Image 1`)
+})
+
+describe('mentionSegments', () => {
+  const m = (text: string, kind: GenerationReference['kind'] = 'image') => ({ text, kind })
+  /** Segments as [text, kind or null], for short assertions. */
+  const seg = (value: string, mentions: Parameters<typeof mentionSegments>[1]) =>
+    mentionSegments(value, mentions).map((s) => [s.text, s.kind])
+
+  it('is one plain segment without mentions, and nothing for an empty prompt', () => {
+    expect(seg('a cat with Image1', [])).toEqual([['a cat with Image1', null]])
+    expect(seg('', [m('Image1')])).toEqual([])
+  })
+
+  it('marks each mention with its kind, keeping the text around it', () => {
+    const mentions = [m('Image1'), m('Video1', 'video'), m('Audio1', 'audio')]
+    expect(seg('swap Video1 into Image1, sing Audio1.', mentions)).toEqual([
+      ['swap ', null], ['Video1', 'video'], [' into ', null], ['Image1', 'image'], [', sing ', null], ['Audio1', 'audio'], ['.', null],
+    ])
+  })
+
+  it('handles mentions at the start, at the end, adjacent and repeated', () => {
+    const mentions = [m('@image_1'), m('@video_1', 'video')]
+    expect(seg('@image_1 x @video_1', mentions)).toEqual([['@image_1', 'image'], [' x ', null], ['@video_1', 'video']])
+    expect(seg('@image_1@video_1@image_1', mentions)).toEqual([['@image_1', 'image'], ['@video_1', 'video'], ['@image_1', 'image']])
+  })
+
+  it('matches whole mentions only: not inside a longer word or a longer number', () => {
+    expect(seg('Image10 MyImage1 Image1_ Image1', [m('Image1')])).toEqual([['Image10 MyImage1 Image1_ ', null], ['Image1', 'image']])
+    expect(seg('@image_12 @image_1', [m('@image_1')])).toEqual([['@image_12 ', null], ['@image_1', 'image']])
+    // Letters of any script count as part of a word.
+    expect(seg('éImage1 Image1é', [m('Image1')])).toEqual([['éImage1 Image1é', null]])
+  })
+
+  it('prefers the longer mention when one is a prefix of another', () => {
+    expect(seg('@image_12 and @image_1', [m('@image_1'), m('@image_12')])).toEqual([
+      ['@image_12', 'image'], [' and ', null], ['@image_1', 'image'],
+    ])
+  })
+
+  it('treats regex metacharacters in a mention literally', () => {
+    const mentions = [m('<Picture 1>'), m('[img.1]'), m('$v(1)+', 'video')]
+    expect(seg('see <Picture 1>, [img.1] and $v(1)+; not <Picture 11> or [imgX1]', mentions)).toEqual([
+      ['see ', null], ['<Picture 1>', 'image'], [', ', null], ['[img.1]', 'image'], [' and ', null], ['$v(1)+', 'video'],
+      ['; not <Picture 11> or [imgX1]', null],
+    ])
+  })
+
+  it('a mention that starts or ends with a symbol can touch a word on that side', () => {
+    expect(seg('as<Picture 1>is', [m('<Picture 1>')])).toEqual([['as', null], ['<Picture 1>', 'image'], ['is', null]])
+  })
+
+  it('keeps Unicode text around mentions intact', () => {
+    const value = 'Zoë 李 😀 Image1 ✨ 名前'
+    const out = mentionSegments(value, [m('Image1')])
+    expect(out.map((s) => s.text).join('')).toBe(value)
+    expect(out.map((s) => [s.text, s.kind])).toEqual([['Zoë 李 😀 ', null], ['Image1', 'image'], [' ✨ 名前', null]])
+  })
+
+  it('the same text in two badges takes the first kind; empty mention texts are ignored', () => {
+    expect(seg('Image1', [m('Image1', 'image'), m('Image1', 'video'), m('')])).toEqual([['Image1', 'image']])
+  })
+
+  it('splits a very long prompt in linear time and loses no text', () => {
+    const unit = 'a long line with Image1 and @video_1, but not Image10 or @video_12. '
+    const value = unit.repeat(20000)
+    const started = performance.now()
+    const out = mentionSegments(value, [m('Image1'), m('@video_1', 'video')])
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(out.map((s) => s.text).join('')).toBe(value)
+    expect(out.filter((s) => s.kind === 'image')).toHaveLength(20000)
+    expect(out.filter((s) => s.kind === 'video')).toHaveLength(20000)
+  })
 })

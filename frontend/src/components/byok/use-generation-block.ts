@@ -68,7 +68,8 @@ import { loaderForReferences } from '@/lib/pipeline/migrate-references-to-loader
 import {
   GENERATION_BLOCK_CONFIGS,
   article,
-  fixedPromptText,
+  defaultPromptText,
+  isDefaultPrompt,
   generationBlockType,
   resolveGenerationSelection,
   type GenerationBlockConfig,
@@ -146,6 +147,17 @@ function exactReferenceIssues(config: GenerationBlockConfig, refs: ReadonlyArray
   return issues
 }
 
+/**
+ * A block that needs a prompt whatever the ledger says (Character Swap), as an
+ * issue in the ledger's shape so it shows and blocks like the counts above.
+ */
+function requiredPromptIssues(config: GenerationBlockConfig, prompt: string): GenerationIssue[] {
+  if (!config.promptRequired || prompt.trim()) return []
+  const blockLabel = getBlockDef(generationBlockType(config))?.label ?? 'This block'
+  const fix = config.defaultPrompt ? 'Write one, or reset it to the default.' : 'Write one.'
+  return [{ code: 'prompt_required', severity: 'error', field: 'prompt', message: `${blockLabel} needs a prompt. ${fix}` }]
+}
+
 /** The estimate's request: the prompt never affects the price, so it is not part of it. */
 function withoutPrompt(request: GenerationRequest | null): GenerationRequest | null {
   if (!request) return null
@@ -176,7 +188,11 @@ export function useGenerationBlock(
 
   const [storedProvider, setStoredProvider] = useSessionState<string | null>(key('provider'), null)
   const [storedModel, setStoredModel] = useSessionState<string | null>(key('model'), null)
-  const [prompt, setPrompt] = useSessionState<string>(key('prompt'), '')
+  // A block with a default prompt starts with it (the plain syntax until the catalog has loaded).
+  const [prompt, setPrompt] = useSessionState<string>(
+    key('prompt'),
+    config.defaultPrompt ? defaultPromptText(config.defaultPrompt, null) : '',
+  )
   // Was a choice stored before this block mounted (a reload, a loaded flow)?
   // Read in the first render; useSessionState writes its value in an effect,
   // after the commit, so this never sees that write whatever the hook order.
@@ -302,12 +318,15 @@ export function useGenerationBlock(
     return pipeline ? `${issue.message} Add ${article(missing.label)} ${missing.label} before this block.` : issue.message
   }
   const exactIssues = exactReferenceIssues(config, checkable)
+  // The block's own prompt (a block that needs one never takes it from upstream).
+  const promptIssues = requiredPromptIssues(config, prompt)
   const clientIssues = spec && inputKinds.length > 0
     ? withoutRedundantCounts([
         ...exactIssues,
+        ...promptIssues,
         ...checkReferences(spec, checkable, { modelName: names.model, providerName: names.provider, modeName: names.mode }),
       ])
-    : exactIssues
+    : [...exactIssues, ...promptIssues]
   const allIssues = [...clientIssues, ...serverIssues.filter((s) => !clientIssues.some((c) => c.code === s.code && c.field === s.field))]
   const asHint = (issue: GenerationIssue) => !touched && entries.length === 0 && EMPTY_BLOCK_CODES.has(issue.code)
   const issues = allIssues.filter((i) => !asHint(i) && i.severity === 'error').map(withWhereToFix)
@@ -362,36 +381,54 @@ export function useGenerationBlock(
   }, [pipeline, blockId, viewer.type])
 
   // ---- Upstream prompt ----
+  // A block that writes its own prompt (Character Swap) never takes one from upstream.
+  const acceptsUpstreamPrompt = config.upstreamPrompt !== false
   // A block upstream that outputs text (Prompt Writer, Prompt From Txt, ...).
-  const hasUpstreamText = Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(inputs.text).trim())
+  const hasUpstreamText = acceptsUpstreamPrompt
+    && (Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(inputs.text).trim()))
   // The switch follows the source's edges (`nextUpstreamChoice`); a choice the
   // user makes in between is kept, also across reloads and in saved flows.
   const seenUpstreamText = useRef(initialSeenSource(hadStoredUpstreamChoice, hasUpstreamText))
-  // A block with a fixed prompt has no prompt of its own to replace.
-  const fixedPrompt = config.fixedPrompt ? fixedPromptText(config.fixedPrompt, spec) : null
   useEffect(() => {
     const hadSource = seenUpstreamText.current
-    if (fixedPrompt !== null || hasUpstreamText === hadSource) return
+    if (hasUpstreamText === hadSource) return
     seenUpstreamText.current = hasUpstreamText
     setUseUpstreamPrompt((current) => nextUpstreamChoice(current, hadSource, hasUpstreamText))
-  }, [fixedPrompt, hasUpstreamText, setUseUpstreamPrompt])
-  // Keep the saved prompt equal to the text that is sent, so a saved flow and a saved run show it.
+  }, [hasUpstreamText, setUseUpstreamPrompt])
+
+  // ---- Default prompt (Character Swap) ----
+  // The default written for the selected model; null without a default or a spec.
+  const template = config.defaultPrompt ?? null
+  const defaultPrompt = template && spec ? defaultPromptText(template, spec) : null
+  // Still the default (in any model's syntax) or the user's own text, decided from the text.
+  const promptIsDefault = useMemo(
+    () => template !== null && isDefaultPrompt(prompt, template, catalog, mode),
+    [template, prompt, catalog, mode],
+  )
+  // While it is the default it follows the model, and the stored text is what is sent,
+  // so a saved flow and a saved run show it. An edit, an empty prompt included, is kept.
   useEffect(() => {
-    if (fixedPrompt !== null && prompt !== fixedPrompt) setPrompt(fixedPrompt)
-  }, [fixedPrompt, prompt, setPrompt])
+    if (defaultPrompt !== null && promptIsDefault && prompt !== defaultPrompt) setPrompt(defaultPrompt)
+  }, [defaultPrompt, promptIsDefault, prompt, setPrompt])
+  const resetPrompt = useCallback(() => {
+    if (defaultPrompt !== null) setPrompt(defaultPrompt)
+  }, [defaultPrompt, setPrompt])
+  /** The block's own prompt as sent: the default in the selected model's syntax, or the user's text. */
+  const ownPrompt = defaultPrompt !== null && promptIsDefault ? defaultPrompt : prompt
+
   const upstreamSources = pipeline?.getPortSources(blockId, 'text') ?? []
   /** Where the prompt comes from, e.g. "1 · Prompt Writer". */
   const upstreamSource = upstreamSources.length > 0
     ? upstreamSources.map((p) => `${p.blockIndex + 1} · ${p.blockLabel}`).join(', ')
     : null
-  const promptFromUpstream = fixedPrompt === null && useUpstreamPrompt && hasUpstreamText
+  const promptFromUpstream = useUpstreamPrompt && hasUpstreamText
 
   // ---- Run ----
   /** True when this run takes its prompt from upstream. */
   const usesUpstream = (fresh: Record<string, unknown>) =>
-    fixedPrompt === null && useUpstreamPrompt && (Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(fresh.text).trim()))
+    acceptsUpstreamPrompt && useUpstreamPrompt && (Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(fresh.text).trim()))
   const effectivePrompt = (fresh: Record<string, unknown>) =>
-    fixedPrompt ?? (usesUpstream(fresh) ? toText(fresh.text).trim() : prompt)
+    usesUpstream(fresh) ? toText(fresh.text).trim() : ownPrompt
 
   /** The request a run would submit for these inputs (null until a model is chosen). */
   const buildRequest = (fresh: Record<string, unknown>): GenerationRequest | null => {
@@ -481,6 +518,9 @@ export function useGenerationBlock(
       // The block's own counts (one video, one image): stop before anything is sent.
       const miscounted = exactReferenceIssues(config, latest.map((e) => e.ref))
       if (miscounted.length > 0) throw new Error(withWhereToFix(miscounted[0]))
+      // A block that needs a prompt (Character Swap) stops here too, before anything is sent.
+      const noPrompt = requiredPromptIssues(config, prompt)
+      if (noPrompt.length > 0) throw new Error(noPrompt[0].message)
       // Too many items from upstream: say which block sends them.
       if (pipeline) {
         const fresh = latest.map((e) => toRequestReference(e.ref, e.ref.role))
@@ -576,7 +616,9 @@ export function useGenerationBlock(
     noKeys: readiness.kind === 'no_keys',
     prompt,
     setPrompt,
-    fixedPrompt,
+    /** The default prompt for the selected model, for blocks that have one (else null). */
+    defaultPrompt,
+    resetPrompt,
     useUpstreamPrompt,
     setUseUpstreamPrompt,
     hasUpstreamText,

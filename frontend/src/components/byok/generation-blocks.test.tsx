@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import '@/components/pipeline/custom_blocks/_register'
 import { getBlockPickerGroups } from '@/components/pipeline/block-picker-groups'
 import { CATALOG_BOTH } from '@/lib/byok/__fixtures__'
+import { kindAccent } from '@/lib/byok/kind-accent'
 import { exportFlow, importFlow } from '@/lib/pipeline/flow-io'
 import { getBlockDef, getStarterTypes, type BlockDef } from '@/lib/pipeline/registry'
 import { blockProps, jobSnapshot, latestExecute, renderGenerationBlock, stubGenerationFetch } from '@/test-utils/byok-harness'
@@ -298,6 +299,62 @@ describe('reference badges above the prompt', () => {
     await user.click(screen.getByRole('button', { name: 'Insert reference to Image 1' }))
     expect(prompt).toHaveValue('a street at night <Picture 1>')
     expect(JSON.parse(sessionStorage.getItem('block_b5_prompt')!)).toBe('a street at night <Picture 1>')
+  })
+
+  const coloured = () => Array.from(screen.getByTestId('mention-highlight').querySelectorAll('[data-mention-kind]'))
+    .map((el) => [el.textContent, el.getAttribute('data-mention-kind'), el.className])
+
+  it('colours the mentions of attached references in the prompt, typed or inserted, and only those', async () => {
+    const user = userEvent.setup()
+    await renderI2I('h1', { image: images.slice(0, 2) }, { prompt: 'blend <Picture 1> with <Picture 3>' })
+    const prompt = screen.getByLabelText('Generation Prompt') as HTMLTextAreaElement
+    // Two images attached: <Picture 3> names nothing and stays plain.
+    expect(coloured()).toEqual([['<Picture 1>', 'image', kindAccent('image').mention]])
+    expect(screen.getByTestId('mention-highlight').textContent).toBe(prompt.value)
+    await user.click(screen.getByRole('button', { name: 'Insert reference to Image 2' }))
+    expect(prompt).toHaveValue('blend <Picture 1> with <Picture 3> <Picture 2>')
+    expect(coloured().map(([text]) => text)).toEqual(['<Picture 1>', '<Picture 2>'])
+    await user.type(prompt, ' and <Picture 1>')
+    expect(coloured().map(([text]) => text)).toEqual(['<Picture 1>', '<Picture 2>', '<Picture 1>'])
+  })
+
+  it('colours video and audio mentions with their own accents in Omni Reference', async () => {
+    stubGenerationFetch({ catalog: CATALOG_BOTH })
+    seed('h2', { provider: 'kie', model: 'kling-4.0', prompt: '@video_1 dances to @sound_1 like @image_1, not @image_12' })
+    renderGenerationBlock(def('omniReferenceToVideo').component, blockProps('h2', {
+      image: [{ local: '/outputs/i.png' }], video: [{ local: '/outputs/v.mp4' }], audio: [{ local: '/outputs/a.mp3' }],
+    }))
+    await screen.findByRole('combobox', { name: 'Model' })
+    expect(coloured()).toEqual([
+      ['@video_1', 'video', kindAccent('video').mention],
+      ['@sound_1', 'audio', kindAccent('audio').mention],
+      ['@image_1', 'image', kindAccent('image').mention],
+    ])
+  })
+
+  it('Omni Reference keeps the ledger rule: an optional prompt (Wan 3.0) may be empty and the run sends none', async () => {
+    const harness = stubGenerationFetch({ catalog: CATALOG_BOTH, jobs: [jobSnapshot({ status: 'COMPLETED', outputs: [{ kind: 'video', url: 'https://cdn/o.mp4' }] })] })
+    seed('h4', { provider: 'kie', model: 'wan-3.0', prompt: '' })
+    const inputs = { image: [{ local: '/outputs/i.png' }] }
+    const props = blockProps('h4', inputs)
+    renderGenerationBlock(def('omniReferenceToVideo').component, props)
+    await screen.findByRole('combobox', { name: 'Model' })
+    expect(screen.getByRole('textbox', { name: 'Generation Prompt (optional)' })).toHaveValue('')
+    expect(screen.queryByText(/needs a prompt/)).toBeNull()
+    expect(screen.queryByText('Fix before running')).toBeNull()
+    await act(async () => { await latestExecute(props)(inputs, new AbortController().signal) })
+    const [submitted] = harness.requests('/api/generation/submit') as Array<{ params: Record<string, unknown> }>
+    expect(submitted.params).not.toHaveProperty('prompt')
+  })
+
+  it('a badge without a thumbnail shows its kind accent, the colour its mentions get', async () => {
+    stubGenerationFetch({ catalog: CATALOG_BOTH })
+    seed('h3', { provider: 'kie', model: 'kling-4.0' })
+    renderGenerationBlock(def('omniReferenceToVideo').component, blockProps('h3', { audio: [{ local: '/outputs/a.mp3' }] }))
+    await screen.findByRole('combobox', { name: 'Model' })
+    const badge = screen.getByRole('button', { name: 'Insert reference to Audio 1' })
+    const icon = badge.querySelector('span[aria-hidden]')!
+    for (const cls of kindAccent('audio').chip.split(' ')) expect(icon.classList).toContain(cls)
   })
 
   it('never shows badges on text-only blocks', async () => {
