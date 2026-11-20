@@ -61,3 +61,14 @@ def test_packaged_mode_still_builds_from_a_clone():
     frontend = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
     assert "verify-standalone-build.mjs" in frontend["scripts"]["postbuild"]
     assert "--packaged" in (ROOT / "app.py").read_text(encoding="utf-8")
+
+
+def test_licence_is_mit_everywhere():
+    licence = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    assert licence.startswith("MIT License")
+    assert "Copyright (c) 2026 BlockFlow contributors" in licence
+    assert "Permission is hereby granted, free of charge" in licence
+    assert _package()["license"] == "MIT"
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "PolyForm" not in readme
+    assert "source-available" not in readme.lower()

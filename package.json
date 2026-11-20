@@ -12,7 +12,7 @@
     "piapi",
     "pipeline"
   ],
-  "license": "PolyForm-Noncommercial-1.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "npm --prefix frontend run build"

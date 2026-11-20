@@ -4,10 +4,10 @@
 
 [![CI](https://github.com/Hearmeman24/Blockflow-Studio/actions/workflows/ci.yml/badge.svg)](https://github.com/Hearmeman24/Blockflow-Studio/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Hearmeman24/Blockflow-Studio?display_name=tag&include_prereleases)](https://github.com/Hearmeman24/Blockflow-Studio/releases)
-[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Sponsor](https://readme.cash/i/9dg9c5wcbr.svg)](https://readme.cash/c/9dg9c5wcbr)
 
-Source-available visual pipelines for AI image and video generation, with your own API keys.
+Open source visual pipelines for AI image and video generation, with your own API keys.
 
 </div>
 
@@ -15,6 +15,11 @@ Source-available visual pipelines for AI image and video generation, with your o
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/),
 [Node.js](https://nodejs.org/) 22.14 or newer, and git.
+
+**Platforms.** The beta has been tested on macOS only. Windows and Linux are
+supported by the code but have not been tested yet; if you try one, please
+report what happens with the
+[bug report template](https://github.com/Hearmeman24/Blockflow-Studio/issues/new?template=bug_report.yml).
 
 ```bash
 git clone https://github.com/Hearmeman24/Blockflow-Studio.git
@@ -147,15 +152,9 @@ keys. Never paste an API key into an issue.
 
 ## License
 
-BlockFlow Studio is source-available under the
-[PolyForm Noncommercial License 1.0.0](LICENSE).
+BlockFlow Studio is open source under the [MIT License](LICENSE).
 
-You may use, study, modify, and share BlockFlow Studio for non-commercial
-purposes under that license.
+You are free to use, modify, and share it, including commercially. Keep the
+copyright and license notice in copies or substantial portions of the software.
 
-Commercial use is not permitted without a separate written commercial license.
-This includes using BlockFlow Studio in a revenue-generating product, service,
-website, client project, SaaS offering, hosted service, or internal business
-workflow.
-
-For commercial licensing, contact: hearmeman@hearmemanai.xyz.
+For business inquiries, write to hearmeman@hearmemanai.xyz.
