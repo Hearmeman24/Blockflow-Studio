@@ -10,10 +10,14 @@ Steps, each skipped when already satisfied:
   3. `npm --prefix frontend ci`          frontend dependencies (refused while this checkout's app is running)
   4. `npm --prefix frontend run gen:custom-blocks`   block registry (always; cheap and repeatable)
   5. `uv run --with fastmcp python -c "import fastmcp"`   FastMCP into uv's cache for the MCP server
+  6. `npm --prefix frontend run build`   the production web interface `uv run app.py` serves, when its
+     build is missing or older than the code, the blocks or the backend port (refused while this
+     checkout's app is running)
 
-`uv run app.py` installs the frontend steps itself on start; this script is
-the full install and repair command (it adds the Python dev dependencies for
-tests and lint). The shared step logic is in ``scripts/install_steps.py``.
+`uv run app.py` installs the frontend steps and builds itself on start; this
+script is the full install and repair command (it adds the Python dev
+dependencies for tests and lint). The shared step logic is in
+``scripts/install_steps.py``.
 
 It never starts the app or the MCP server, never asks for or reads an API key,
 and never touches the user data or output folders. Standard library only.
@@ -30,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import doctor  # noqa: E402
 import install_steps  # noqa: E402
-from install_steps import INSTALL_TIMEOUT_S, NPM_CI  # noqa: E402
+from install_steps import BUILD, NPM_CI  # noqa: E402
 
 
 def next_steps(env: doctor.Env) -> List[str]:
@@ -79,16 +83,21 @@ def main(argv: Optional[List[str]] = None, env: Optional[doctor.Env] = None,
         if args.check:
             out(f"[todo] {step_id}: would run `{shown}`")
             continue
-        if cmd is NPM_CI and install_steps.this_checkout_running(env):
+        if cmd in (NPM_CI, BUILD) and install_steps.this_checkout_running(env):
+            uses = "frontend packages" if cmd is NPM_CI else "web interface build"
             out(f"[fail] {step_id}: the app is running from this folder, and `{shown}` would delete the "
-                "frontend packages it uses. "
+                f"{uses} it uses. "
                 "Stop the app (Ctrl+C in its terminal), then run this again.")
             return 1
         out(f"[run ] {step_id}: {shown}")
-        code, output = env.run(cmd, cwd=env.root, timeout=INSTALL_TIMEOUT_S)
+        code, output = install_steps.run_step(env, step)
         if code != 0:
             if cmd is NPM_CI:
                 install_steps.forget_frontend_install(env.root)
+            if cmd is BUILD:
+                out(f"[fail] {step_id}:")
+                out("\n".join(install_steps.build_failed_lines(code, output)))
+                return 1
             out(f"[fail] {step_id}: {shown} failed (exit {code}).\n{install_steps.tail(output)}")
             return 1
         out(f"[ok  ] {step_id}: done")

@@ -56,8 +56,8 @@ def test_no_npm_publishing_path_remains():
 
 
 def test_packaged_mode_still_builds_from_a_clone():
-    # The updater restarts packaged installs with `uv run app.py --packaged`,
-    # which serves the prebuilt Next.js standalone frontend.
+    # `uv run app.py` builds and serves the Next.js standalone frontend, and
+    # `uv run app.py --packaged` serves an existing build as it is.
     frontend = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
     assert "verify-standalone-build.mjs" in frontend["scripts"]["postbuild"]
     assert "--packaged" in (ROOT / "app.py").read_text(encoding="utf-8")

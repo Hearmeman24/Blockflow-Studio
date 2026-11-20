@@ -38,11 +38,14 @@ needs their explicit yes.
 2. **Start the app.** `uv run app.py`, as a long-running background process
    (keep it running; it opens a browser unless `BLOCKFLOW_NO_OPEN=1`). On the
    first start it installs what is missing before the servers start (`npm ci`
-   in `frontend/`, the block codegen and a FastMCP download, one line each),
-   which can take a few minutes, and then compiles the frontend. If an install
-   step fails it stops with a readable error and the command to retry; `uv run
-   python scripts/setup.py` repairs the install. Then run `uv run python
-   scripts/doctor.py --expect-running`.
+   in `frontend/`, the block codegen, the production build of the web
+   interface and a FastMCP download, one line each), which can take a few
+   minutes. Later starts rebuild only after an install, an update, a frontend
+   or block change, or another `BACKEND_PORT`. If an install step or the build
+   fails it stops with a readable error and the command to retry; `uv run
+   python scripts/setup.py` repairs the install. Wait for `[app] Ready at`,
+   then run `uv run python scripts/doctor.py --expect-running` (during a build
+   it reports `frontend` as `warn`, "being built", not `fail`).
    *Success:* `backend` and `frontend` are `ok`; the app answers at
    <http://localhost:47300>. If either server stops on its own, `app.py`
    prints an `[app]` line naming it and its exit code and exits with code 1
@@ -110,9 +113,11 @@ needs their explicit yes.
 
 | Command | When |
 |---|---|
-| `uv run app.py` | Run the app (backend :47301, frontend :47300). |
+| `uv run app.py` | Run the app (backend :47301, frontend :47300): the production web interface on the Next.js standalone server, built first when its stamp is missing or stale (`backend/app_update/frontend_build.py`). |
+| `uv run app.py --dev` | The Next.js development server instead (`npm run dev`, also `BLOCKFLOW_DEV=1`): hot reload and errors in the page, about 1 GB more memory. For working on blocks or the app. |
+| `uv run app.py --packaged` | Serve the existing build as it is; never installs or builds (also `BLOCKFLOW_PACKAGED=1`). Stops with exit 1 when there is no build; warns when it is stale. |
 | `python3 scripts/doctor.py [--json] [--expect-running]` | Health check; read-only, no keys in the output. `--json` for bug reports. |
-| `uv run python scripts/setup.py [--check]` | Install or repair everything, idempotently, including the Python dev tools for tests and lint (`uv run app.py` installs only what the app needs). Refuses `npm ci` while this checkout's app is running. |
+| `uv run python scripts/setup.py [--check]` | Install or repair everything, idempotently, including the Python dev tools for tests and lint (`uv run app.py` installs only what the app needs), and the production build when it is stale. Refuses `npm ci` and the build while this checkout's app is running. |
 | `uv run ruff check .` | Python lint. Before every hand-off. |
 | `uv run pytest tests/ -q` | Backend tests. Focused: `uv run pytest tests/test_byok_service.py -q`. |
 | `uv run --with fastmcp python -m pytest tests/test_mcp_*.py -q` | MCP tests including the FastMCP registration test (needs `--with fastmcp`; `python -m pytest`, because `.venv/bin/pytest` cannot import the overlay and skips it). |
@@ -120,7 +125,7 @@ needs their explicit yes.
 | `npm --prefix frontend exec -- tsc --noEmit -p frontend` | Type check. |
 | `npm --prefix frontend run lint` | ESLint; 0 errors required, warnings allowed. |
 | `npm --prefix frontend test` | Vitest. Focused: `npm --prefix frontend test -- model-select`. |
-| `npm --prefix frontend run build` | Production build. Not while a dev server from the same checkout is running. |
+| `npm --prefix frontend run build` | Production build (a gate). Not while the app runs from the same checkout: it deletes the build `uv run app.py` serves. It writes no stamp, so the next `uv run app.py` builds once more. |
 | `uv run python tests/test_byok_catalog_fixture.py` | Regenerate the frontend catalog fixtures after a ledger change. |
 | `uv run python tests/test_status_contract_fixture.py` | Regenerate the status-contract fixture after changing `backend/statuses.py`. |
 | `uv run python scripts/sync_price_ledger.py` | Pull the price ledger from `Hearmeman24/blockflow-prices`. |
@@ -131,7 +136,8 @@ and the build.
 ## Project map
 
 ```
-app.py                      installs what a fresh clone is missing, then starts backend + frontend;
+app.py                      installs what a fresh clone is missing, builds the web interface when its
+                            build is stale (not with --dev), then starts backend + frontend;
                             the only entry point users run (BLOCKFLOW_NO_AUTO_SETUP=1 skips the install)
 mcp_server.py               MCP server entry (stdio); code in blockflow_mcp/ (one module per tool group)
 backend/
@@ -223,7 +229,12 @@ no switch: the folder is on disk or it is not.
    `tests/test_block_sidecar_overlay.py`), frontend with Vitest/RTL importing
    `@/components/pipeline/custom_blocks/_register`.
 4. Run `npm --prefix frontend run gen:custom-blocks`, then tsc, lint and the
-   tests. Restart the app so the backend loads a new sidecar.
+   tests. Restart the app (stop it, then `uv run app.py`): the backend loads a
+   new sidecar, and because every `frontend.block.tsx` is part of the build
+   stamp, the start rebuilds the web interface with the block (about a
+   minute; a block that does not compile stops the start with the compiler's
+   error). While you iterate on a block, run `uv run app.py --dev` instead: the
+   development server picks up frontend edits without a restart.
 
 A complete example, verified by building it in a temporary slug (codegen, tsc,
 lint, a Vitest test including cancellation, and a backend route test):
@@ -443,9 +454,10 @@ changes without asking.
 | MCP run recording (`RUN_FOR_JOB_STATUS`) | `backend/mcp_runs.py` | the saved run for each job status, or none |
 | MCP `generate` stages (`GenerateStage`) | `blockflow_mcp/tools_generation.py` | `validate`, `estimate`, `submit`, `wait` |
 | Update engine (`UPDATE_TRANSITIONS`, `STEP_TRANSITIONS`) | `backend/app_update/engine.py` | update states and step statuses |
-| Launcher outcome (`LaunchOutcome`, `EXIT_CODES`) | `app.py` | `stopped`, `server_exited`, `setup_failed`, `setup_interrupted`, `bad_port`, `port_in_use` |
-| Launcher control files, request order, launch mode | `backend/app_update/launcher_protocol.py` | `ControlFile`, `REQUEST_ORDER`, `LaunchMode` (`dev`, `packaged`, `unknown`) |
-| Install plan | `scripts/install_steps.py` | `StepReason`, `FastMCP` outcomes |
+| Launcher outcome (`LaunchOutcome`, `EXIT_CODES`) and web interface mode (`FrontendMode`) | `app.py` | `stopped`, `server_exited`, `setup_failed`, `setup_interrupted`, `bad_port`, `port_in_use`, `build_missing`, `build_failed`; `FrontendMode`: `build` (default), `dev` (`--dev`), `prebuilt` (`--packaged`) |
+| Launcher control files, request order, launch mode | `backend/app_update/launcher_protocol.py` | `ControlFile`, `REQUEST_ORDER`, `LaunchMode` (`dev`, `packaged`, `unknown`; `packaged` is the built web interface, from `uv run app.py` or `--packaged`; reported as `launch_mode` by `/api/app/version`) |
+| Production build of the web interface | `backend/app_update/frontend_build.py` | `BuildState`: `missing`, `stale`, `current` (the stamp next to the standalone server against a hash of the build inputs and the backend port) |
+| Install plan | `scripts/install_steps.py` | `StepReason` (incl. `build_missing`, `build_stale`), `FastMCP` outcomes |
 | Doctor checks | `scripts/doctor.py` | `STATUSES` (`ok`, `warn`, `fail`, `skip`), `CHECK_IDS` |
 | Pipeline run per tab (`transitionRun`) | `frontend/src/lib/pipeline/run-phase.ts` | `idle`, `running`, `cancelling`, `resuming` |
 | Loop mode (`transitionLoop`) | `frontend/src/lib/pipeline/loop-mode.ts` | `off`, `looping` (awaiting a run or a restart) |
@@ -574,10 +586,13 @@ is allowed only when labelled as one, with follow-up work tracked.
   history, push the tag and publish a GitHub Release. Never rewrite `main` or
   move a published tag: users update with `git merge --ff-only <tag>`, then
   `uv sync --frozen`, `npm --prefix frontend ci` (only when the lockfile
-  changed), the block codegen, and a restart through `app.py`'s supervisor. A
-  change to `app.py` itself needs a manual restart. By hand: stop the app,
-  `git fetch --tags origin`, `git merge --ff-only vX.Y.Z`, `uv sync --frozen`,
-  then `uv run app.py` (it reinstalls the frontend when the lockfile changed).
+  changed), the block codegen, the production build (while the web interface
+  is paused; a failed build rolls the update back and rebuilds the previous
+  version) and a restart through `app.py`'s supervisor. A change to `app.py`
+  itself needs a manual restart, and the build then happens on that start. By
+  hand: stop the app, `git fetch --tags origin`, `git merge --ff-only vX.Y.Z`,
+  `uv sync --frozen`, then `uv run app.py` (it reinstalls the frontend when
+  the lockfile changed and rebuilds the web interface).
 
 ## Beta status
 

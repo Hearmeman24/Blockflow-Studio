@@ -3,6 +3,8 @@ __pycache__/
 .env
 node_modules/
 .next/
+# app.py's marker while it builds the web interface (the build stamp lives in .next/standalone/)
+frontend/.blockflow-building
 venv/
 .venv/
 

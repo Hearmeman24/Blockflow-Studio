@@ -45,7 +45,10 @@ def launch_mode() -> LaunchMode:
 
 
 def restart_command(mode: str) -> str:
-    return "uv run app.py --packaged" if mode == LaunchMode.PACKAGED else "uv run app.py"
+    """The command that starts BlockFlow again the way it runs now. The built
+    web interface (``packaged``) restarts with plain ``uv run app.py``, which
+    also rebuilds it when it is stale; ``--packaged`` would serve a stale build."""
+    return "uv run app.py --dev" if mode == LaunchMode.DEV else "uv run app.py"
 
 
 def restarts_automatically(*, supervised: bool, mode: str, launcher_changed: bool = False) -> bool:

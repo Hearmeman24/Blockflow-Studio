@@ -31,7 +31,7 @@ def by_id(checks):
 
 
 ALL_IDS = ["git", "uv", "python", "node", "npm", "python_deps", "frontend_deps", "block_registry",
-           "mcp_importable", "mcp_registered", "backend_port", "backend", "frontend_port", "frontend",
+           "frontend_build", "mcp_importable", "mcp_registered", "backend_port", "backend", "frontend_port", "frontend",
            "providers", "balances", "output_folder", "version"]
 
 
@@ -134,6 +134,61 @@ def test_custom_ports_from_the_environment(fake):
     assert got["frontend"].status == "ok"
 
 
+def _edit_a_page(root):
+    page = root / "frontend" / "src" / "app" / "page.tsx"
+    page.write_text(page.read_text() + " edited")
+
+
+def test_frontend_build_says_the_production_build_is_served(fake):
+    got = by_id(doctor.run_checks(fake.env()))["frontend_build"]
+    assert got.status == "ok" and "serving the production build" in got.message
+
+
+def test_frontend_build_in_development_mode_is_not_used(fake, root):
+    fake.routes[47301]["/api/app/version"][1]["launch_mode"] = "dev"
+    _edit_a_page(root)  # a stale build does not matter to the development server
+    got = by_id(doctor.run_checks(fake.env()))["frontend_build"]
+    assert got.status == "ok" and "development server" in got.message and "--dev" in got.message
+
+
+def test_frontend_build_ignores_the_mode_of_an_app_from_another_folder(fake, root):
+    fake.routes[47301]["/api/app/version"][1]["launch_mode"] = "dev"
+    fake.routes[47301]["/api/app/version"][1]["checkout_id"] = "f" * 16
+    _edit_a_page(root)
+    got = by_id(doctor.run_checks(fake.env()))["frontend_build"]
+    assert got.status == "warn" and "development server" not in got.message and "serving" not in got.message
+
+
+def test_frontend_build_stale_while_served_says_restart(fake, root):
+    _edit_a_page(root)
+    got = by_id(doctor.run_checks(fake.env()))["frontend_build"]
+    assert got.status == "warn" and "older than" in got.message
+    assert "uv run app.py" in got.fix and "rebuilds" in got.fix
+
+
+def test_frontend_build_missing_while_the_app_is_down(fake, root):
+    fake.routes.clear()
+    import shutil
+    shutil.rmtree(root / "frontend" / ".next")
+    got = by_id(doctor.run_checks(fake.env()))["frontend_build"]
+    assert got.status == "warn" and "not been built" in got.message and "uv run app.py" in got.fix
+
+
+def test_frontend_build_for_another_backend_port_is_stale(fake):
+    fake.routes = {48001: fake.routes[47301], 48000: fake.routes[47300]}
+    got = by_id(doctor.run_checks(fake.env(BACKEND_PORT="48001", FRONTEND_PORT="48000")))["frontend_build"]
+    assert got.status == "warn"
+
+
+def test_a_build_in_progress_is_not_a_failure(fake, root):
+    fake.routes.clear()
+    with doctor.frontend_build.building(root):
+        got = by_id(doctor.run_checks(fake.env(), expect_running=True))
+    assert got["frontend_build"].status == "warn" and "being built" in got["frontend_build"].message
+    assert got["frontend"].status == "warn" and "being built" in got["frontend"].message
+    assert "Ready at" in got["frontend"].fix
+
+
 def test_frontend_still_starting(fake):
     fake.routes[47300] = {}
     got = by_id(doctor.run_checks(fake.env()))
@@ -206,7 +261,7 @@ def test_json_shape_and_no_secrets(fake, capsys):
     text = lines[0]
     data = json.loads(text)
     assert set(data) == {"doctor_version", "ok", "summary", "platform", "checks"}
-    assert data["ok"] is True and data["summary"] == {"ok": 18, "warn": 0, "fail": 0, "skip": 0}
+    assert data["ok"] is True and data["summary"] == {"ok": 19, "warn": 0, "fail": 0, "skip": 0}
     for check in data["checks"]:
         assert set(check) == {"id", "status", "message", "fix"}
         assert check["status"] in {"ok", "warn", "fail", "skip"}
@@ -221,7 +276,7 @@ def test_human_output_lists_fixes_only_for_problems(fake):
     lines: list[str] = []
     doctor.main([], fake.env(), lines.append)
     text = lines[0]
-    assert text.count("fix:") == 1 and "17 ok, 1 warn, 0 fail, 0 skip" in text
+    assert text.count("fix:") == 1 and "18 ok, 1 warn, 0 fail, 0 skip" in text
 
 
 def test_doctor_never_runs_a_state_changing_command(fake):

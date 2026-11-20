@@ -117,7 +117,7 @@ def test_launch_outcomes_map_to_exit_codes():
     app = _load_app()
     assert {o.name: app.EXIT_CODES[o] for o in app.LaunchOutcome} == {
         "STOPPED": 0, "SERVER_EXITED": 1, "SETUP_FAILED": 1, "SETUP_INTERRUPTED": 130,
-        "BAD_PORT": 1, "PORT_IN_USE": 1}
+        "BAD_PORT": 1, "PORT_IN_USE": 1, "BUILD_MISSING": 1, "BUILD_FAILED": 1}
 
 
 # ------------------------------------------------------------------ one protocol, declared once

@@ -116,7 +116,10 @@ def _update_status(force: bool = False) -> dict[str, Any]:
 @router.get("/api/app/version")
 async def app_version() -> JSONResponse:
     info = await run_in_threadpool(install_info)
-    return JSONResponse({**info, "checkout_id": install.checkout_id(ROOT), "restart_automatic": restart_automatic()})
+    # launch_mode: how app.py started this backend (LaunchMode: dev = `npm run dev`, packaged = the
+    # built web interface, unknown = not started by app.py). The doctor reports it.
+    return JSONResponse({**info, "checkout_id": install.checkout_id(ROOT), "restart_automatic": restart_automatic(),
+                         "launch_mode": launch_mode().value})
 
 
 @router.get("/api/app/update")

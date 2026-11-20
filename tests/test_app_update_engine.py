@@ -277,7 +277,71 @@ def test_packaged_mode_rebuilds_the_frontend(tmp_path):
     eng = make(tmp_path, fake, launch_mode="packaged")
     eng.start("v0.2.0")
     assert ["--prefix", "frontend", "run", "build"] in tool_calls(fake, "npm")
-    assert eng.progress()["restart"]["command"] == "uv run app.py --packaged"
+    # `uv run app.py` serves the built web interface and rebuilds it when it is stale.
+    assert eng.progress()["restart"]["command"] == "uv run app.py"
+
+
+def test_dev_mode_restarts_with_the_dev_flag(tmp_path):
+    eng = make(tmp_path, FakeGit(), launch_mode="dev")
+    eng.start("v0.2.0")
+    assert eng.progress()["restart"]["command"] == "uv run app.py --dev"
+
+
+class BuildingGit(FakeGit):
+    """FakeGit whose `npm run build` leaves a standalone server, as the real one does."""
+
+    def __init__(self, root_holder, **kw):
+        super().__init__(**kw)
+        self.root_holder = root_holder
+        self.envs: dict[str, dict] = {}
+
+    def __call__(self, args, cwd, timeout, env=None):
+        res = super().__call__(args, cwd, timeout, env)
+        if self.line(args).startswith("npm --prefix frontend run build"):
+            self.envs["build"] = dict(env or {})
+            server = Path(cwd) / "frontend" / ".next" / "standalone" / "server.js"
+            (server.parent / ".next").mkdir(parents=True, exist_ok=True)
+            server.write_text("server")
+            (server.parent / ".next" / "BUILD_ID").write_text(f"build-{len(self.calls)}")
+        return res
+
+
+def test_the_update_build_uses_the_backend_port_and_stamps_the_build(tmp_path, monkeypatch):
+    from backend.app_update import frontend_build
+
+    monkeypatch.setenv("BACKEND_PORT", "48201")
+    fake = BuildingGit(None, changed=["frontend/src/x.tsx"])
+    eng = make(tmp_path, fake, launch_mode="packaged")
+    eng.start("v0.2.0")
+    env = fake.envs["build"]
+    assert env["BACKEND_PORT"] == "48201" and env["NEXT_PUBLIC_BACKEND_PORT"] == "48201"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"  # the updater's usual command environment
+    # app.py finds it current after the restart, so it does not build a second time.
+    assert frontend_build.build_state(eng.root, 48201) is frontend_build.BuildState.CURRENT
+    assert frontend_build.building_since(eng.root) is None
+
+
+def test_a_manual_restart_leaves_the_build_to_the_next_start(tmp_path):
+    # Without a pause the web server is still serving from the build folder, which
+    # `next build` deletes; `uv run app.py` builds when it starts again instead.
+    fake = FakeGit(changed=["app.py", "frontend/src/x.tsx"])
+    sup = FakeSupervisor()
+    eng = make(tmp_path, fake, supervisor=sup, launch_mode="packaged")
+    eng.start("v0.2.0")
+    p = eng.progress()
+    assert not any("build" in c for c in tool_calls(fake, "npm"))
+    step = {s["id"]: s for s in p["steps"]}["build"]
+    assert step["status"] == "skipped" and "uv run app.py" in step["detail"]
+    assert p["manual"] == ["uv run app.py"]
+
+
+def test_manual_commands_leave_the_build_to_the_launcher(tmp_path):
+    fake = FakeGit(fail={"uv sync": Result(1, "boom")})
+    eng = make(tmp_path, fake, launch_mode="packaged")
+    eng.start("v0.2.0")
+    manual = eng.progress()["manual"]
+    assert manual[-1] == "uv run app.py"
+    assert "npm --prefix frontend run build" not in manual
 
 
 def test_unsupervised_finishes_and_asks_for_a_manual_restart(tmp_path):
@@ -540,9 +604,10 @@ def test_a_restart_request_that_is_not_delivered_ends_in_a_manual_restart(tmp_pa
     eng.start("v0.2.0")
     p = eng.progress()
     assert p["state"] == "done"
-    assert p["restart"] == {"automatic": False, "required": True, "command": "uv run app.py"}
-    assert p["manual"] == ["uv run app.py"]
-    assert "updated" in p["message"].lower() and "uv run app.py" in p["message"]
+    # make() starts the engine in dev mode (`uv run app.py --dev`).
+    assert p["restart"] == {"automatic": False, "required": True, "command": "uv run app.py --dev"}
+    assert p["manual"] == ["uv run app.py --dev"]
+    assert "updated" in p["message"].lower() and "uv run app.py --dev" in p["message"]
     assert {s["id"]: s["status"] for s in p["steps"]}["restart"] == "failed"
     # The web interface was paused for the update: it is asked to come back.
     assert sup.requests == ["pause", "restart", "resume"]

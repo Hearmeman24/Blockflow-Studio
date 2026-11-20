@@ -74,9 +74,18 @@ def env(tmp_path, monkeypatch):
     return {"client": TestClient(app), "engine": eng, "install": install, "transport": transport}
 
 
-def test_version_route(env):
+def test_version_route(env, monkeypatch):
+    monkeypatch.delenv("BLOCKFLOW_LAUNCH_MODE", raising=False)
     body = env["client"].get("/api/app/version").json()
-    assert body == {**env["install"], "checkout_id": install.checkout_id(routes.ROOT), "restart_automatic": True}
+    assert body == {**env["install"], "checkout_id": install.checkout_id(routes.ROOT), "restart_automatic": True,
+                    "launch_mode": "unknown"}
+
+
+@pytest.mark.parametrize("mode", ["dev", "packaged"])
+def test_version_route_says_how_app_py_started_the_app(env, monkeypatch, mode):
+    # The doctor reports from it which web interface is running (development server or the build).
+    monkeypatch.setenv("BLOCKFLOW_LAUNCH_MODE", mode)
+    assert env["client"].get("/api/app/version").json()["launch_mode"] == mode
 
 
 def test_checkout_id_matches_the_setup_scripts_and_hides_the_path(tmp_path):

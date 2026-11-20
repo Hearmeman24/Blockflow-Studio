@@ -38,8 +38,12 @@ REQUEST_ORDER: tuple[ControlFile, ...] = (ControlFile.RESTART, ControlFile.PAUSE
 
 class LaunchMode(StrEnum):
     """How the backend was started: the ``BLOCKFLOW_LAUNCH_MODE`` value app.py
-    sets (``dev``, ``packaged``), or ``unknown`` when the backend was started
-    some other way (uvicorn directly, a debugger) and nothing supervises it."""
+    sets, or ``unknown`` when the backend was started some other way (uvicorn
+    directly, a debugger) and nothing supervises it. ``dev`` is ``uv run
+    app.py --dev`` (the Next.js development server); ``packaged`` is the built
+    web interface on the standalone server: ``uv run app.py`` (which builds it
+    when needed) and ``uv run app.py --packaged`` (which never builds).
+    ``/api/app/version`` reports it as ``launch_mode``."""
 
     DEV = "dev"
     PACKAGED = "packaged"

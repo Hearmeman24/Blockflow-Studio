@@ -22,8 +22,10 @@ cd Blockflow-Studio
 uv run app.py
 ```
 
-The first start installs the frontend packages, which can take a few minutes.
-The app then opens at <http://localhost:47300>. Enter a Kie key, a PiAPI key, or
+The first start installs the frontend packages and builds the web interface,
+which can take a few minutes. Later starts take a second or two; the app
+rebuilds the web interface (about a minute) only after an update, a change to a
+block, or a different backend port. The app then opens at <http://localhost:47300>. Enter a Kie key, a PiAPI key, or
 both in the Welcome dialog, or later in **Settings, then API keys**. Then open
 **Generate**, add a block, and click **Run Pipeline**.
 
@@ -74,7 +76,11 @@ have so far only been tested against mocks, so expect bugs.
 A block is a folder with a `frontend.block.tsx` and, optionally, a
 `backend.block.py`. Put yours in `private_blocks/<slug>/`, which is git-ignored,
 so updates never touch it. A complete example is in
-[AGENTS.md](AGENTS.md#adding-a-block).
+[AGENTS.md](AGENTS.md#adding-a-block). After adding or changing a block, start
+the app again: `uv run app.py` rebuilds the web interface with it. While you
+work on a block, `uv run app.py --dev` runs the development server instead,
+which reloads your changes and shows errors in the page (it uses about 1 GB
+more memory).
 
 ## MCP server
 
@@ -121,6 +127,12 @@ keys. Never paste an API key into an issue.
   taken, or a value is not a number from 1 to 65535, the app stops before
   starting and says which.
 - **No browser.** `BLOCKFLOW_NO_OPEN=1` starts the app without opening one.
+- **Web interface.** `uv run app.py` serves a production build of the web
+  interface, built when needed. `uv run app.py --dev` (or `BLOCKFLOW_DEV=1`)
+  runs the Next.js development server; `uv run app.py --packaged` (or
+  `BLOCKFLOW_PACKAGED=1`) serves the existing build and never builds. The web
+  interface listens on every network address of the computer, as the
+  development server always did; the backend only on this computer.
 - **Repair.** `python3 scripts/doctor.py` checks the install and changes
   nothing; `uv run python scripts/setup.py` reinstalls what is missing (and the
   developer tools for tests and lint).

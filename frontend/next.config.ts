@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
-const backendPort = process.env.BACKEND_PORT || "8000";
+// Fixed when Next.js builds: the /api and /outputs proxy below goes to this
+// port. app.py builds with the port the app runs on, and its build stamp
+// includes it, so another BACKEND_PORT rebuilds (backend/app_update/frontend_build.py).
+// The fallback is the app's default backend port, for a build made by hand.
+const backendPort = process.env.BACKEND_PORT || "47301";
 
 // How long the /api and /outputs proxy waits for the backend, in seconds.
 // Next.js drops a proxied request after `experimental.proxyTimeout` ms (30 s

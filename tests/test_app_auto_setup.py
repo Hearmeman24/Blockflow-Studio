@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from doctor_fakes import Fake, load_script, make_root  # noqa: E402
+from doctor_fakes import Fake, load_script, make_build, make_root  # noqa: E402
 
 install_steps = load_script("install_steps")
 
@@ -346,3 +347,223 @@ def test_main_sets_up_line_buffering_first(monkeypatch):
     with pytest.raises(SystemExit):
         app.main()
     assert calls == ["buffering", "setup"]
+
+
+# ------------------------------------------------------------------ the production build
+
+BUILD = ["npm", "--prefix", "frontend", "run", "build"]
+
+
+def build_state(root, port=47301):
+    return install_steps.frontend_build.build_state(root, port).value
+
+
+def change_a_page(root):
+    page = root / "frontend" / "src" / "app" / "page.tsx"
+    page.write_text(page.read_text() + " edited")
+
+
+def built_auto(fake, **environ):
+    lines: list[str] = []
+    code = app._auto_setup(fake.env(**environ), lines.append, build=True)
+    return code, "\n".join(lines)
+
+
+def test_a_current_build_runs_nothing(fake, root):
+    code, text = built_auto(fake)
+    assert code == 0 and fake.calls == [] and text == ""
+
+
+def test_a_development_start_never_builds(fake, root):
+    change_a_page(root)
+    code, _ = auto(fake)  # build=False: the --dev start
+    assert code == 0 and BUILD not in fake.calls
+
+
+def test_a_changed_source_rebuilds_and_stamps_the_build(fake, root):
+    change_a_page(root)
+    assert build_state(root) == "stale"
+    code, text = built_auto(fake)
+    assert code == 0, text
+    assert [c for c in fake.calls if c[1:] != ["--version"]] == [BUILD]  # after the node/npm prerequisite check
+    assert "rebuilding the web interface" in text
+    assert "only after an install, an update or a block change" in text
+    assert build_state(root) == "current"
+    fake.calls.clear()
+    assert built_auto(fake) == (0, "")  # the next start does not build again
+
+
+def test_a_new_private_block_rebuilds(fake, root):
+    block = root / "private_blocks" / "prompt_suffix" / "frontend.block.tsx"
+    block.parent.mkdir(parents=True)
+    block.write_text("export const blockDef = {}")
+    code, _ = built_auto(fake)
+    assert code == 0 and BUILD in fake.calls
+
+
+def test_the_build_gets_the_backend_port(fake, root):
+    code, _ = built_auto(fake, BACKEND_PORT="48201")  # another port: a rebuild
+    assert code == 0
+    assert fake.extra_envs[" ".join(BUILD)] == {"BACKEND_PORT": "48201", "NEXT_PUBLIC_BACKEND_PORT": "48201"}
+    assert build_state(root, 48201) == "current"
+    assert build_state(root, 47301) == "stale"
+
+
+def test_a_fresh_clone_installs_registers_then_builds(fake, root):
+    fresh(root)
+    shutil.rmtree(root / "frontend" / ".next")
+    fake.failing.add("uv run --offline")
+    code, text = built_auto(fake)
+    assert code == 0, text
+    assert [c for c in fake.calls if c in (NPM_CI, CODEGEN, FASTMCP, BUILD)] == [NPM_CI, CODEGEN, BUILD, FASTMCP]
+    assert "Building the web interface" in text
+    assert build_state(root) == "current"
+
+
+def test_a_reinstall_always_rebuilds(fake, root):
+    lock = root / "frontend" / "package-lock.json"
+    old = hidden_lock(root).stat().st_mtime
+    os.utime(lock, (old + 60, old + 60))  # the build looks current until npm ci rewrites the packages
+    code, _ = built_auto(fake)
+    assert code == 0
+    assert [c for c in fake.calls if c in (NPM_CI, CODEGEN, BUILD)] == [NPM_CI, CODEGEN, BUILD]
+
+
+def test_a_failed_build_stops_readably_and_leaves_no_stamp(fake, root):
+    change_a_page(root)
+    fake.failing.add(" ".join(BUILD))
+    code, text = built_auto(fake)
+    assert code == 1
+    assert "`npm --prefix frontend run build` failed (exit 1)" in text
+    assert "uv run app.py --dev" in text and "private_blocks" in text
+    assert build_state(root) == "stale"
+    assert install_steps.frontend_build.building_since(root) is None
+
+
+def test_a_build_that_leaves_no_server_fails(fake, root):
+    shutil.rmtree(root / "frontend" / ".next")
+    fake.on_build = lambda: None  # exit 0, but nothing written
+    code, text = built_auto(fake)
+    assert code == 1
+    assert "standalone server" in text
+
+
+def test_the_build_marks_itself_as_running(fake, root):
+    change_a_page(root)
+    seen = []
+    fake.on_build = lambda: (seen.append(install_steps.frontend_build.building_since(root)), make_build(root))
+    built_auto(fake)
+    assert seen and seen[0] is not None
+    assert install_steps.frontend_build.building_since(root) is None
+
+
+def test_the_plan_names_why_it_builds(fake, root):
+    R = install_steps.StepReason
+
+    def plan(**kw):
+        return [(s.id, s.reason) for s in install_steps.first_start_plan(fake.env(), **kw)]
+
+    assert plan(build=True) == []
+    change_a_page(root)
+    assert plan(build=True) == [("frontend_build", R.BUILD_STALE)]
+    shutil.rmtree(root / "frontend" / ".next")
+    assert plan(build=True) == [("frontend_build", R.BUILD_MISSING)]
+    assert plan() == []
+
+
+@pytest.mark.parametrize("argv,env,build", [
+    (["app.py"], {}, True),
+    (["app.py", "--dev"], {}, False),
+    (["app.py"], {"BLOCKFLOW_DEV": "1"}, False),
+    (["app.py", "--dev", "--packaged"], {}, False),
+])
+def test_the_default_start_builds_and_dev_does_not(monkeypatch, argv, env, build):
+    calls: list[dict] = []
+    monkeypatch.setattr(sys, "argv", argv)
+    for name in ("BLOCKFLOW_PACKAGED", "BLOCKFLOW_DEV"):
+        monkeypatch.delenv(name, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(app, "_auto_setup", lambda *a, **k: calls.append(k) or 1)
+    with pytest.raises(SystemExit):
+        app.main()
+    assert calls == [{"build": build}]
+
+
+def test_packaged_without_a_build_stops_readably(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["app.py", "--packaged"])
+    monkeypatch.delenv("BLOCKFLOW_DEV", raising=False)
+    monkeypatch.setattr(app, "_auto_setup", lambda *a, **k: pytest.fail("packaged mode must not install"))
+    monkeypatch.setattr(app, "_port_problem", lambda *a, **k: None)
+
+    def missing(*a, **k):
+        raise FileNotFoundError("Missing Next.js standalone server.")
+
+    monkeypatch.setattr(app, "_find_standalone_server", missing)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("nothing may start without a build"))
+    with pytest.raises(SystemExit) as exc:
+        app.main()
+    assert exc.value.code == app.EXIT_CODES[app.LaunchOutcome.BUILD_MISSING] == 1
+    out = capsys.readouterr().out
+    assert "--packaged" in out and "`uv run app.py`" in out
+
+
+def test_packaged_with_a_stale_build_warns_and_serves_it(fake, root):
+    change_a_page(root)
+    lines: list[str] = []
+    assert app._check_prebuilt(fake.env(), lines.append) is True
+    assert "older than" in "\n".join(lines) and "`uv run app.py`" in "\n".join(lines)
+
+
+# ------------------------------------------------------------------ building when the frontend (re)starts
+
+
+def test_a_restart_builds_a_stale_frontend_before_starting_it(fake, root):
+    change_a_page(root)
+    lines: list[str] = []
+    app._ensure_frontend_build(fake.env(), lines.append)
+    assert fake.calls == [BUILD] and build_state(root) == "current"
+    fake.calls.clear()
+    app._ensure_frontend_build(fake.env(), lines.append)
+    assert fake.calls == []
+
+
+def test_a_failed_build_at_restart_raises_a_readable_error(fake, root):
+    change_a_page(root)
+    fake.failing.add(" ".join(BUILD))
+    with pytest.raises(app.FrontendUnavailable) as exc:
+        app._ensure_frontend_build(fake.env(), lambda line: None)
+    assert "uv run app.py --dev" in str(exc.value)
+
+
+def test_a_frontend_that_cannot_start_stops_the_app_with_its_reason(tmp_path, capsys):
+    class Proc:
+        def __init__(self):
+            self.args, self.returncode = ["x"], None
+
+        def poll(self):
+            return self.returncode
+
+    starts = {"n": 0}
+
+    def start_frontend():
+        starts["n"] += 1
+        if starts["n"] > 1:
+            raise app.FrontendUnavailable("[app] The web interface could not be built.")
+        return Proc()
+
+    sup = app.ProcessSupervisor(control_dir=tmp_path, start_backend=Proc, start_frontend=start_frontend,
+                                stop=lambda procs: None)
+    sup.start()
+    (tmp_path / app.REQ_RESTART).write_text("1")
+    assert sup.tick() is False
+    assert sup.frontend_error and "could not be built" in sup.frontend_error
+    assert "could not be built" in capsys.readouterr().out
+
+
+def test_frontend_env_binds_like_the_dev_server_and_fixes_the_ports():
+    env = app._frontend_env(backend_port=48201, frontend_port=48200, base={"PATH": "/bin", "HOSTNAME": "mac"})
+    assert env["PORT"] == "48200" and env["BACKEND_PORT"] == "48201"
+    assert env["NEXT_PUBLIC_BACKEND_PORT"] == "48201"
+    assert env["HOSTNAME"] == "0.0.0.0"
+    assert env["PATH"] == "/bin"

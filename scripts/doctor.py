@@ -29,6 +29,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -36,6 +37,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# When the production web interface build is current. Standard library only.
+from backend.app_update import frontend_build  # noqa: E402
+
 DOCTOR_VERSION = 1
 DEFAULT_BACKEND_PORT = 47301
 DEFAULT_FRONTEND_PORT = 47300
@@ -52,7 +59,7 @@ STATUSES = (OK, WARN, FAIL, SKIP)
 # plan reuse the prerequisite checks (git, uv, python, node, npm).
 CHECK_IDS = (
     "git", "uv", "python", "node", "npm",                              # prerequisites
-    "python_deps", "frontend_deps", "block_registry",                  # what the install put in place
+    "python_deps", "frontend_deps", "block_registry", "frontend_build",  # what the install put in place
     "mcp_importable", "mcp_registered",                                # the MCP server
     "backend_port", "backend", "frontend_port", "frontend",            # the running app
     "providers", "balances", "output_folder", "version",               # what the running app reports
@@ -81,12 +88,15 @@ class Check:
 # --------------------------------------------------------------------- the environment
 
 
-def _run(cmd: List[str], cwd: Optional[Path] = None, timeout: float = 30.0) -> RunResult:
-    """Run a command; (returncode, combined output). 127 when it cannot start."""
+def _run(cmd: List[str], cwd: Optional[Path] = None, timeout: float = 30.0,
+         extra_env: Optional[Dict[str, str]] = None) -> RunResult:
+    """Run a command; (returncode, combined output). 127 when it cannot start.
+    ``extra_env`` is added to this process's environment (the build's port)."""
     exe = shutil.which(cmd[0]) or cmd[0]
+    env = {**os.environ, **extra_env} if extra_env else None
     try:
         proc = subprocess.run([exe, *cmd[1:]], cwd=str(cwd) if cwd else None, capture_output=True, text=True,
-                              timeout=timeout, stdin=subprocess.DEVNULL)
+                              timeout=timeout, stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.SubprocessError):
         return 127, ""
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()
@@ -311,7 +321,51 @@ def check_block_registry(env: Env) -> Check:
     if generated.exists():
         return Check("block_registry", OK, "The block registry has been generated.")
     return Check("block_registry", WARN, "The block registry has not been generated yet "
-                 "(the dev server generates it on start).", "Run `npm --prefix frontend run gen:custom-blocks`.")
+                 "(`uv run app.py` generates it on start).", "Run `npm --prefix frontend run gen:custom-blocks`.")
+
+
+def running_launch_mode(env: Env) -> Optional[str]:
+    """How the app running from this folder was started (``dev``, ``packaged``, ``unknown``), or None
+    when it does not say, or the app on the port runs from another folder."""
+    status, body = env.http_get(f"http://127.0.0.1:{env.backend_port()}{VERSION_ROUTE}")
+    if status != 200 or not isinstance(body, dict) or body.get("checkout_id") != checkout_id(env.root):
+        return None
+    mode = body.get("launch_mode")
+    return mode if isinstance(mode, str) else None
+
+
+def build_in_progress(env: Env) -> Optional[int]:
+    """Seconds since a running production build started, or None."""
+    since = frontend_build.building_since(env.root)
+    return None if since is None else max(0, int(time.time() - since))
+
+
+def check_frontend_build(env: Env) -> Check:
+    """Which web interface the running app serves, and whether the production
+    build (what `uv run app.py` serves) is current. Reads files and the
+    running app's version route; never builds."""
+    building = build_in_progress(env)
+    if building is not None:
+        return Check("frontend_build", WARN, f"The web interface is being built (started {building} s ago).",
+                     "Wait for it to finish; the app prints `[app] Ready at ...` when it is up.")
+    mode = running_launch_mode(env)
+    if mode == "dev":
+        return Check("frontend_build", OK, "The app is running the development server (`uv run app.py --dev`); "
+                     "the production build is not used.")
+    serving = mode == "packaged"
+    state = frontend_build.build_state(env.root, env.backend_port())
+    if state is frontend_build.BuildState.CURRENT:
+        return Check("frontend_build", OK, "The app is serving the production build of the web interface, which "
+                     "is current." if serving else "The production build of the web interface is current.")
+    if state is frontend_build.BuildState.STALE:
+        if serving:
+            return Check("frontend_build", WARN, "The app is serving a production build that is older than the code "
+                         "or the blocks.", "Stop the app (Ctrl+C) and start it again with `uv run app.py`, which "
+                         "rebuilds it (about a minute).")
+        return Check("frontend_build", WARN, "The production build of the web interface is older than the code, "
+                     "the blocks or the backend port.", "`uv run app.py` rebuilds it when it starts (about a minute).")
+    return Check("frontend_build", WARN, "The web interface has not been built yet.",
+                 "`uv run app.py` builds it when it starts (a minute or two).")
 
 
 def check_mcp(env: Env) -> Check:
@@ -433,7 +487,13 @@ def check_ports_and_reachability(env: Env, expect_running: bool) -> Tuple[List[C
                             "See frontend_port."))
     else:
         checks.append(Check("frontend_port", OK, f"Port {fport} is free."))
-        checks.append(Check("frontend", down, "The frontend is not running.", "Start the app: `uv run app.py`."))
+        if build_in_progress(env) is not None:
+            # A start or an update builds the web interface before it serves it: not a failure.
+            checks.append(Check("frontend", WARN, "The web interface is being built; the app starts it when the "
+                                "build finishes.", f"Wait for `[app] Ready at http://localhost:{fport}` in the "
+                                "app's terminal, then run the doctor again."))
+        else:
+            checks.append(Check("frontend", down, "The frontend is not running.", "Start the app: `uv run app.py`."))
     return checks, backend_up
 
 
@@ -532,6 +592,7 @@ def run_checks(env: Optional[Env] = None, *, expect_running: bool = False) -> Li
         check_python_deps(env),
         check_frontend_deps(env),
         check_block_registry(env),
+        check_frontend_build(env),
         check_mcp(env),
         check_mcp_registered(env),
     ]

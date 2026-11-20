@@ -13,7 +13,9 @@ Sequence (each step is reported as it runs):
   python_deps   uv sync --frozen
   frontend_deps npm --prefix frontend ci (only when the lockfile changed)
   codegen       npm --prefix frontend run gen:custom-blocks
-  build         npm --prefix frontend run build (packaged mode only)
+  build         npm --prefix frontend run build, then the build stamp (the built web
+                interface, while it is paused for an automatic restart); otherwise
+                the next ``uv run app.py`` builds it (backend/app_update/frontend_build.py)
   restart       ask app.py to restart both processes, or tell the user how
 
 Never ``reset --hard``, ``checkout`` or ``clean``: untracked and ignored
@@ -46,9 +48,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
-from backend.app_update import install, settings
+from backend.app_update import frontend_build, install, settings
 from backend.app_update import version as semver
-from backend.app_update.commands import Result, Runner, redact, run_command
+from backend.app_update.commands import Result, Runner, command_env, redact, run_command
 from backend.app_update.launcher_protocol import LaunchMode
 from backend.app_update.supervisor import Supervisor, restart_command, restarts_automatically
 from backend.statuses import ACTIVE_UPDATE_STATES, FINISHED_UPDATE_STATES, StepStatus, UpdateState
@@ -73,7 +75,8 @@ FINISHED_STATES = FINISHED_UPDATE_STATES
 LOCKFILES = ("frontend/package-lock.json", "frontend/package.json")
 LAUNCHER = "app.py"
 TOOLS = ("git", "uv", "npm")
-TIMEOUTS = {"fetch": 300.0, "git": 30.0, "uv": 900.0, "npm_ci": 1200.0, "codegen": 300.0, "build": 1800.0}
+TIMEOUTS = {"fetch": 300.0, "git": 30.0, "uv": 900.0, "npm_ci": 1200.0, "codegen": 300.0,
+            "build": float(frontend_build.BUILD_TIMEOUT_S)}
 LOG_TAIL = 80
 OUTPUT_LINES_PER_COMMAND = 40
 
@@ -272,10 +275,10 @@ class UpdateEngine:
                 self._progress["step"] = step_id
         self._save()
 
-    def _run(self, args: list[str], timeout: float) -> Result:
+    def _run(self, args: list[str], timeout: float, env: Mapping[str, str] | None = None) -> Result:
         shown = " ".join([Path(args[0]).name, *args[1:]])
         self._write_log([f"$ {shown}"])
-        res = self.runner(args, self.root, timeout)
+        res = self.runner(args, self.root, timeout) if env is None else self.runner(args, self.root, timeout, env)
         out_lines = [line for line in res.output.splitlines() if line.strip()]
         if len(out_lines) > OUTPUT_LINES_PER_COMMAND:
             out_lines = ["…", *out_lines[-OUTPUT_LINES_PER_COMMAND:]]
@@ -365,18 +368,32 @@ class UpdateEngine:
         self._write_log([f"Update {state}" + (f": {error}" if error else "")])
         self._save()
 
-    def _build_commands(self) -> list[str]:
-        return ["npm --prefix frontend run build"] if self.launch_mode == LaunchMode.PACKAGED else []
-
+    # The manual commands end with the restart command; `uv run app.py` builds the
+    # web interface itself when it is stale, so they never list `npm run build`.
     def _manual_update_commands(self, tag: str) -> list[str]:
         return ["git fetch --tags origin", f"git merge --ff-only {tag}", "uv sync --frozen",
                 "npm --prefix frontend ci", "npm --prefix frontend run gen:custom-blocks",
-                *self._build_commands(), restart_command(self.launch_mode)]
+                restart_command(self.launch_mode)]
 
     def _undo_commands(self, old: str) -> list[str]:
         return [f"git reset --keep {old}", "uv sync --frozen", "npm --prefix frontend ci",
-                "npm --prefix frontend run gen:custom-blocks", *self._build_commands(),
-                restart_command(self.launch_mode)]
+                "npm --prefix frontend run gen:custom-blocks", restart_command(self.launch_mode)]
+
+    def _build_frontend(self) -> bool:
+        """``npm run build`` for the backend port app.py gave this process, then
+        the stamp, so app.py finds the build current when it restarts and does
+        not build again. Marked as running for the doctor. True when it built."""
+        port = frontend_build.backend_port(os.environ)
+        fp = frontend_build.fingerprint(self.root, port)
+        npm = self.which("npm") or "npm"
+        with frontend_build.building(self.root):
+            res = self._run([npm, "--prefix", "frontend", "run", "build"], TIMEOUTS["build"],
+                            env=frontend_build.build_env(command_env(), port))
+        if not res.ok:
+            return False
+        if not frontend_build.write_stamp(self.root, fp, port):
+            self._write_log(["The build left no standalone server; BlockFlow builds it again when it starts."])
+        return True
 
     def _resume_frontend(self) -> None:
         """Ask app.py to start the web server again. Best effort: never masks
@@ -525,12 +542,16 @@ class UpdateEngine:
             raise _StepFailed("Registering blocks failed (gen:custom-blocks).")
         self._set_step("codegen", StepStatus.DONE)
 
-        if self.launch_mode == LaunchMode.PACKAGED:
+        if self.launch_mode == LaunchMode.PACKAGED and auto_restart:
+            # The web server is paused: `next build` replaces the folder it serves from.
             self._set_step("build", StepStatus.RUNNING)
             self._deps_touched.add("build")
-            if not self._run([npm, "--prefix", "frontend", "run", "build"], TIMEOUTS["build"]).ok:
-                raise _StepFailed("Building the web interface failed (npm run build).")
+            if not self._build_frontend():
+                raise _StepFailed("Building the web interface failed (npm run build). The log shows the error.")
             self._set_step("build", StepStatus.DONE)
+        elif self.launch_mode == LaunchMode.PACKAGED:
+            self._set_step("build", StepStatus.SKIPPED, "The web interface is still being served from the current "
+                           "build; `uv run app.py` builds the new one when BlockFlow starts again.")
         else:
             self._set_step("build", StepStatus.SKIPPED, "The development server builds on start.")
 
@@ -607,8 +628,8 @@ class UpdateEngine:
             if "codegen" in self._deps_touched and not self._run(
                     [npm, "--prefix", "frontend", "run", "gen:custom-blocks"], TIMEOUTS["codegen"]).ok:
                 restore_failed.append("npm --prefix frontend run gen:custom-blocks")
-            if "build" in self._deps_touched and not self._run([npm, "--prefix", "frontend", "run", "build"],
-                                                                 TIMEOUTS["build"]).ok:
+            if "build" in self._deps_touched and not self._build_frontend():
+                # The next `uv run app.py` builds it again (the build is stale or missing).
                 restore_failed.append("npm --prefix frontend run build")
             self._set_step("rollback_deps", StepStatus.FAILED if restore_failed else StepStatus.DONE)
         else:

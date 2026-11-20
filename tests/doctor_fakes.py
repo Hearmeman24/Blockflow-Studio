@@ -11,6 +11,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.app_update import frontend_build  # noqa: E402
 
 
 def load_script(name: str):
@@ -66,7 +70,9 @@ class Fake:
                     "/api/providers/balances": (200, balances()),
                     "/api/settings/output-folder": (200, {"in_use": OUT, "configured_unavailable": False}),
                     "/api/app/version": (200, {"version": "0.2.0", "commit": "abc1234def", "install": "git",
-                                               "dirty": False, "update_supported": True}),
+                                               "dirty": False, "update_supported": True,
+                                               "launch_mode": "packaged",
+                                               "checkout_id": doctor.checkout_id(root)}),
                     "/api/app/update": (200, {"current": "0.2.0", "latest": None, "update_available": False,
                                               "status": "ok", "supported": True})},
             47300: {"/api/providers/catalog": (200, catalog())},
@@ -74,15 +80,25 @@ class Fake:
         self.busy_ports: set[int] = set()
         self.writable = {OUT}
         self.calls: list[list[str]] = []
+        self.extra_envs: dict[str, dict[str, str]] = {}  # " ".join(cmd) -> the extra environment it ran with
+        self.on_build = None  # called when the frontend build runs (a test can make it leave a server)
 
     def which(self, name):
         return f"/usr/bin/{name}" if name in self.tools else None
 
-    def run(self, cmd, cwd=None, timeout=30.0):
+    def run(self, cmd, cwd=None, timeout=30.0, extra_env=None):
         self.calls.append(list(cmd))
+        if extra_env is not None:
+            self.extra_envs[" ".join(cmd)] = dict(extra_env)
         key = " ".join(cmd[:3])
-        if key in self.failing or cmd[0] in self.failing:
+        if key in self.failing or cmd[0] in self.failing or " ".join(cmd) in self.failing:
             return 1, "error"
+        if list(cmd) == frontend_build.BUILD_CMD:
+            if self.on_build:
+                self.on_build()
+            else:
+                make_build(self.root)
+            return 0, "built"
         if cmd[1:] == ["--version"]:
             if cmd[0] == "/py/python3":
                 return 0, self.python
@@ -117,4 +133,22 @@ def make_root(tmp_path: Path) -> Path:
     reg = fe / "src" / "components" / "pipeline" / "custom_blocks"
     reg.mkdir(parents=True)
     (reg / "_register.ts").write_text("")
+    (fe / "src" / "app").mkdir(parents=True)
+    (fe / "src" / "app" / "page.tsx").write_text("page")
+    make_build(tmp_path)
+    frontend_build.write_stamp(tmp_path, frontend_build.fingerprint(tmp_path, 47301), 47301)
     return tmp_path
+
+
+_build_count = 0
+
+
+def make_build(root: Path) -> Path:
+    """What `npm run build` leaves: the standalone server with a new BUILD_ID (no stamp)."""
+    global _build_count
+    _build_count += 1
+    server = root / "frontend" / ".next" / "standalone" / "server.js"
+    (server.parent / ".next").mkdir(parents=True, exist_ok=True)
+    server.write_text("server")
+    (server.parent / ".next" / "BUILD_ID").write_text(f"build-{_build_count}")
+    return server

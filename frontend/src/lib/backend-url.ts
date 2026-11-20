@@ -3,7 +3,8 @@
  * or socket limits. BlockFlow runs locally through app.py, which launches
  * FastAPI on BACKEND_PORT and serves CORS-open backend routes. app.py passes
  * the chosen port through as NEXT_PUBLIC_BACKEND_PORT so the client bundle
- * can reach it directly.
+ * can reach it directly. Next.js inlines it when it builds; app.py's build
+ * stamp includes the port, so starting on another port rebuilds.
  */
 const DEFAULT_BACKEND_PORT = '47301'
 
