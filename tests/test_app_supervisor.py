@@ -216,6 +216,8 @@ def _main_with(app, monkeypatch, capsys, *, environ=None, port_problem=None, arg
     for name, value in (environ or {}).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(app, "_auto_setup", lambda *a, **k: 0)
+    # --packaged checks for an existing build first; whether this checkout has one must not decide the test.
+    monkeypatch.setattr(app, "_check_prebuilt", lambda *a, **k: True)
     monkeypatch.setattr(app, "_port_problem", lambda *a, **k: port_problem)
 
     def no_start(self):
