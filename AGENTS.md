@@ -315,13 +315,20 @@ reduced layout fixes it at 220, 320, 460 or 580 px); a media loader reporting
 its items through `useMediaItemCount` takes the `md` width while no section
 holds more than two. `role` (`image`, `video`, `loader`, `prompt`;
 `lib/pipeline/block-role.ts`) sets the block's colour and its add-block menu
-section; without it the role comes from the ports. Spacing: the block body
+section; without it the role comes from the ports. Usage notes: a block that
+needs explaining lists short lines in `info` on its `BlockDef`; the block card
+shows the info button, and a block never builds its own. Spacing: the block body
 makes the block's root a flex column with the standard gap (`gap-3`), so a
 block sets no `space-y-*`, `gap-*` or `mt-*` between its top-level items.
-Generation blocks (Text to Image
-and the other four) have no sidecar; they use `/api/generation/*` and
+Generation blocks (Text to Image,
+the other four and Character Swap) have no sidecar; they use `/api/generation/*` and
 `/api/jobs*`, take references only from loader blocks (`starterPrereqs`), and
-read every selector and limit from the ledger.
+read every selector and limit from the ledger. A block's entry in
+`GENERATION_BLOCK_CONFIGS` (`lib/byok/generation-blocks.ts`) may narrow that:
+a subset of the ledger's model ids (`models`), a `fixedPrompt` whose
+`{video1}`-style names follow the ledger's mentions, exact reference counts and
+a loader per kind (Character Swap); whether a model runs on a provider still
+comes from the catalog.
 
 **Adding a model or provider:** add a `ModelEntry` to `backend/byok/catalog.py`
 (types in `spec.py`), map the request in the provider adapter, test the exact
@@ -384,11 +391,11 @@ from constants (`frontend/src/components/byok/model-select.tsx`):
 
 ```tsx
 const options = useMemo(
-  () => modelsForMode(catalog, mode).map((model) => ({
+  () => modelsForBlock(catalog, { mode, models }).map((model) => ({
     model,
     availability: modelAvailability(catalog, model.id, provider, mode),
   })),
-  [catalog, mode, provider],
+  [catalog, mode, provider, models],
 )
 ```
 
@@ -536,7 +543,8 @@ is allowed only when labelled as one, with follow-up work tracked.
   `AlertPanel`, `EmptyState`, `PageHeader`, `FavoriteButton`,
   `DeleteIconButton`, `BlockField`, `BlockFooter` (a top-level item of the
   block, which the body makes a flex column), `BlockRoleTile`,
-  `pipeline/collapsible-section`, `ChipTooltip`,
+  `pipeline/collapsible-section`, `pipeline/block-info-button` (rendered by the
+  block card from `BlockDef.info`), `ChipTooltip`,
   `byok/media-thumb`, and the `lib/` helpers. Add to a shared module before
   pasting a second copy. Async state uses `useResource` / `fromSWR`
   (`lib/resource.ts`) for reads and `useMutation` (`lib/mutation.ts`) for

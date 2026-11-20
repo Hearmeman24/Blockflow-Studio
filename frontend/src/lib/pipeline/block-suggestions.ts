@@ -10,6 +10,7 @@ export const STARTER_SUGGESTIONS = [
   'imageToVideo',
   'imageToImage',
   'omniReferenceToVideo',
+  'characterSwap',
   'uploadImageToTmpfiles',
   'videoLoader',
   'omniReferenceLoader',
@@ -26,6 +27,7 @@ export const SUGGESTED_NEXT_BY_TYPE: Record<string, readonly string[]> = {
   textToVideo: ['videoViewer', 'videoFx', 'videoStitcher'],
   imageToVideo: ['videoViewer', 'videoFx', 'videoStitcher'],
   omniReferenceToVideo: ['videoViewer', 'videoFx', 'videoStitcher'],
+  characterSwap: ['videoViewer', 'videoFx', 'videoStitcher'],
 
   videoLoader: ['videoViewer', 'videoFx', 'videoStitcher'],
   omniReferenceLoader: ['omniReferenceToVideo'],

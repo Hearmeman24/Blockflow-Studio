@@ -104,9 +104,9 @@ describe('custom block contracts', () => {
     vi.restoreAllMocks()
   })
 
-  it('registers exactly the blocks the BYOK fork keeps, the five generation blocks, the Omni loader, Load Character and the Prompt Writer', () => {
+  it('registers exactly the blocks the BYOK fork keeps, the five generation blocks, Character Swap, the Omni loader, Load Character and the Prompt Writer', () => {
     expect(listBlockDefs().map((def) => def.type).sort()).toEqual([
-      'audioViewer', 'hitl', 'imageInspector', 'imageToImage', 'imageToVideo', 'imageViewer', 'loadCharacter',
+      'audioViewer', 'characterSwap', 'hitl', 'imageInspector', 'imageToImage', 'imageToVideo', 'imageViewer', 'loadCharacter',
       'omniReferenceLoader', 'omniReferenceToVideo', 'promptFromTxt', 'promptWriter', 'textToImage', 'textToVideo',
       'uploadImageToTmpfiles', 'videoFx', 'videoLoader', 'videoStitcher', 'videoViewer',
     ])

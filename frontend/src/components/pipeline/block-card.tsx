@@ -15,6 +15,7 @@ import { WarningBadge } from '@/components/warning-badge'
 import { AlertPanel } from '@/components/alert-panel'
 import { UnsupportedBlockCard } from './unsupported-block-card'
 import { BlockRoleTile } from './block-role-tile'
+import { BlockInfoButton } from './block-info-button'
 import {
   bindingRequiresUpstream,
   canonicalizePortKind,
@@ -239,6 +240,7 @@ export function BlockCard({ block, displayNumber }: BlockCardProps) {
             </span>
           )}
           {headerActions}
+          <BlockInfoButton label={displayLabel} info={blockDef?.info} />
           {/* Toggle disable/enable */}
           <Button
             variant="ghost"

@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * State and execute logic shared by the five generation blocks. The layout
+ * State and execute logic shared by the generation blocks. The layout
  * lives in `generation-block-shell.tsx`.
  *
  * Persisted per block (sessionStorage `block_<id>_<key>`, listed in the
@@ -15,7 +15,7 @@
  * (Image Loader, Omni Reference Loader), which shows and repairs them.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import type { BlockComponentProps } from '@/lib/pipeline/registry'
+import { getBlockDef, type BlockComponentProps } from '@/lib/pipeline/registry'
 import { toText } from '@/lib/pipeline/block-utils'
 import { useSessionState } from '@/lib/use-session-state'
 import {
@@ -25,7 +25,7 @@ import {
   modelAvailability,
   providerName,
 } from '@/lib/byok/catalog'
-import { checkReferences, kindPlural } from '@/lib/byok/check-references'
+import { checkReferences, kindPlural, kindSingular } from '@/lib/byok/check-references'
 import { EMPTY_PARAMS, buildRequestParams, reconcileParams, type ParamChange, type ParamState } from '@/lib/byok/params'
 import {
   combineReferences,
@@ -65,7 +65,14 @@ import { GENERATION_RUN_STATUS_LABEL } from '@/lib/status'
 import type { JobSnapshot } from '@/lib/types'
 import { useOptionalPipeline } from '@/lib/pipeline/pipeline-context'
 import { loaderForReferences } from '@/lib/pipeline/migrate-references-to-loaders'
-import { GENERATION_BLOCK_CONFIGS, resolveGenerationSelection, type GenerationBlockConfig } from '@/lib/byok/generation-blocks'
+import {
+  GENERATION_BLOCK_CONFIGS,
+  article,
+  fixedPromptText,
+  generationBlockType,
+  resolveGenerationSelection,
+  type GenerationBlockConfig,
+} from '@/lib/byok/generation-blocks'
 
 export const GENERATION_CONFIG_KEYS = ['provider', 'model', 'prompt', 'use_upstream_prompt', 'params'] as const
 
@@ -88,10 +95,55 @@ export interface UpstreamSummary {
 /** Issues that only say "add something": shown as a neutral hint until a run is attempted. */
 const EMPTY_BLOCK_CODES: ReadonlySet<string> = new Set(['too_few_references', 'first_frame_required'])
 
-function loaderFor(config: GenerationBlockConfig) {
+export interface LoaderBlock {
+  type: string
+  label: string
+}
+
+function loaderFor(config: GenerationBlockConfig): LoaderBlock {
   return config.mode === 'omni_reference_to_video'
     ? { type: 'omniReferenceLoader', label: 'Omni Reference Loader' }
     : { type: 'uploadImageToTmpfiles', label: 'Image Loader' }
+}
+
+/** The loader that supplies one kind: the block's own choice for that kind, else the mode's loader. */
+function loaderForKind(config: GenerationBlockConfig, kind: MediaKind | null): LoaderBlock {
+  const type = kind ? config.loaders?.[kind] : undefined
+  return type ? { type, label: getBlockDef(type)?.label ?? type } : loaderFor(config)
+}
+
+/** A loader this block needs upstream and does not have, for the header warning. */
+export interface MissingLoader extends LoaderBlock {
+  /** Warning id: "no-loader", or "no-loader-<kind>" for a block with a loader per kind. */
+  id: string
+}
+
+/**
+ * Counts a block fixes itself (Character Swap: one video, one image), as
+ * issues in the ledger's shape so they show and block like any other.
+ */
+function exactReferenceIssues(config: GenerationBlockConfig, refs: ReadonlyArray<{ kind: MediaKind }>): GenerationIssue[] {
+  const issues: GenerationIssue[] = []
+  if (!config.exactReferences) return issues
+  // The block's name, for the message ("Character Swap needs one video").
+  const blockLabel = getBlockDef(generationBlockType(config))?.label ?? 'This block'
+  for (const kind of config.referenceKinds) {
+    const want = config.exactReferences[kind]
+    if (want === undefined) continue
+    const count = refs.filter((r) => r.kind === kind).length
+    if (count === want) continue
+    const wanted = `${want === 1 ? 'one' : want} ${want === 1 ? kindSingular(kind) : kindPlural(kind)}`
+    issues.push(count < want
+      ? {
+          code: 'too_few_references', severity: 'error', field: `references.${kind}`, limit: want, actual: count,
+          message: `${blockLabel} needs ${wanted} and has ${count === 0 ? 'none' : count}.`,
+        }
+      : {
+          code: 'too_many_references', severity: 'error', field: `references.${kind}`, limit: want, actual: count,
+          message: `${blockLabel} uses ${wanted}, but ${count} are connected.`,
+        })
+  }
+  return issues
 }
 
 /** The estimate's request: the prompt never affects the price, so it is not part of it. */
@@ -115,7 +167,8 @@ export function useGenerationBlock(
 ) {
   const { blockId, inputs, setOutput, registerExecute, setStatusMessage, setExecutionStatus, hasUpstreamProducer } = props
   const { mode, output } = config
-  const blockType = Object.keys(GENERATION_BLOCK_CONFIGS).find((t) => GENERATION_BLOCK_CONFIGS[t].mode === mode) ?? ''
+  const blockType = generationBlockType(config)
+    || (Object.keys(GENERATION_BLOCK_CONFIGS).find((t) => GENERATION_BLOCK_CONFIGS[t].mode === mode) ?? '')
   const key = (name: string) => `block_${blockId}_${name}`
 
   const catalogState = useProviderCatalog()
@@ -151,8 +204,8 @@ export function useGenerationBlock(
   )
   // ---- Provider / model / spec ----
   const { provider, model } = useMemo(
-    () => resolveGenerationSelection(catalog, mode, storedProvider, storedModel),
-    [catalog, mode, storedProvider, storedModel],
+    () => resolveGenerationSelection(catalog, mode, storedProvider, storedModel, config.models),
+    [catalog, mode, storedProvider, storedModel, config.models],
   )
 
   const spec: ModeSpec | null = catalog && provider && model ? getModeSpec(catalog, provider, model, mode, params.settings) : null
@@ -238,15 +291,23 @@ export function useGenerationBlock(
     const labels = kind ? sourceLabels(kind) : [...new Set(inputKinds.flatMap(sourceLabels))]
     const where = labels.map((l) => `"${l}"`).join(', ')
     if (labels.length > 0) {
+      // A block that takes exactly one of a kind asks for one, not for "images".
+      const one = kind && config.exactReferences?.[kind] === 1 ? kindSingular(kind) : null
+      const what = one ? `${article(one)} ${one}` : kind ? kindPlural(kind) : 'references'
       return EMPTY_BLOCK_CODES.has(issue.code)
-        ? `${issue.message} Add ${kind ? kindPlural(kind) : 'references'} in ${where}.`
+        ? `${issue.message} Add ${what} in ${where}.`
         : `${issue.message} Fix it in ${where}.`
     }
-    return pipeline ? `${issue.message} Add an ${loader.label} before this block.` : issue.message
+    const missing = loaderForKind(config, kind)
+    return pipeline ? `${issue.message} Add ${article(missing.label)} ${missing.label} before this block.` : issue.message
   }
+  const exactIssues = exactReferenceIssues(config, checkable)
   const clientIssues = spec && inputKinds.length > 0
-    ? withoutRedundantCounts(checkReferences(spec, checkable, { modelName: names.model, providerName: names.provider, modeName: names.mode }))
-    : []
+    ? withoutRedundantCounts([
+        ...exactIssues,
+        ...checkReferences(spec, checkable, { modelName: names.model, providerName: names.provider, modeName: names.mode }),
+      ])
+    : exactIssues
   const allIssues = [...clientIssues, ...serverIssues.filter((s) => !clientIssues.some((c) => c.code === s.code && c.field === s.field))]
   const asHint = (issue: GenerationIssue) => !touched && entries.length === 0 && EMPTY_BLOCK_CODES.has(issue.code)
   const issues = allIssues.filter((i) => !asHint(i) && i.severity === 'error').map(withWhereToFix)
@@ -255,10 +316,19 @@ export function useGenerationBlock(
   // ---- Readiness: one answer for the execute guard and the UI ----
   const readiness = readinessOf({ load: catalogState.load, provider, model, spec, availability, issues })
 
-  /** Insert the matching loader directly upstream (after the user removed the spawned one). */
-  const addLoader = useCallback(() => {
-    pipeline?.insertBlockAdjacent(blockId, 'before', loader.type)
-  }, [pipeline, blockId, loader.type])
+  /** Insert a loader directly upstream (after the user removed the spawned one). */
+  const addLoader = useCallback((type: string) => {
+    pipeline?.insertBlockAdjacent(blockId, 'before', type)
+  }, [pipeline, blockId])
+  // One warning for the mode's loader, or one per kind when the block names a loader for each.
+  const missingLoaders: MissingLoader[] = !pipeline || inputKinds.length === 0
+    ? []
+    : config.loaders
+      ? inputKinds
+          .filter((kind) => sourceLabels(kind).length === 0)
+          .map((kind) => ({ id: `no-loader-${kind}`, ...loaderForKind(config, kind) }))
+          .filter((m, i, all) => all.findIndex((x) => x.type === m.type) === i)
+      : hasAnySource ? [] : [{ id: 'no-loader', ...loader }]
 
   // References saved inside this block by an older version (still in this tab's
   // session). Flow import moves them into a loader; this does the same here.
@@ -297,25 +367,31 @@ export function useGenerationBlock(
   // The switch follows the source's edges (`nextUpstreamChoice`); a choice the
   // user makes in between is kept, also across reloads and in saved flows.
   const seenUpstreamText = useRef(initialSeenSource(hadStoredUpstreamChoice, hasUpstreamText))
+  // A block with a fixed prompt has no prompt of its own to replace.
+  const fixedPrompt = config.fixedPrompt ? fixedPromptText(config.fixedPrompt, spec) : null
   useEffect(() => {
     const hadSource = seenUpstreamText.current
-    if (hasUpstreamText === hadSource) return
+    if (fixedPrompt !== null || hasUpstreamText === hadSource) return
     seenUpstreamText.current = hasUpstreamText
     setUseUpstreamPrompt((current) => nextUpstreamChoice(current, hadSource, hasUpstreamText))
-  }, [hasUpstreamText, setUseUpstreamPrompt])
+  }, [fixedPrompt, hasUpstreamText, setUseUpstreamPrompt])
+  // Keep the saved prompt equal to the text that is sent, so a saved flow and a saved run show it.
+  useEffect(() => {
+    if (fixedPrompt !== null && prompt !== fixedPrompt) setPrompt(fixedPrompt)
+  }, [fixedPrompt, prompt, setPrompt])
   const upstreamSources = pipeline?.getPortSources(blockId, 'text') ?? []
   /** Where the prompt comes from, e.g. "1 · Prompt Writer". */
   const upstreamSource = upstreamSources.length > 0
     ? upstreamSources.map((p) => `${p.blockIndex + 1} · ${p.blockLabel}`).join(', ')
     : null
-  const promptFromUpstream = useUpstreamPrompt && hasUpstreamText
+  const promptFromUpstream = fixedPrompt === null && useUpstreamPrompt && hasUpstreamText
 
   // ---- Run ----
   /** True when this run takes its prompt from upstream. */
   const usesUpstream = (fresh: Record<string, unknown>) =>
-    useUpstreamPrompt && (Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(fresh.text).trim()))
+    fixedPrompt === null && useUpstreamPrompt && (Boolean(hasUpstreamProducer?.('text')) || Boolean(toText(fresh.text).trim()))
   const effectivePrompt = (fresh: Record<string, unknown>) =>
-    usesUpstream(fresh) ? toText(fresh.text).trim() : prompt
+    fixedPrompt ?? (usesUpstream(fresh) ? toText(fresh.text).trim() : prompt)
 
   /** The request a run would submit for these inputs (null until a model is chosen). */
   const buildRequest = (fresh: Record<string, unknown>): GenerationRequest | null => {
@@ -402,6 +478,9 @@ export function useGenerationBlock(
         const first = broken[0].ref
         throw new Error(`${first.label ?? 'A reference'}: ${first.error ?? 'has no file or URL.'} Fix it in the loader block.`)
       }
+      // The block's own counts (one video, one image): stop before anything is sent.
+      const miscounted = exactReferenceIssues(config, latest.map((e) => e.ref))
+      if (miscounted.length > 0) throw new Error(withWhereToFix(miscounted[0]))
       // Too many items from upstream: say which block sends them.
       if (pipeline) {
         const fresh = latest.map((e) => toRequestReference(e.ref, e.ref.role))
@@ -497,6 +576,7 @@ export function useGenerationBlock(
     noKeys: readiness.kind === 'no_keys',
     prompt,
     setPrompt,
+    fixedPrompt,
     useUpstreamPrompt,
     setUseUpstreamPrompt,
     hasUpstreamText,
@@ -518,6 +598,7 @@ export function useGenerationBlock(
     hints,
     loader,
     addLoader,
+    missingLoaders,
     legacyReferences,
     moveLegacyReferences,
     missingOutput,

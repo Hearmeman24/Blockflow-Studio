@@ -383,17 +383,25 @@ function newBlockIdFor(): string {
 
 /**
  * Insert `block` into `chain` at `index`, preceded by the block types its
- * definition lists in `starterPrereqs` (a generation block's loader). A
- * prerequisite is skipped when the enabled block directly upstream (the
- * previous block in the chain, or the fork block for the first block of a
- * branch) already has that type, or lists it in `satisfiesPrereqs`, because
- * it is then the closest source. Mutates `chain`.
+ * definition lists in `starterPrereqs` (a generation block's loaders). A
+ * prerequisite is skipped when an enabled block directly upstream already has
+ * that type, or lists it in `satisfiesPrereqs`, because it is then the closest
+ * source. "Directly upstream" is the unbroken run of enabled blocks before the
+ * insert point that each supply one of the prerequisites (the previous blocks
+ * in the chain, then the fork block for a branch); for a block with one
+ * prerequisite that is the block right before it. Mutates `chain`.
  */
 function insertWithPrereqs(chain: PipelineBlock[], index: number, fork: PipelineBlock | null, block: PipelineBlock, prereqIds: string[]) {
   const prereqs = getBlockDef(block.type)?.starterPrereqs ?? []
-  const upstream = index > 0 ? chain[index - 1] : fork
-  const standsIn = upstream ? getBlockDef(upstream.type)?.satisfiesPrereqs ?? [] : []
-  const missing = prereqs.filter((type) => !(upstream && !upstream.disabled && (upstream.type === type || standsIn.includes(type))))
+  const supplied = new Set<string>()
+  for (let i = index - 1; i >= -1; i--) {
+    const upstream = i >= 0 ? chain[i] : fork
+    if (!upstream || upstream.disabled) break
+    const supplies = [upstream.type, ...(getBlockDef(upstream.type)?.satisfiesPrereqs ?? [])].filter((type) => prereqs.includes(type))
+    if (supplies.length === 0) break
+    supplies.forEach((type) => supplied.add(type))
+  }
+  const missing = prereqs.filter((type) => !supplied.has(type))
   const inserted: PipelineBlock[] = missing.map((type, i) => ({ id: prereqIds[i], type }))
   chain.splice(index, 0, ...inserted, block)
 }

@@ -58,7 +58,7 @@ export function computeDownstreamLimit(
   const config = generationBlockConfig(consumer.type)
   if (!config || !config.referenceKinds.includes(kind)) return null
   const { mode } = config
-  const { provider, model } = resolveGenerationSelection(catalog, mode, stored.provider, stored.model)
+  const { provider, model } = resolveGenerationSelection(catalog, mode, stored.provider, stored.model, config.models)
   const names = {
     mode: modeName(catalog, mode),
     provider: provider ? providerName(catalog, provider) : 'no provider',
@@ -102,6 +102,9 @@ export function computeDownstreamLimit(
   const frameSlots = spec.frames && kind === 'image' ? (spec.frames.last_frame_allowed ? 2 : 1) : null
   if (frameSlots !== null) maxCount = Math.min(maxCount, frameSlots)
   if (spec.max_total_references !== null) maxCount = Math.min(maxCount, spec.max_total_references)
+  // A block that uses an exact number of this kind (Character Swap: one) takes no more.
+  const exact = config.exactReferences?.[kind]
+  if (exact !== undefined) maxCount = Math.min(maxCount, exact)
   return { ...base, accepted: true, reason: null, limit, maxCount, frameSlots }
 }
 

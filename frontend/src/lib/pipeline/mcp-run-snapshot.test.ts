@@ -18,8 +18,9 @@ beforeEach(() => sessionStorage.clear())
 
 describe('MCP run snapshots', () => {
   it('cover every generation mode', () => {
+    // Several blocks can share a mode (Character Swap runs Omni Reference to Video): one fixture per mode.
     expect(Object.keys(FIXTURES).sort()).toEqual(
-      Object.values(GENERATION_BLOCK_CONFIGS).map((c) => c.mode).sort(),
+      [...new Set(Object.values(GENERATION_BLOCK_CONFIGS).map((c) => c.mode))].sort(),
     )
   })
 

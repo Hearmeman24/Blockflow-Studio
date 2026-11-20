@@ -15,6 +15,7 @@ const EXPECTED: Record<string, string> = {
   textToVideo: 'video',
   imageToVideo: 'video',
   omniReferenceToVideo: 'video',
+  characterSwap: 'video',
   videoFx: 'video',
   videoStitcher: 'video',
   videoViewer: 'video',

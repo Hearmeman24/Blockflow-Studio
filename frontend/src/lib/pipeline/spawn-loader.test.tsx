@@ -84,6 +84,52 @@ describe('spawning the loader with the generation block', () => {
     expect(types(b.branches![0])).toEqual(['imageToVideo'])
   })
 
+  it('a block with two loaders (Character Swap) arrives with both, in the declared order', () => {
+    expect(getBlockDef('characterSwap')?.starterPrereqs).toEqual(['videoLoader', 'uploadImageToTmpfiles'])
+    const api = setup()
+    act(() => { api.current.addBlock('characterSwap') })
+    expect(types(api.current.pipeline.blocks)).toEqual(['videoLoader', 'uploadImageToTmpfiles', 'characterSwap'])
+  })
+
+  it('two loaders: the ones already in a row directly upstream are not added again', () => {
+    const both = setup([{ type: 'videoLoader' }, { type: 'uploadImageToTmpfiles' }])
+    act(() => { both.current.addBlock('characterSwap') })
+    expect(types(both.current.pipeline.blocks)).toEqual(['videoLoader', 'uploadImageToTmpfiles', 'characterSwap'])
+
+    const reversed = setup([{ type: 'uploadImageToTmpfiles' }, { type: 'videoLoader' }])
+    act(() => { reversed.current.addBlock('characterSwap') })
+    expect(types(reversed.current.pipeline.blocks)).toEqual(['uploadImageToTmpfiles', 'videoLoader', 'characterSwap'])
+
+    const imageOnly = setup([{ type: 'uploadImageToTmpfiles' }])
+    act(() => { imageOnly.current.addBlock('characterSwap') })
+    expect(types(imageOnly.current.pipeline.blocks)).toEqual(['uploadImageToTmpfiles', 'videoLoader', 'characterSwap'])
+  })
+
+  it('two loaders: a loader behind another block, or behind a disabled loader, does not count', () => {
+    const behindOther = setup([{ type: 'videoLoader' }, { type: 'videoViewer' }, { type: 'uploadImageToTmpfiles' }])
+    act(() => { behindOther.current.addBlock('characterSwap') })
+    expect(types(behindOther.current.pipeline.blocks))
+      .toEqual(['videoLoader', 'videoViewer', 'uploadImageToTmpfiles', 'videoLoader', 'characterSwap'])
+
+    const disabled = setup([{ type: 'videoLoader' }, { type: 'uploadImageToTmpfiles', disabled: true }])
+    act(() => { disabled.current.addBlock('characterSwap') })
+    expect(types(disabled.current.pipeline.blocks))
+      .toEqual(['videoLoader', 'uploadImageToTmpfiles', 'videoLoader', 'uploadImageToTmpfiles', 'characterSwap'])
+  })
+
+  it('two loaders: Load Character directly upstream stands in for both', () => {
+    const api = setup([{ type: 'loadCharacter' }])
+    act(() => { api.current.addBlock('characterSwap') })
+    expect(types(api.current.pipeline.blocks)).toEqual(['loadCharacter', 'characterSwap'])
+  })
+
+  it('two loaders in a branch: the fork block counts as directly upstream', () => {
+    const api = setup([{ type: 'videoLoader', branches: [[]] }])
+    const [fork] = api.current.pipeline.blocks
+    act(() => { api.current.addBlockToBranch(fork.id, 0, 'characterSwap') })
+    expect(types(api.current.pipeline.blocks[0].branches![0])).toEqual(['uploadImageToTmpfiles', 'characterSwap'])
+  })
+
   it('saves the same spawned loader id it renders, even when React runs the update twice (StrictMode)', () => {
     const tabId = `spawn-strict-${++tab}`
     const wrapper = ({ children }: { children: ReactNode }) => (

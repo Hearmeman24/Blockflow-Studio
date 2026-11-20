@@ -6,12 +6,14 @@ import { ExternalLink, Film, Image as ImageIcon, Info, Music } from 'lucide-reac
 import { AlertPanel } from '@/components/alert-panel'
 import { PromptLibraryButton } from '@/components/prompt-library/prompt-library-button'
 import { BlockField } from '@/components/pipeline/block-field'
+import { CollapsibleSection } from '@/components/pipeline/collapsible-section'
 import { SourceModeControl } from '@/components/pipeline/source-mode-control'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { providerIds, providerName } from '@/lib/byok/catalog'
+import { article } from '@/lib/byok/generation-blocks'
 import { insertMention } from '@/lib/byok/mentions'
 import type { MediaKind, ProviderCatalog } from '@/lib/byok/types'
 import { unavailableReason } from '@/lib/byok/generation-readiness'
@@ -122,11 +124,11 @@ function ShellBody({
       action: { label: 'Move to a loader', onClick: state.moveLegacyReferences },
     })
   }
-  if (config.referenceKinds.length > 0 && !state.hasAnySource && state.pipelineAttached) {
+  for (const missing of state.missingLoaders) {
     warnings.push({
-      id: 'no-loader',
-      message: `No ${state.loader.label} before this block. References come from a loader block.`,
-      action: { label: `Add ${state.loader.label}`, onClick: state.addLoader },
+      id: missing.id,
+      message: `No ${missing.label} before this block. References come from a loader block.`,
+      action: { label: `Add ${missing.label}`, onClick: () => state.addLoader(missing.type) },
     })
   }
   if (state.missingOutput) {
@@ -154,6 +156,7 @@ function ShellBody({
             catalog={catalog}
             mode={config.mode}
             provider={state.provider ?? ''}
+            models={config.models}
             value={state.model}
             onChange={state.selectModel}
           />
@@ -178,7 +181,12 @@ function ShellBody({
         </AlertPanel>
       )}
 
-      {promptRule !== 'none' && (
+      {state.fixedPrompt !== null ? (
+        // The block writes its own prompt: shown for reference, not edited.
+        <CollapsibleSection label="Prompt">
+          <p data-testid="fixed-prompt" className="text-muted-foreground text-xs">{state.fixedPrompt}</p>
+        </CollapsibleSection>
+      ) : promptRule !== 'none' && (
         <PromptField state={state} optional={promptRule === 'optional'} maxLength={spec?.prompt.max_length ?? null} />
       )}
 
@@ -222,10 +230,6 @@ const KIND_NOUN: Record<MediaKind, [string, string]> = {
   image: ['image', 'images'],
   video: ['video', 'videos'],
   audio: ['audio clip', 'audio clips'],
-}
-
-function article(label: string): string {
-  return /^[AEIOU]/.test(label) ? 'an' : 'a'
 }
 
 /** Which upstream blocks feed each input, shown only when there is more than one to choose from. */

@@ -158,12 +158,16 @@ export interface BlockDef extends NodeTypeDef {
    *  e.g. the Prompt Writer's text). A saved run keeps every other key as it
    *  was when the block started, and reads these when the run ends. */
   resultConfigKeys?: string[]
+  /** Short usage notes, one per line. When set, the block card's header shows an
+   *  info button that opens them (`components/pipeline/block-info-button.tsx`);
+   *  a block never builds its own. Omit for blocks that need no explanation. */
+  info?: string[]
   /** If true, this block is only visible when --advanced mode is enabled. */
   advanced?: boolean
   /** Block types inserted directly before this block whenever it is added (first block,
-   *  mid-chain or in a branch), in the same action. A type is skipped when the
-   *  enabled block directly upstream already has it, since that block is then the
-   *  closest source. Used by generation blocks to spawn their loader. */
+   *  mid-chain or in a branch), in the same action, in this order. A type is skipped
+   *  when an enabled block directly upstream already has it, since that block is then
+   *  the closest source. Used by generation blocks to spawn their loaders. */
   starterPrereqs?: string[]
   /** Block types this block stands in for as a starter prerequisite: when it is the
    *  enabled block directly upstream, those prerequisites are not inserted (the Load

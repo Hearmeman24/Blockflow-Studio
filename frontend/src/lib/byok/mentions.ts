@@ -42,6 +42,11 @@ function fill(template: string, n: number): string {
   return template.replaceAll('{n}', String(n))
 }
 
+/** The text that refers to the n-th reference of a kind (1-based) for this mode: "@image_1", "Video1". */
+export function mentionText(spec: ModeSpec | null | undefined, kind: MediaKind, n: number): string {
+  return fill((spec?.mentions ?? PLAIN)[kind], n)
+}
+
 export function referenceBadges(spec: ModeSpec | null | undefined, refs: readonly GenerationReference[]): ReferenceBadge[] {
   const mentions = spec?.mentions ?? PLAIN
   const out: ReferenceBadge[] = []

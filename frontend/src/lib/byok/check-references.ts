@@ -59,6 +59,10 @@ export function kindPlural(kind: MediaKind): string {
   return KIND_PLURAL[kind] ?? kind
 }
 
+export function kindSingular(kind: MediaKind): string {
+  return KIND_SINGULAR[kind] ?? kind
+}
+
 function isKnownKind(kind: string): kind is MediaKind {
   return (MEDIA_KINDS as readonly string[]).includes(kind)
 }

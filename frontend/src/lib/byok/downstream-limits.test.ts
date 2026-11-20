@@ -23,6 +23,17 @@ describe('computeDownstreamLimit', () => {
     expect(limit.limit?.max_size_bytes).toBe(30_000_000)
   })
 
+  it('caps a kind by the number of items the block itself uses (Character Swap: one video, one image)', () => {
+    const swap = consumer('characterSwap', 'Character Swap')
+    const image = computeDownstreamLimit(CATALOG_BOTH, swap, 'image', stored('kie', 'seedance-2.5'))!
+    expect(image.limit?.max_count).toBe(30)
+    expect(image.maxCount).toBe(1)
+    expect(computeDownstreamLimit(CATALOG_BOTH, swap, 'video', stored('kie', 'wan-3.0'))!.maxCount).toBe(1)
+    expect(computeDownstreamLimit(CATALOG_BOTH, swap, 'audio', stored('kie', 'wan-3.0'))).toBeNull()
+    // A saved model outside the block's list resolves the same way the block does.
+    expect(computeDownstreamLimit(CATALOG_BOTH, swap, 'image', stored('kie', 'seedance-2-fast'))!.model).toBe('wan-3.0')
+  })
+
   it('caps images in Image to Video by the frame slots the model has', () => {
     // Seedance 2 on Kie lists 9 images, but Image to Video only uses a first and a last frame.
     expect(computeDownstreamLimit(CATALOG_BOTH, consumer('imageToVideo'), 'image', stored('kie', 'seedance-2'))!.maxCount).toBe(2)

@@ -58,9 +58,10 @@ have so far only been tested against mocks, so expect bugs.
 
 ## Core capabilities
 
-- **Five generation blocks:** Text to Image, Image to Image, Text to Video,
-  Image to Video and Omni Reference to Video. A block only offers what your
-  keys can run.
+- **Six generation blocks:** Text to Image, Image to Image, Text to Video,
+  Image to Video, Omni Reference to Video and Character Swap (replace the
+  person in a video with the person from an image). A block only offers what
+  your keys can run.
 - **Cost before you run:** an estimate on each generation block, the
   provider's actual charge afterwards, and your balance per provider.
 - **Characters:** saved faces, audio and reference files, reused across flows.
