@@ -358,6 +358,31 @@ describe('GenerationBlockShell model switching', () => {
     expect(JSON.parse(sessionStorage.getItem('block_m3_params')!).resolution).toBeNull()
   })
 
+  it('a model switch keeps a resolution that only differs in letter case, stored in the new spelling, with no notice', async () => {
+    const user = userEvent.setup()
+    stubGenerationFetch({ catalog: CATALOG_BOTH })
+    // Kling on Kie writes "720p"; Wan 3.0 Prime writes "720P".
+    seed('m7', { provider: 'kie', model: 'kling-4.0', prompt: 'p', params: { duration: null, resolution: '720p', aspect_ratio: null, settings: {} } })
+    mount(OMNI, blockProps('m7'))
+    await user.click(await screen.findByRole('combobox', { name: 'Model' }))
+    await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('Wan 3.0 Prime'))!)
+    expect(screen.queryByText(/is not available for/)).toBeNull()
+    expect(JSON.parse(sessionStorage.getItem('block_m7_params')!).resolution).toBe('720P')
+  })
+
+  it('a reset notice goes away once the user picks a value for that setting', async () => {
+    const user = userEvent.setup()
+    stubGenerationFetch({ catalog: CATALOG_BOTH })
+    seed('m8', { provider: 'kie', model: 'seedance-2', params: { duration: null, resolution: '4k', aspect_ratio: null, settings: {} } })
+    mount(T2V, blockProps('m8'))
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(screen.getAllByRole('option').find((o) => o.textContent?.startsWith('PiAPI'))!)
+    expect(screen.getByText(/Resolution 4k is not available/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /Resolution/ }))
+    await user.click(await screen.findByRole('menuitemradio', { name: '720p' }))
+    expect(screen.queryByText(/Resolution 4k is not available/)).toBeNull()
+  })
+
   it('switching provider keeps a model the new provider does not offer, and says so (behaviour pinned)', async () => {
     const user = userEvent.setup()
     const harness = stubGenerationFetch({ catalog: CATALOG_BOTH })

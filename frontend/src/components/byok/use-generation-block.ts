@@ -167,6 +167,11 @@ function withoutPrompt(request: GenerationRequest | null): GenerationRequest | n
 }
 
 /** Drop the total-count message when a per-kind count message already says the same. */
+/** The value of a `ParamChange.field` ("resolution", "settings.audio") in `params`. */
+function fieldValue(params: ParamState, field: string): unknown {
+  return field.startsWith('settings.') ? params.settings[field.slice('settings.'.length)] : params[field as keyof ParamState]
+}
+
 function withoutRedundantCounts(issues: GenerationIssue[]): GenerationIssue[] {
   const perKind = issues.some((i) => i.code === 'too_few_references' && i.field !== 'references')
   return perKind ? issues.filter((i) => !(i.code === 'too_few_references' && i.field === 'references')) : issues
@@ -241,7 +246,8 @@ export function useGenerationBlock(
     if (nextSpec) {
       const nextWhere = `${findModel(catalog, nextModel)?.name ?? nextModel} on ${providerName(catalog, nextProvider)}`
       const result = reconcileParams(nextSpec, params, nextWhere)
-      if (result.changes.length > 0) setStoredParams(result.params)
+      // Also when only the spelling changed ("720p" -> "720P"): no notice, but the new value is what is sent.
+      if (result.params !== params) setStoredParams(result.params)
       setChanges(result.changes)
     } else {
       setChanges([])
@@ -273,7 +279,9 @@ export function useGenerationBlock(
       }
     }
     setStoredParams(next)
-  }, [catalog, provider, model, mode, spec, where, setStoredParams])
+    // A reset notice is about a value the user has now replaced: drop it for every field they changed.
+    setChanges((current) => current.filter((change) => fieldValue(next, change.field) === fieldValue(params, change.field)))
+  }, [catalog, provider, model, mode, spec, where, params, setStoredParams])
 
   // ---- References: they all come from upstream loader blocks ----
   const inputKinds = config.referenceKinds

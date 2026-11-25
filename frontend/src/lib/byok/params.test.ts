@@ -67,6 +67,36 @@ describe('reconcileParams', () => {
     expect(p.resolution).toBe('4k')
   })
 
+  it('carries a resolution that only differs in letter case, in the new model\'s spelling, with no notice', () => {
+    // Kling on Kie writes "720p"; Wan 3.0 Prime writes "720P". The same resolution.
+    const wanPrime = spec('kie', 'wan-3.0-prime', 'omni_reference_to_video')
+    const toWan = reconcileParams(wanPrime, params({ resolution: '720p' }), 'Wan 3.0 Prime on Kie')
+    expect(toWan.changes).toEqual([])
+    expect(toWan.params.resolution).toBe('720P')
+    const kling = spec('kie', 'kling-4.0', 'omni_reference_to_video')
+    const toKling = reconcileParams(kling, params({ resolution: '1080P' }), 'Kling 4.0 on Kie')
+    expect(toKling.changes).toEqual([])
+    expect(toKling.params.resolution).toBe('1080p')
+  })
+
+  it('carries an aspect ratio and a choice setting that only differ in letter case', () => {
+    const wan = spec('kie', 'wan-3.0', 'text_to_video')
+    const ratio = wan.aspect_ratios!.values.find((v) => /[a-z]/i.test(String(v)))
+    if (ratio) {
+      const swapped = String(ratio) === String(ratio).toUpperCase() ? String(ratio).toLowerCase() : String(ratio).toUpperCase()
+      const result = reconcileParams(wan, params({ aspect_ratio: swapped }), 'Wan 3.0 on Kie')
+      expect(result.changes).toEqual([])
+      expect(result.params.aspect_ratio).toBe(ratio)
+    }
+  })
+
+  it('still resets a resolution the new model really lacks', () => {
+    const kling = spec('kie', 'kling-4.0', 'omni_reference_to_video')
+    const result = reconcileParams(kling, params({ resolution: '480P' }), 'Kling 4.0 on Kie')
+    expect(result.params.resolution).toBeNull()
+    expect(result.changes[0]).toMatchObject({ field: 'resolution', from: '480P' })
+  })
+
   it('resets an out-of-range or automatic duration', () => {
     const piapi = spec('piapi', 'seedance-2', 'text_to_video')
     expect(reconcileParams(piapi, params({ duration: 30 }), where).changes[0]).toMatchObject({ field: 'duration', from: 30, to: 5 })

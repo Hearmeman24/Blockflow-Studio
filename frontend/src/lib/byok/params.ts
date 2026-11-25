@@ -77,7 +77,20 @@ function show(value: SettingValue): string {
 }
 
 /**
- * Check stored values against a newly selected spec. Values the spec cannot
+ * The spec's own spelling of `value` when it differs only in letter case
+ * (Kling writes "720p", Wan "720P": the same resolution), else null.
+ */
+function sameChoice(values: readonly (string | number | boolean)[], value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const lower = value.toLowerCase()
+  const found = values.find((v): v is string => typeof v === 'string' && v.toLowerCase() === lower)
+  return found ?? null
+}
+
+/**
+ * Check stored values against a newly selected spec. A value that differs from
+ * one of the spec's choices only in letter case is carried over in the spec's
+ * spelling, with no notice. Values the spec cannot
  * use are reset to its default, and each reset is returned so the UI can show
  * it; nothing changes silently. Values for fields the spec does not have are
  * kept (they are not sent) so switching back restores them. Pure.
@@ -104,21 +117,40 @@ export function reconcileParams(
     reset('duration', 'Duration', params.duration, defaults.duration)
     next.duration = null
   }
+  let respelled = false
   if (spec.resolutions && params.resolution !== null && !spec.resolutions.values.includes(params.resolution)) {
-    reset('resolution', 'Resolution', params.resolution, defaults.resolution)
-    next.resolution = null
+    const same = sameChoice(spec.resolutions.values, params.resolution)
+    if (same !== null) {
+      next.resolution = String(same)
+      respelled = true
+    } else {
+      reset('resolution', 'Resolution', params.resolution, defaults.resolution)
+      next.resolution = null
+    }
   }
   if (spec.aspect_ratios && params.aspect_ratio !== null && !spec.aspect_ratios.values.includes(params.aspect_ratio)) {
-    reset('aspect_ratio', 'Aspect ratio', params.aspect_ratio, defaults.aspect_ratio)
-    next.aspect_ratio = null
+    const same = sameChoice(spec.aspect_ratios.values, params.aspect_ratio)
+    if (same !== null) {
+      next.aspect_ratio = String(same)
+      respelled = true
+    } else {
+      reset('aspect_ratio', 'Aspect ratio', params.aspect_ratio, defaults.aspect_ratio)
+      next.aspect_ratio = null
+    }
   }
   for (const setting of spec.settings) {
     const value = params.settings[setting.key]
     if (value === undefined || value === null || isValidSetting(setting, value)) continue
+    const same = setting.type === 'bool' || setting.type === 'int' ? null : sameChoice(setting.choices, value)
+    if (same !== null) {
+      next.settings[setting.key] = same
+      respelled = true
+      continue
+    }
     reset(`settings.${setting.key}`, setting.label, value, setting.default)
     next.settings[setting.key] = null
   }
-  return changes.length > 0 ? { params: next, changes } : { params, changes }
+  return changes.length > 0 || respelled ? { params: next, changes } : { params, changes }
 }
 
 /** The `params` object for validate/submit: only fields the spec has, without empty values. */
