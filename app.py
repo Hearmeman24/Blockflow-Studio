@@ -271,12 +271,17 @@ BACKEND_GRACEFUL_SHUTDOWN_S = 2
 KILL_WAIT_S = 2.0
 
 
-def _backend_command(backend_port: int) -> list[str]:
+def _backend_command(backend_port: int, host: str = "127.0.0.1") -> list[str]:
+    """The backend listens where the web interface does (``_current_frontend_host``):
+    uploads, character files, Video FX and the updater call its port directly from
+    the page's own host name (``frontend/src/lib/backend-url.ts``), which from another
+    device only works when it is not bound to 127.0.0.1. Its origin guard still
+    refuses changes from pages outside the allowed origins."""
     return [
         sys.executable, "-m", "uvicorn",
         "--timeout-graceful-shutdown", str(BACKEND_GRACEFUL_SHUTDOWN_S),
         "backend.main:app",
-        "--host", "127.0.0.1",
+        "--host", host,
         "--port", str(backend_port),
     ]
 
@@ -299,10 +304,11 @@ def _current_frontend_host() -> str:
 def _listen_line(host: str) -> str:
     """The one launcher line about where the web interface listens."""
     if host == ALL_IPV4_HOST:
-        return (f"[app] The web interface listens on every network address ({host}): {ORIGINS_ENV} or the "
-                "allowed origins setting is set, so other devices can open it. Clear both and restart to keep "
-                "it on this computer only.")
-    return (f"[app] The web interface listens on this computer only ({host}). To use it from another device, "
+        return (f"[app] The web interface and the backend listen on every network address ({host}): "
+                f"{ORIGINS_ENV} or the allowed origins setting is set, so other devices can open it. Clear both "
+                "and restart to keep it on this computer only.")
+    return (f"[app] The web interface and the backend listen on this computer only ({host}). To use it from "
+            "another device, "
             f"set {ORIGINS_ENV} to that address and restart (see README.md).")
 
 
@@ -647,8 +653,9 @@ def _launch(signals: StopSignals) -> LaunchOutcome:
 
     def start_backend() -> subprocess.Popen:
         print(f"[app] Starting FastAPI on :{backend_port}...")
+        host = _current_frontend_host()  # the same address as the web interface; read again on every (re)start
         return _spawn(
-            _backend_command(backend_port),
+            _backend_command(backend_port, host=host),
             cwd=ROOT,
             env=_backend_env(control_dir=control_dir, packaged=packaged,
                              backend_port=backend_port, frontend_port=frontend_port),

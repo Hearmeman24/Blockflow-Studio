@@ -68,6 +68,25 @@ def test_the_built_server_and_dev_bind_the_given_host():
     assert command[-2:] == ["--hostname", "0.0.0.0"]
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
+def test_the_backend_binds_the_same_host_as_the_web_interface(host):
+    """Uploads, character files, Video FX and the updater call the backend's
+    port directly (lib/backend-url.ts), from the page's own host name. From
+    another device that only works when the backend listens where the web
+    interface does."""
+    command = _app()._backend_command(4124, host=host)
+    assert command[command.index("--host") + 1] == host
+
+
+def test_the_backend_and_the_web_interface_start_on_one_host_decision(monkeypatch):
+    """Both servers take their address from one call per (re)start, so they
+    cannot disagree when the setting changes between two starts."""
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    start_backend = source[source.index("def start_backend"):source.index("def start_frontend")]
+    assert "_current_frontend_host()" in start_backend
+    assert "_backend_command(backend_port, host=" in start_backend
+
+
 @pytest.mark.parametrize("host,says", [
     ("127.0.0.1", ["this computer only", "BLOCKFLOW_ALLOWED_ORIGINS"]),
     ("0.0.0.0", ["every network address", "BLOCKFLOW_ALLOWED_ORIGINS"]),
