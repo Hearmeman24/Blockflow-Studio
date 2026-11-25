@@ -1,4 +1,8 @@
-/** Image, Video and Audio Viewer offer a Download link for the selected item, above the footer divider. */
+/**
+ * Image, Video and Audio Viewer offer a Download link for the selected item:
+ * in the Image and Video Viewer an icon link in the bottom row (below the
+ * divider), in the Audio Viewer at the end of its footer line.
+ */
 import { beforeEach, describe, expect, it } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { SWRConfig } from 'swr'
@@ -35,16 +39,16 @@ const cases = [
 describe.each(cases)('$name download', ({ def, port, ext, select }) => {
   const url = (n: string) => `/outputs/${n}.${ext}`
 
-  it('offers the selected item above the footer divider, without a #t fragment', () => {
+  it('offers the selected item in the bottom row, after the divider, without a #t fragment', () => {
     mount(def, port, [url('a'), url('b')])
     const link = screen.getByRole('link', { name: `Download b.${ext}` })
     expect(link).toHaveAttribute('href', url('b'))
     expect(link).toHaveAttribute('download', `b.${ext}`)
     expect(link.getAttribute('href')).not.toContain('#')
+    expect(screen.getByTestId('viewer-footer')).toContainElement(link)
     const footer = screen.getByTestId('viewer-footer').closest('[data-slot="block-footer"]')!
-    expect(footer).toContainElement(link)
     const separator = footer.querySelector('[data-slot="separator"]')!
-    expect(link.compareDocumentPosition(separator) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(link.compareDocumentPosition(separator) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
   })
 
   it('follows the selection', () => {
@@ -67,7 +71,7 @@ describe.each(cases)('$name download', ({ def, port, ext, select }) => {
 })
 
 describe('Audio Viewer download', () => {
-  it('shows the Download button above a footer carrying the file name, and drops the old text link', () => {
+  it('shows the Download link in a footer carrying the file name, and drops the old text link', () => {
     mount(audioViewer, 'audio', ['/outputs/a.wav', '/outputs/b.wav'])
     const links = screen.getAllByRole('link')
     expect(links).toHaveLength(1)
@@ -76,6 +80,16 @@ describe('Audio Viewer download', () => {
     expect(screen.queryByText('download')).toBeNull()
     const footer = links[0].closest('[data-slot="block-footer"]')!
     expect(footer).toHaveTextContent('/outputs/b.wav')
+  })
+
+  it('is an icon link at the end of the one footer line, like the other viewers', () => {
+    mount(audioViewer, 'audio', ['/outputs/a.wav'])
+    const link = screen.getByRole('link', { name: 'Download a.wav' })
+    const row = screen.getByTestId('viewer-footer')
+    expect(row).toContainElement(link)
+    expect(row.lastElementChild).toBe(link)
+    expect(link.textContent).toBe('')
+    expect(link).toHaveAttribute('title', '/outputs/a.wav')
   })
 
   it('follows the selection and is absent when empty', () => {

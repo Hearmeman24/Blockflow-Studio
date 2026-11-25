@@ -1,8 +1,8 @@
 /**
  * The viewer strips (Image, Video and Audio Viewer) render at most the latest
- * 30 outputs, with Show older to reveal more; the count line keeps the true
- * total, and selecting a revealed output still drives the footer (and its
- * Download button). Strip thumbnails load lazily: images with
+ * 30 outputs, with Show older to reveal more; the "n / N" counter keeps the
+ * true total, and selecting a revealed output still drives the footer's
+ * Download link (whose tooltip is the file path). Strip thumbnails load lazily: images with
  * `loading="lazy"`, videos with `preload="none"` and no source until they
  * scroll into view, then their metadata and first frame. The stored history
  * is capped, oldest dropped, so a Loop cannot grow it without bound.
@@ -56,18 +56,18 @@ function mount(def: typeof imageViewer, port: string, urls: string[]) {
 const outputs = (n: number, ext: string, from = 0) => Array.from({ length: n }, (_, i) => `/outputs/o${from + i}.${ext}`)
 
 const cases = [
-  { name: 'Image Viewer', def: imageViewer, port: 'image', ext: 'png', tag: 'img', noun: 'image', select: 'Select image' },
-  { name: 'Video Viewer', def: videoViewer, port: 'video', ext: 'mp4', tag: 'video', noun: 'video', select: 'Select video' },
+  { name: 'Image Viewer', def: imageViewer, port: 'image', ext: 'png', tag: 'img', select: 'Select image' },
+  { name: 'Video Viewer', def: videoViewer, port: 'video', ext: 'mp4', tag: 'video', select: 'Select video' },
 ] as const
 
-describe.each(cases)('$name strip', ({ def, port, ext, tag, noun, select }) => {
+describe.each(cases)('$name strip', ({ def, port, ext, tag, select }) => {
   const stripItems = () => screen.queryAllByRole('button', { name: new RegExp(`^${select} `) })
   const stripMedia = () =>
     stripItems().map((b) => b.querySelector(tag)).filter(Boolean) as HTMLElement[]
 
   it('renders at most 30 media elements for 200 outputs; the count keeps the total', () => {
     const { container } = mount(def, port, outputs(200, ext))
-    expect(screen.getByText(`200 ${noun}s`)).toBeInTheDocument()
+    expect(screen.getByTestId('viewer-counter')).toHaveTextContent('200 / 200')
     expect(stripItems()).toHaveLength(30)
     // the strip plus the one large frame
     expect(container.querySelectorAll(tag).length).toBeLessThanOrEqual(31)
@@ -86,15 +86,17 @@ describe.each(cases)('$name strip', ({ def, port, ext, tag, noun, select }) => {
     expect(screen.queryByRole('button', { name: /show older/i })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: `${select} 2` }))
-    expect(within(screen.getByTestId('viewer-footer')).getByText(`/outputs/o1.${ext}`)).toBeInTheDocument()
-    expect(screen.getByText(`2/75`)).toBeInTheDocument()
+    expect(within(screen.getByTestId('viewer-footer')).getByRole('link', { name: `Download o1.${ext}` }))
+      .toHaveAttribute('title', `/outputs/o1.${ext}`)
+    expect(screen.getByTestId('viewer-counter')).toHaveTextContent('2 / 75')
   })
 
   it('stores at most 200 outputs, dropping the oldest', () => {
     const { show } = mount(def, port, outputs(150, ext))
     show(outputs(100, ext, 150))
-    expect(screen.getByText(`200 ${noun}s`)).toBeInTheDocument()
-    expect(within(screen.getByTestId('viewer-footer')).getByText(`/outputs/o249.${ext}`)).toBeInTheDocument()
+    expect(screen.getByTestId('viewer-counter')).toHaveTextContent('200 / 200')
+    expect(within(screen.getByTestId('viewer-footer')).getByRole('link', { name: `Download o249.${ext}` }))
+      .toHaveAttribute('title', `/outputs/o249.${ext}`)
   })
 })
 

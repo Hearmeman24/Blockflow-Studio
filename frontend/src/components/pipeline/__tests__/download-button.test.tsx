@@ -39,6 +39,16 @@ describe('DownloadButton', () => {
     expect(screen.getByRole('link')).not.toHaveAttribute('target')
   })
 
+  it('has an icon-only variant: same link and name, no visible text, the URL as its tooltip', () => {
+    render(<DownloadButton url="/outputs/cat.png" iconOnly />)
+    const link = screen.getByRole('link', { name: 'Download cat.png' })
+    expect(link).toHaveAttribute('href', '/outputs/cat.png')
+    expect(link).toHaveAttribute('download', 'cat.png')
+    expect(link).toHaveAttribute('title', '/outputs/cat.png')
+    expect(link.textContent).toBe('')
+    expect(link.querySelector('svg')).not.toBeNull()
+  })
+
   it('opens another origin in a new tab, so the app tab is never navigated away', () => {
     render(<DownloadButton url="https://tmpfiles.org/dl/1/clip.mp4" />)
     const link = screen.getByRole('link', { name: 'Download clip.mp4' })

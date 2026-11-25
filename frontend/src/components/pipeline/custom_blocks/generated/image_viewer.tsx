@@ -2,8 +2,7 @@
 // Source: custom_blocks/image_viewer/frontend.block.tsx
 'use client'
 
-import { useEffect, useMemo } from 'react'
-import { AdaptiveImageFrame } from '@/components/adaptive-media'
+import { useEffect } from 'react'
 import {
   PORT_IMAGE,
   type BlockDef,
@@ -11,12 +10,9 @@ import {
 } from '@/lib/pipeline/registry'
 import { usePipeline } from '@/lib/pipeline/pipeline-context'
 import { useViewerHistory } from '@/lib/use-viewer-history'
-
 import { toDisplayUrls } from '@/lib/image-ref'
-import { BlockFooter } from '@/components/pipeline/block-footer'
-import { DownloadButton } from '@/components/pipeline/download-button'
-import { ShowOlderButton } from '@/components/pipeline/viewer-strip'
-import { OutputCostLabel, PriceMismatchBadge, useOutputMeta } from '@/components/byok/output-cost'
+import { MediaViewer } from '@/components/pipeline/media-viewer'
+import { useOutputMeta } from '@/components/byok/output-cost'
 
 function toImageUrls(value: unknown): string[] {
   // Browser display — local /outputs URLs are served by FastAPI, so prefer
@@ -33,16 +29,8 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
   const metaByUrl = useOutputMeta([inputs.image, blockStates.get(blockId)?.outputs.image])
 
   const currentUrls = imageUrls.length > 0 ? imageUrls : ownOutputUrls
-  const {
-    history: accumulatedUrls, displayUrls, selectedIndex, select: setSelectedIndex, clear, stripStart, hiddenOlder, showOlder,
-  } = useViewerHistory(currentUrls)
-  const isStale = !isLooping && currentUrls.length === 0 && accumulatedUrls.length > 0
-
-  const selectedImage = useMemo(() => {
-    if (displayUrls.length === 0) return ''
-    const idx = Math.min(selectedIndex, displayUrls.length - 1)
-    return displayUrls[idx]
-  }, [displayUrls, selectedIndex])
+  const viewer = useViewerHistory(currentUrls)
+  const isStale = !isLooping && currentUrls.length === 0 && viewer.history.length > 0
 
   useEffect(() => {
     registerExecute(async (freshInputs) => {
@@ -51,79 +39,7 @@ function ImageViewerBlock({ blockId, inputs, registerExecute }: BlockComponentPr
     })
   })
 
-  if (displayUrls.length === 0) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <p className="text-sm text-muted-foreground">Waiting for image input…</p>
-      </div>
-    )
-  }
-
-  return (
-    <div className={`${isStale ? 'opacity-40' : ''} transition-opacity duration-300`}>
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">{displayUrls.length} image{displayUrls.length === 1 ? '' : 's'}</p>
-        <div className="flex items-center gap-2">
-          {isStale && (
-            <span className="text-[10px] text-yellow-500 font-medium">Previous run</span>
-          )}
-          {accumulatedUrls.length > 1 && (
-            <button
-              type="button"
-              onClick={clear}
-              className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Clear
-            </button>
-          )}
-          <p className="text-[10px] text-muted-foreground">{Math.min(selectedIndex + 1, displayUrls.length)}/{displayUrls.length}</p>
-        </div>
-      </div>
-
-      <AdaptiveImageFrame src={selectedImage} alt={`Generated image ${Math.min(selectedIndex + 1, displayUrls.length)}`} />
-
-      {displayUrls.length > 1 && (
-        <div className="overflow-y-auto max-h-[min(50vh,400px)] pr-1">
-          <ShowOlderButton hidden={hiddenOlder} onClick={showOlder} />
-          <div className="grid grid-cols-4 gap-2">
-            {displayUrls.slice(stripStart).map((url, i) => {
-              const idx = stripStart + i
-              const isActive = idx === Math.min(selectedIndex, displayUrls.length - 1)
-              return (
-                <button
-                  key={`${url}-${idx}`}
-                  type="button"
-                  onClick={() => setSelectedIndex(idx)}
-                  className={`relative overflow-hidden rounded border ${isActive ? 'border-blue-400' : 'border-border/60 hover:border-border'}`}
-                  aria-label={`Select image ${idx + 1}`}
-                >
-                  <img
-                    src={url}
-                    alt={`Variant ${idx + 1}`}
-                    loading="lazy"
-                    decoding="async"
-                    className="w-full bg-black/30"
-                  />
-                  <span className="absolute right-1 top-1 rounded bg-black/70 px-1 text-[10px] text-white">
-                    {idx + 1}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
-
-      <BlockFooter testId="viewer-footer" actions={<DownloadButton url={selectedImage} />}>
-        <span className="min-w-0 flex-1 truncate" title={selectedImage}>{selectedImage}</span>
-        <OutputCostLabel
-          meta={metaByUrl.get(selectedImage)}
-          outputsOfJob={displayUrls.filter((u) => metaByUrl.get(u)?.job_id === metaByUrl.get(selectedImage)?.job_id).length}
-        />
-        <PriceMismatchBadge meta={metaByUrl.get(selectedImage)} />
-      </BlockFooter>
-    </div>
-  )
+  return <MediaViewer kind="image" viewer={viewer} metaByUrl={metaByUrl} stale={isStale} />
 }
 
 export const blockDef: BlockDef = {

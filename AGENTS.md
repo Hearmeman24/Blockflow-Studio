@@ -582,10 +582,16 @@ is allowed only when labelled as one, with follow-up work tracked.
   `AlertPanel`, `EmptyState`, `PageHeader`, `FavoriteButton`,
   `DeleteIconButton`, `BlockField`, `BlockFooter` (a top-level item of the
   block, which the body makes a flex column; its `actions` slot sits above the
-  divider), `pipeline/download-button` (the viewers' Download link),
-  `pipeline/viewer-strip` (`ShowOlderButton` and `LazyVideoThumb` for the
-  viewer strips, which render the latest `VIEWER_STRIP_PAGE` entries of
-  `useViewerHistory`), `BlockRoleTile`,
+  divider), `pipeline/download-button` (the viewers' Download link;
+  `iconOnly` for a bottom row, with the path as its tooltip),
+  `pipeline/viewer-strip` (`ShowOlderButton`, `LazyVideoThumb` and
+  `MediaStrip` for the viewer strips, which render the latest
+  `VIEWER_STRIP_PAGE` entries of `useViewerHistory`),
+  `pipeline/media-viewer` (`MediaViewer`, the Image and Video Viewer body: the
+  media at its own aspect ratio, the counter and "Open full screen" on it, and
+  one bottom row of thumbnails, cost, Clear and Download) with
+  `pipeline/media-lightbox` (`MediaLightbox`, its full-screen Dialog, which
+  shares the viewer's selection), `BlockRoleTile`,
   `pipeline/collapsible-section`, `pipeline/block-info-button` (rendered by the
   block card from `BlockDef.info`), `ChipTooltip`,
   `byok/media-thumb`, and the `lib/` helpers. Add to a shared module before

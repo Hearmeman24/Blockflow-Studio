@@ -95,11 +95,9 @@ function AudioViewerBlock({ blockId, inputs }: BlockComponentProps) {
               clear history
             </button>
           )}
-          <BlockFooter
-            testId="viewer-footer"
-            actions={<DownloadButton url={selected} />}
-          >
+          <BlockFooter testId="viewer-footer">
             <span className="min-w-0 flex-1 truncate" title={selected}>{selected}</span>
+            <DownloadButton url={selected} iconOnly />
           </BlockFooter>
         </>
       )}

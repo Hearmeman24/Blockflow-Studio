@@ -1,6 +1,6 @@
 /**
  * Image Viewer and Video Viewer show the actual cost of the output they
- * display, from the generation metadata on the ref, in their footer line.
+ * display, from the generation metadata on the ref, in their bottom row.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
@@ -49,7 +49,7 @@ describe('Image Viewer cost', () => {
     const Comp = imageViewer.component
     render(wrap(<Comp {...blockProps('iv1', { image: { kind: 'image-ref', local: '/outputs/a.png', meta: meta('job-1', cost(205)) } })} />))
     const footer = await screen.findByTestId('viewer-footer')
-    expect(footer).toHaveTextContent('/outputs/a.png')
+    expect(within(footer).getByRole('link', { name: 'Download a.png' })).toHaveAttribute('title', '/outputs/a.png')
     const label = within(footer).getByTestId('output-cost')
     expect(label).toHaveTextContent('205 credits')
     await user.hover(label)
@@ -157,7 +157,7 @@ describe('Video Viewer cost', () => {
     const Comp = videoViewer.component
     render(wrap(<Comp {...blockProps('vv1', { video: { kind: 'video-ref', local: '/outputs/v.mp4', meta: meta('job-5', cost(300)) } })} />))
     const footer = await screen.findByTestId('viewer-footer')
-    expect(footer).toHaveTextContent('/outputs/v.mp4')
+    expect(within(footer).getByRole('link', { name: 'Download v.mp4' })).toHaveAttribute('title', '/outputs/v.mp4')
     expect(within(footer).getByTestId('output-cost')).toHaveTextContent('300 credits')
   })
 

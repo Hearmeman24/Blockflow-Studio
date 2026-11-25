@@ -31,18 +31,23 @@ function mount(def: typeof imageViewer, port: string, first: string[]) {
 }
 
 const cases = [
-  { name: 'Image Viewer', def: imageViewer, port: 'image', ext: 'png', clear: 'Clear', count: (n: number) => `${n} image${n === 1 ? '' : 's'}`, empty: 'Waiting for image input…' },
-  { name: 'Video Viewer', def: videoViewer, port: 'video', ext: 'mp4', clear: 'Clear', count: (n: number) => `${n} video${n === 1 ? '' : 's'}`, empty: 'Waiting for video input…' },
+  { name: 'Image Viewer', def: imageViewer, port: 'image', ext: 'png', clear: 'Clear', empty: 'Waiting for image input…' },
+  { name: 'Video Viewer', def: videoViewer, port: 'video', ext: 'mp4', clear: 'Clear', empty: 'Waiting for video input…' },
 ] as const
 
-describe.each(cases)('$name history', ({ def, port, ext, clear, count, empty }) => {
+describe.each(cases)('$name history', ({ def, port, ext, clear, empty }) => {
   const url = (n: string) => `/outputs/${n}.${ext}`
+  /** How many outputs the viewer holds: the "n / N" counter, which a single output does not show. */
+  const count = () => screen.queryByTestId('viewer-counter')?.textContent?.split(' / ')[1] ?? (screen.queryByTestId('media-frame') ? '1' : '0')
+  /** The output the Download link offers, by its path (the link's tooltip). */
+  const offered = () => screen.getByRole('link', { name: /^Download / }).getAttribute('title')
 
   it('appends each new output', () => {
     const { show } = mount(def, port, [url('a')])
-    expect(screen.getByText(count(1))).toBeInTheDocument()
+    expect(count()).toBe('1')
     show([url('b')])
-    expect(screen.getByText(count(2))).toBeInTheDocument()
+    expect(count()).toBe('2')
+    expect(offered()).toBe(url('b'))
   })
 
   it('Clear hides the current output until a new one arrives', () => {
@@ -54,7 +59,8 @@ describe.each(cases)('$name history', ({ def, port, ext, clear, count, empty }) 
     show([url('b')])
     expect(screen.getByText(empty)).toBeInTheDocument()
     show([url('c')])
-    expect(screen.getByText(count(1))).toBeInTheDocument()
+    expect(count()).toBe('1')
+    expect(offered()).toBe(url('c'))
   })
 })
 
